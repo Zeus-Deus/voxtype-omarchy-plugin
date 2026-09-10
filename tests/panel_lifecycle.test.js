@@ -245,7 +245,7 @@ test('a missing config.toml locks the panel with a copyable, never executed, vox
   assert.equal(h.root.lockedCommand, 'voxtype setup');
   assert.equal(h.root.primary, '');
   h.root.activateCursor();
-  assert.deepEqual(h.copies, ['voxtype setup'], 'Enter copies the command');
+  assert.deepEqual(h.copies.slice(), ['voxtype setup'], 'Enter copies the command');
   assert.equal(h.root.notice, 'Copied');
   h.root.toggleRecord();
   h.root.setSetting('engine', 'parakeet');
@@ -271,4 +271,37 @@ test('an engine switch shows a neutral loading state until its catalog arrives',
   h.complete('models.list', {ok: true, engine: 'parakeet', models: []}, {op: 'models.list', engine: 'parakeet'});
   assert.equal(h.root.modelsLoading, false, 'now an honest empty state');
   assert.match(panel, /title: root\.modelsLoading \? "Reading the model catalog…" : "No models known for " \+ root\.engine/);
+});
+
+test('u resets the cursor setting to its default only when the key is actually set', () => {
+  const h = panelHarness();
+  h.root.section = 'settings';
+  h.root.snapshot = {settings: {'whisper.language': 'en', 'hotkey.modifiers': ['LEFTCTRL']}};
+  h.root.handleTextKey('u');
+  assert.equal(h.requests.length, 0, 'no cursor, nothing happens');
+  h.root.setCursor('whisper.language', -1);
+  h.root.handleTextKey('u');
+  assert.deepEqual(JSON.parse(JSON.stringify(h.requests)), [{op: 'settings.unset', path: 'whisper.language'}]);
+  h.root.setCursor('audio.device', -1);
+  h.root.handleTextKey('u');
+  assert.equal(h.requests.length, 1, 'already at default: no write');
+  h.root.setCursor('hotkey.mod.LEFTALT', -1);
+  h.root.handleTextKey('u');
+  assert.deepEqual(JSON.parse(JSON.stringify(h.requests[1])), {op: 'settings.unset', path: 'hotkey.modifiers'});
+  h.root.setCursor('gpu.enable', -1);
+  h.root.handleTextKey('u');
+  assert.equal(h.requests.length, 2, 'GPU buttons are not settings');
+  h.root.section = 'models';
+  h.root.setCursor('engine', -1);
+  h.root.handleTextKey('u');
+  assert.equal(h.requests.length, 2, 'u is a Settings-only verb');
+  // Every settings component carries the reset action and the default tag.
+  for (const c of ['SettingToggle', 'SettingDropdown', 'SettingNumber', 'SettingText', 'SettingSlider']) {
+    const body = panel.slice(panel.indexOf('component ' + c + ':'));
+    const own = body.slice(0, body.indexOf('\n    component ', 10) > 0 ? body.indexOf('\n    component ', 10) : undefined);
+    assert.match(own, /SettingLabel \{|ResetButton \{/, c + ' has a reset action');
+    assert.match(own, /readonly property bool isSet: Model\.settingIsSet\(root\.config, settingKey\)/, c);
+  }
+  assert.match(panel, /component ResetButton: PanelActionButton \{[\s\S]*?iconText: "󰕌"[\s\S]*?onClicked: root\.unsetSetting\(settingKey\)/);
+  assert.match(panel, /visible: !labelRow\.isSet; text: "default"/);
 });

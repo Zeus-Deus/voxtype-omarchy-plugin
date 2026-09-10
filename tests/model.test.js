@@ -123,6 +123,16 @@ test('settings helpers', () => {
   const cfg = {'audio.device': 'default', 'hotkey.modifiers': ['LEFTCTRL']};
   assert.equal(Model.settingValue(cfg, 'audio.device', 'x'), 'default');
   assert.equal(Model.settingValue(cfg, 'missing', 'x'), 'x');
+  assert.equal(Model.settingIsSet(cfg, 'audio.device'), true);
+  assert.equal(Model.settingIsSet(cfg, 'missing'), false);
+  assert.equal(Model.settingIsSet({x: null}, 'x'), false);
+  assert.equal(Model.settingIsSet(null, 'x'), false);
+  assert.equal(Model.resettableSetting('hotkey.mod.LEFTCTRL'), 'hotkey.modifiers');
+  assert.equal(Model.resettableSetting('whisper.language'), 'whisper.language');
+  assert.equal(Model.resettableSetting('remote.clear'), '');
+  assert.equal(Model.resettableSetting('gpu.enable'), '');
+  assert.equal(Model.resettableSetting('gpu.device'), '');
+  assert.equal(Model.resettableSetting(''), '');
   assert.equal(Model.settingChanged(cfg, 'audio.device', 'default'), false);
   assert.equal(Model.settingChanged(cfg, 'audio.device', 'other'), true);
   assert.equal(Model.settingChanged(cfg, 'hotkey.modifiers', ['LEFTCTRL']), false);

@@ -221,6 +221,24 @@ function settingValue(settings, path, fallback) {
     return v === null || v === undefined ? fallback : v;
 }
 
+// A key absent from the snapshot means voxtype's own default is in effect.
+function settingIsSet(settings, path) {
+    if (!settings || !(path in settings)) return false;
+    var v = settings[path];
+    return v !== null && v !== undefined;
+}
+
+// Which setting `u` (reset to default) unsets for a cursor key. Modifier
+// chips reset the whole modifier list; non-setting cursor targets (GPU
+// buttons, Clear key) have nothing to reset.
+function resettableSetting(cursorKey) {
+    var k = String(cursorKey || "");
+    if (k === "") return "";
+    if (k.indexOf("hotkey.mod.") === 0) return "hotkey.modifiers";
+    if (k === "remote.clear" || k.indexOf("gpu.") === 0) return "";
+    return k;
+}
+
 function settingChanged(settings, path, value) {
     var current = settings ? settings[path] : undefined;
     return JSON.stringify(current === undefined ? null : current) !== JSON.stringify(value === undefined ? null : value);
@@ -271,7 +289,7 @@ function sectionHints(section, context) {
     if (section === "dictate") return "Enter record   Ctrl+R restart   1–5 sections";
     if (section === "vocabulary") return c.editing ? "Enter add   Esc back" : "/ search   a add   x delete   Tab next";
     if (section === "dictionary") return c.editing ? "Enter save   Esc cancel" : "/ search   a add   c category   x delete";
-    if (section === "settings") return "↑↓ move   Enter change   Space toggle   Tab next";
+    if (section === "settings") return c.editing ? "Enter save   Esc cancel" : "↑↓ move   Enter change   u reset   Tab next";
     if (section === "models") return "↑↓ move   Enter set active   d download   x delete";
     return "";
 }

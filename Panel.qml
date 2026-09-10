@@ -258,6 +258,11 @@ Panel {
         service.run({op: "settings.set", path: path, value: value});
     }
     function unsetSetting(path) { if (!locked) service.run({op: "settings.unset", path: path}) }
+    function resetCursorSetting() {
+        if (!cursorActive) return;
+        var path = Model.resettableSetting(cursorKey);
+        if (path !== "" && Model.settingIsSet(config, path)) unsetSetting(path);
+    }
     function toggleModifier(mod) {
         var mods = Model.settingValue(config, "hotkey.modifiers", []);
         setSetting("hotkey.modifiers", Model.toggleInList(mods, mod));
@@ -464,6 +469,7 @@ Panel {
         else if (t === "a" && section === "dictionary") dictFrom.forceActiveFocus();
         else if (t === "c" && section === "dictionary") cycleRuleCategory();
         else if (t === "d" && section === "models") downloadCursorModel();
+        else if (t === "u" && section === "settings") resetCursorSetting();
         else if (t === "r" || t === "R") toggleRecord();
     }
     onFilteredVocabularyChanged: clampCursor()
@@ -1007,6 +1013,17 @@ Panel {
                                             onClicked: root.toggleModifier(modelData)
                                         }
                                     }
+                                    Text {
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        textFormat: Text.PlainText; visible: !Model.settingIsSet(root.config, "hotkey.modifiers"); text: "default"
+                                        color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption
+                                    }
+                                    ResetButton {
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        visible: root.cursorActive && root.cursorKey.indexOf("hotkey.mod.") === 0
+                                        enabled: Model.settingIsSet(root.config, "hotkey.modifiers") && !service.mutating
+                                        settingKey: "hotkey.modifiers"
+                                    }
                                 }
                                 SettingToggle { settingKey: "hotkey.enabled"; label: "Hotkey enabled"; description: "Turn off to drive recording from the panel or `voxtype record` only"; fallback: true }
 
@@ -1422,10 +1439,45 @@ Panel {
         Text { width: parent.width; horizontalAlignment: Text.AlignHCenter; textFormat: Text.PlainText; wrapMode: Text.WordWrap; text: empty.title; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.subtitle }
         Text { width: parent.width; horizontalAlignment: Text.AlignHCenter; textFormat: Text.PlainText; wrapMode: Text.WordWrap; text: empty.hint; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body }
     }
+    // Label row above a settings control: label, a "default" tag when the key
+    // is absent from the snapshot, and a reset action on the cursor row.
+    component SettingLabel: Item {
+        id: labelRow
+        required property string settingKey
+        property string label: ""
+        property bool hasCursor: false
+        property bool isSet: false
+        width: parent ? parent.width : implicitWidth
+        height: Math.max(labelText.implicitHeight, resetButton.implicitHeight)
+        Text {
+            id: labelText
+            anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText; text: labelRow.label
+            color: labelRow.isSet ? Qt.darker(root.foreground, 1.4) : root.muted
+            font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true
+        }
+        Text {
+            anchors.left: labelText.right; anchors.leftMargin: Style.space(6); anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText; visible: !labelRow.isSet; text: "default"
+            color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption
+        }
+        ResetButton { id: resetButton; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; visible: labelRow.hasCursor; enabled: labelRow.isSet; settingKey: labelRow.settingKey }
+    }
+    component ResetButton: PanelActionButton {
+        required property string settingKey
+        iconText: "󰕌"
+        size: Style.space(18)
+        fontSize: Style.font.caption
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+        tooltipText: enabled ? "u · reset to default" : "Using the default"
+        onClicked: root.unsetSetting(settingKey)
+    }
     component SettingToggle: Toggle {
         id: toggleRow
         required property string settingKey
         property bool fallback: false
+        readonly property bool isSet: Model.settingIsSet(root.config, settingKey)
         function activate() { clicked() }
         width: parent ? parent.width : implicitWidth
         checked: Model.settingValue(root.config, settingKey, fallback) === true
@@ -1436,36 +1488,73 @@ Panel {
         onHovered: function(h) { if (h) root.setCursor(settingKey, -1) }
         onHasCursorChanged: if (hasCursor) root.ensureVisible(toggleRow)
         onClicked: root.setSetting(settingKey, !checked)
+        // Toggle draws its own label; the reset sits left of the switch. The
+        // hidden probe reports the switch width without hard-coding it.
+        ToggleSwitch { id: switchProbe; visible: false; interactive: false }
+        Row {
+            anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+            anchors.rightMargin: toggleRow.borderRight + Style.spacing.rowPaddingX * 2 + switchProbe.implicitWidth
+            spacing: Style.space(6)
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                textFormat: Text.PlainText; visible: !toggleRow.isSet; text: "default"
+                color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption
+            }
+            ResetButton { anchors.verticalCenter: parent.verticalCenter; visible: toggleRow.hasCursor; enabled: toggleRow.isSet && !service.mutating; settingKey: toggleRow.settingKey }
+        }
     }
-    component SettingDropdown: Dropdown {
+    component SettingDropdown: Column {
         id: dropdownRow
         required property string settingKey
+        property string label: ""
         property string fallback: ""
-        function activate() { open() }
-        value: String(Model.settingValue(root.config, settingKey, fallback))
-        foreground: root.foreground
-        fontFamily: root.fontFamily
-        hasCursor: root.cursorIs(settingKey)
-        onHovered: function(h) { if (h) root.setCursor(settingKey, -1) }
-        onHasCursorChanged: if (hasCursor) root.ensureVisible(dropdownRow)
-        onPopupOpenChanged: root.notePopup(popupOpen)
-        onChanged: function(v) { root.setSetting(settingKey, v) }
+        property var options: []
+        readonly property bool isSet: Model.settingIsSet(root.config, settingKey)
+        function activate() { dropdown.open() }
+        spacing: Style.spacing.labelGap
+        SettingLabel { settingKey: dropdownRow.settingKey; label: dropdownRow.label; hasCursor: root.cursorIs(dropdownRow.settingKey); isSet: dropdownRow.isSet }
+        Dropdown {
+            id: dropdown
+            width: parent.width
+            showLabel: false
+            value: String(Model.settingValue(root.config, dropdownRow.settingKey, dropdownRow.fallback))
+            options: dropdownRow.options
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            hasCursor: root.cursorIs(dropdownRow.settingKey)
+            onHovered: function(h) { if (h) root.setCursor(dropdownRow.settingKey, -1) }
+            onHasCursorChanged: if (hasCursor) root.ensureVisible(dropdownRow)
+            onPopupOpenChanged: root.notePopup(popupOpen)
+            onChanged: function(v) { root.setSetting(dropdownRow.settingKey, v) }
+        }
     }
-    component SettingNumber: NumberField {
+    component SettingNumber: Column {
         id: numberRow
         required property string settingKey
+        property string label: ""
         property int fallback: 0
-        function activate() { field.forceActiveFocus() }
-        value: Number(Model.settingValue(root.config, settingKey, fallback))
-        foreground: root.foreground
-        fontFamily: root.fontFamily
-        hasCursor: root.cursorIs(settingKey)
-        onHovered: function(h) { if (h) root.setCursor(settingKey, -1) }
-        onHasCursorChanged: if (hasCursor) root.ensureVisible(numberRow)
-        onModified: function(v) { root.setSetting(settingKey, v) }
-        Connections {
-            target: numberRow.field
-            function onActiveFocusChanged() { root.noteEditor(numberRow, numberRow.field.activeFocus) }
+        property int from: 0
+        property int to: 100
+        property int stepSize: 1
+        readonly property bool isSet: Model.settingIsSet(root.config, settingKey)
+        function activate() { number.field.forceActiveFocus() }
+        width: Math.max(number.implicitWidth, Style.space(150))
+        spacing: Style.spacing.labelGap
+        SettingLabel { settingKey: numberRow.settingKey; label: numberRow.label; hasCursor: root.cursorIs(numberRow.settingKey); isSet: numberRow.isSet }
+        NumberField {
+            id: number
+            from: numberRow.from; to: numberRow.to; stepSize: numberRow.stepSize
+            value: Number(Model.settingValue(root.config, numberRow.settingKey, numberRow.fallback))
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            hasCursor: root.cursorIs(numberRow.settingKey)
+            onHovered: function(h) { if (h) root.setCursor(numberRow.settingKey, -1) }
+            onHasCursorChanged: if (hasCursor) root.ensureVisible(numberRow)
+            onModified: function(v) { root.setSetting(numberRow.settingKey, v) }
+            Connections {
+                target: number.field
+                function onActiveFocusChanged() { root.noteEditor(numberRow, number.field.activeFocus) }
+            }
         }
     }
     component SettingText: Column {
@@ -1473,6 +1562,7 @@ Panel {
         required property string settingKey
         property string label: ""
         property string placeholderText: ""
+        readonly property bool isSet: Model.settingIsSet(root.config, settingKey)
         function activate() { input.forceActiveFocus() }
         function sync() { if (!input.activeFocus) input.text = String(Model.settingValue(root.config, settingKey, "")) }
         function commit() {
@@ -1485,7 +1575,7 @@ Panel {
         spacing: Style.spacing.labelGap
         Component.onCompleted: sync()
         Connections { target: root; function onConfigChanged() { textRow.sync() } }
-        Text { textFormat: Text.PlainText; text: textRow.label; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
+        SettingLabel { settingKey: textRow.settingKey; label: textRow.label; hasCursor: root.cursorIs(textRow.settingKey); isSet: textRow.isSet }
         TextField {
             id: input
             width: parent.width
@@ -1503,14 +1593,13 @@ Panel {
         required property string settingKey
         property string label: ""
         property real fallback: 0.5
+        readonly property bool isSet: Model.settingIsSet(root.config, settingKey)
         readonly property real current: Number(Model.settingValue(root.config, settingKey, fallback))
         function activate() {}
         spacing: Style.spacing.labelGap
-        Row {
-            width: parent.width
-            Text { textFormat: Text.PlainText; text: sliderRow.label; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
-            Item { width: parent.width - parent.children[0].width - parent.children[2].width; height: 1 }
-            Text { textFormat: Text.PlainText; text: Math.round(sliderRow.current * 100) + "%"; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+        SettingLabel {
+            settingKey: sliderRow.settingKey; label: sliderRow.label + "  " + Math.round(sliderRow.current * 100) + "%"
+            hasCursor: root.cursorIs(sliderRow.settingKey); isSet: sliderRow.isSet
         }
         CursorSurface {
             width: parent.width
