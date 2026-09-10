@@ -275,6 +275,14 @@ class Env:
         self.config.parent.mkdir(parents=True, exist_ok=True)
         self.config.write_text(text)
 
+    def set_api_key(self, key: str) -> None:
+        """Plant a remote API key the way a user would (config edit) —
+        settings.set refuses secrets by design."""
+        text = self.read_config()
+        assert 'language = "en"' in text
+        self.write_config(text.replace('language = "en"', f'language = "en"\nremote_api_key = "{key}"', 1))
+        assert self.config_dict()["whisper"]["remote_api_key"] == key
+
     def read_config(self) -> str:
         return self.config.read_text()
 
@@ -961,12 +969,18 @@ def test_settings_set_model_custom_path(env: Env):
     env.ok("settings.set", path="whisper.model", value=str(custom))
 
 
-def test_settings_set_api_key_round_trip_never_returns_it(env: Env):
-    res = env.ok("settings.set", path="whisper.remote_api_key", value="sk-SECRET")
+def test_settings_set_refuses_api_key_but_unset_clears_it(env: Env):
+    before = env.read_config()
+    res = env.fail("settings.set", path="whisper.remote_api_key", value="sk-SECRET")
+    assert "cannot be set" in res["error"] and "settings.unset" in res["error"]
+    assert "sk-SECRET" not in json.dumps(res)
+    assert env.read_config() == before
+    env.set_api_key("sk-SECRET")
+    res = env.ok("load")
     assert "sk-SECRET" not in json.dumps(res)
     assert res["snapshot"]["settings"]["whisper.remote_api_key_set"] is True
-    assert env.config_dict()["whisper"]["remote_api_key"] == "sk-SECRET"
     res = env.ok("settings.unset", path="whisper.remote_api_key")
+    assert "sk-SECRET" not in json.dumps(res)
     assert res["changed"] is True
     assert res["snapshot"]["settings"]["whisper.remote_api_key_set"] is False
     assert "remote_api_key" not in env.config_dict()["whisper"]
@@ -1065,7 +1079,7 @@ def _seed(env: Env) -> None:
     env.ok("vocab.add", phrase="Omarchy")
     env.ok("dict.upsert", **{"from": "vox type", "to": "Voxtype"})
     env.ok("settings.set", path="hotkey.key", value="F13")
-    env.ok("settings.set", path="whisper.remote_api_key", value="sk-SECRET")
+    env.set_api_key("sk-SECRET")
 
 
 def test_export_preview(env: Env):
@@ -1237,7 +1251,7 @@ def test_redacted_import_paths_match_tui():
 
 
 def test_import_preview_and_apply_never_leak_secret_values(env: Env):
-    env.ok("settings.set", path="whisper.remote_api_key", value="sk-SECRET123")
+    env.set_api_key("sk-SECRET123")
     env.ok("settings.set", path="output.post_process.command", value="old-hook --SECRETARG")
     p = _bundle(
         env,

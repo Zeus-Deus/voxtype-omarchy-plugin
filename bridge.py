@@ -1069,6 +1069,15 @@ def op_settings_set(args: dict, paths: Paths) -> dict[str, Any]:
     path = _require_str(args, "path")
     if path not in SETTING_TYPES:
         raise BridgeError(f"'{path}' is not a settable path")
+    if path in SECRET_SETTINGS:
+        # The panel has no key entry field by design: a secret typed into
+        # a bar widget would transit a Process argv/stdin and the panel's
+        # own state. Point at the env var / config file; clearing still
+        # works via settings.unset.
+        raise BridgeError(
+            f"'{path}' cannot be set from the panel — export "
+            "VOXTYPE_WHISPER_API_KEY or edit config.toml; use settings.unset to clear it"
+        )
     if "value" not in args:
         raise BridgeError("'value' is required")
     value = args["value"]

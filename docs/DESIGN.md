@@ -79,7 +79,7 @@ Environment overrides for tests (never set in production): `VOXTYPE_CONFIG`
 | `dict.upsert` | `{from, to, category}` |
 | `dict.remove` | `{from}` |
 | `dict.set_category` | `{from, category}` |
-| `settings.set` | `{path, value}` — value typed as JSON (bool/int/float/string/list). `path` must be in the allow-list derived from `voxtype_tui.settings`; unknown path → `ok:false`. Setting `engine` also guarantees the required sections exist. |
+| `settings.set` | `{path, value}` — value typed as JSON (bool/int/float/string/list). `path` must be in the allow-list derived from `voxtype_tui.settings`; unknown path → `ok:false`. `whisper.remote_api_key` is **refused** (`ok:false`, error points at `VOXTYPE_WHISPER_API_KEY` / config.toml) — only `settings.unset` may touch it. `null`/`""` value = unset. Setting `engine` also guarantees the required sections exist. |
 | `settings.unset` | `{path}` (revert to voxtype default) |
 | `models.set_active` | `{engine, name}` |
 | `models.delete` | `{engine, name}` — refuses the active model (`ok:false, error`). |
