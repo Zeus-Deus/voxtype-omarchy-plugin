@@ -172,3 +172,6 @@ while the panel is open; the bar button polls the state file
 - Destructive actions (delete rule/word/model, import apply) go through
   `ConfirmDialog` defaulting to Cancel.
 - Response bytes from the bridge are capped (2 MB) and parsed strictly.
+  The bridge enforces the same cap on its side: a response that would
+  serialise above `MAX_RESPONSE_BYTES` is replaced by
+  `{ok:false, error:"response too large", op, limit_bytes}`.

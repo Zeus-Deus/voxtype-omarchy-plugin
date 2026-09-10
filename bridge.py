@@ -50,6 +50,9 @@ from typing import Any, Callable
 
 EXIT_TUI_MISSING = 3
 MAX_REQUEST_BYTES = 1_000_000
+# The panel refuses to parse anything larger; emit a small error instead
+# of a response it would drop on the floor.
+MAX_RESPONSE_BYTES = 2_000_000
 
 # ---------------------------------------------------------------------------
 # voxtype_tui import guard
@@ -1582,9 +1585,26 @@ def main(argv: list[str] | None = None, stdin=None, stdout=None) -> int:
             # handle() validates the shape itself (null/true/1/"x"/[] all
             # become {"ok": false, "error": "request must be a JSON object"}).
             response = handle(request)
-    stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
+    stdout.write(encode_response(response) + "\n")
     stdout.flush()
     return 0
+
+
+def encode_response(response: dict[str, Any]) -> str:
+    """Serialise one response, replacing anything over MAX_RESPONSE_BYTES
+    (which the panel would refuse anyway) with a small ``ok:false``."""
+    try:
+        text = json.dumps(response, ensure_ascii=False)
+    except (TypeError, ValueError) as e:
+        return json.dumps({"ok": False, "error": f"unserialisable response: {e}"})
+    if len(text.encode("utf-8")) > MAX_RESPONSE_BYTES:
+        return json.dumps({
+            "ok": False,
+            "error": "response too large",
+            "op": response.get("op") if isinstance(response, dict) else None,
+            "limit_bytes": MAX_RESPONSE_BYTES,
+        })
+    return text
 
 
 if __name__ == "__main__":

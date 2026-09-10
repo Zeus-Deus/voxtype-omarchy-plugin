@@ -491,6 +491,43 @@ def test_cli_response_never_contains_traceback(env: Env, monkeypatch):
     assert res["error"] == "RuntimeError: kaboom"
 
 
+def test_main_refuses_to_emit_oversize_response(env: Env, monkeypatch):
+    import io
+
+    def huge(args, paths):
+        return {"ok": True, "op": "load", "blob": "x" * (bridge.MAX_RESPONSE_BYTES + 1)}
+
+    monkeypatch.setitem(bridge.OPS, "load", huge)
+    out = io.StringIO()
+    code = bridge.main([], stdin=io.StringIO('{"op":"load"}'), stdout=out)
+    assert code == 0
+    text = out.getvalue()
+    assert len(text.encode()) < 1000
+    res = json.loads(text)
+    assert res == {"ok": False, "error": "response too large", "op": "load",
+                   "limit_bytes": bridge.MAX_RESPONSE_BYTES}
+
+    # Just under the cap passes through untouched.
+    def big(args, paths):
+        return {"ok": True, "blob": "x" * (bridge.MAX_RESPONSE_BYTES - 100)}
+
+    monkeypatch.setitem(bridge.OPS, "load", big)
+    out = io.StringIO()
+    assert bridge.main([], stdin=io.StringIO('{"op":"load"}'), stdout=out) == 0
+    assert json.loads(out.getvalue())["ok"] is True
+    assert bridge.MAX_RESPONSE_BYTES == 2_000_000
+
+
+def test_main_handles_unserialisable_response(env: Env, monkeypatch):
+    import io
+
+    monkeypatch.setitem(bridge.OPS, "load", lambda a, p: {"ok": True, "x": object()})
+    out = io.StringIO()
+    assert bridge.main([], stdin=io.StringIO('{"op":"load"}'), stdout=out) == 0
+    res = json.loads(out.getvalue())
+    assert res["ok"] is False and "unserialisable" in res["error"]
+
+
 # ---------------------------------------------------------------------------
 # status
 # ---------------------------------------------------------------------------
