@@ -313,7 +313,10 @@ Panel {
             if (rule) ask("dict.remove", {from: rule.from}, "Delete the rule “" + Model.sanitize(rule.from, 60) + " → " + Model.sanitize(rule.to, 60) + "”?", "Delete");
         } else if (section === "models") {
             var m = modelRows[cursorIndex];
-            if (m && m.downloaded && !m.active) ask("models.delete", {engine: modelsEngine, name: m.name}, "Delete " + Model.sanitize(m.name, 60) + " from disk?\nIt can be downloaded again later.", "Delete");
+            if (!m) return;
+            var why = Model.modelActionBlock(m, "delete");
+            if (why !== "") { showNotice(why); return; }
+            ask("models.delete", {engine: modelsEngine, name: m.name}, "Delete " + Model.sanitize(m.name, 60) + " from disk?\nIt can be downloaded again later.", "Delete");
         }
     }
     function applyConfirmed() {
@@ -340,7 +343,14 @@ Panel {
     function downloadCursorModel() {
         if (section !== "models" || cursorKey !== "rows") return;
         var m = modelRows[cursorIndex];
-        if (m && !m.downloaded) startDownload(m);
+        if (!m) return;
+        var why = Model.modelActionBlock(m, "download");
+        if (why !== "") { showNotice(why); return; }
+        startDownload(m);
+    }
+    function showNotice(text) {
+        notice = text;
+        noticeTimer.restart();
     }
     function activateCursor() {
         if (locked) { copyLockedCommand(); return; }
@@ -388,7 +398,17 @@ Panel {
     function toggleExport() {
         exportOpen = !exportOpen;
         importPreview = null;
-        if (exportOpen) service.run({op: "export.preview", scope: exportScope, include_secrets: exportSecrets});
+        if (exportOpen) {
+            service.run({op: "export.preview", scope: exportScope, include_secrets: exportSecrets});
+            Qt.callLater(function() { root.revealForm(exportForm) });
+        }
+    }
+    // The backup forms open below the fold; bring the form into view.
+    function revealForm(item) {
+        if (!item || !item.visible || !body) return;
+        var top = item.mapToItem(body.contentItem, 0, 0).y;
+        var maxY = Math.max(0, body.contentHeight - body.height);
+        body.contentY = Math.min(maxY, Math.max(0, top - Style.space(12)));
     }
     function refreshExportPreview() { if (exportOpen) service.run({op: "export.preview", scope: exportScope, include_secrets: exportSecrets}) }
     function writeExport() {
@@ -501,7 +521,7 @@ Panel {
             else if (op === "dictionary.preview") root.previewOutput = Model.sanitize(result.output, 400);
             else if (op === "export.preview") { root.exportPreview = result; if (exportPath.text === "") exportPath.text = result.default_path || ""; }
             else if (op === "export.write") { root.notice = "Exported " + Model.formatBytes(result.bytes) + " to " + Model.sanitize(result.path, 80); noticeTimer.restart(); root.exportOpen = false; }
-            else if (op === "import.preview") root.importPreview = result;
+            else if (op === "import.preview") { root.importPreview = result; Qt.callLater(function() { root.revealForm(importCard) }); }
             else if (op === "daemon.restart") {
                 root.notice = result.ready ? "Daemon restarted" : Model.sanitize(result.message || "Daemon restarting…", 120);
                 root.restartNeeded = [];
@@ -1118,7 +1138,7 @@ Panel {
                                 PanelSectionHeader { text: "GPU"; foreground: root.foreground; fontFamily: root.fontFamily }
                                 Text {
                                     width: parent.width; textFormat: Text.PlainText; wrapMode: Text.WordWrap
-                                    text: root.gpu ? Model.sanitize(root.gpu.text || ("Backend: " + (root.gpu.backend || "unknown")), 200) + (root.gpu.gpus && root.gpu.gpus.length ? "\n" + root.gpu.gpus.map(function(g) { return g.label }).join(", ") : "\nNo GPU detected") : "Checking GPU status…"
+                                    text: Model.gpuLines(root.gpu).join("\n")
                                     color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption
                                 }
                                 Row {
@@ -1296,6 +1316,7 @@ Panel {
                                     }
                                 }
                                 Column {
+                                    id: exportForm
                                     visible: root.exportOpen
                                     width: parent.width
                                     spacing: Style.space(8)
@@ -1335,6 +1356,7 @@ Panel {
                                     }
                                 }
                                 CursorSurface {
+                                    id: importCard
                                     visible: root.importPreview !== null
                                     width: parent.width
                                     bordered: true

@@ -114,6 +114,12 @@ test('model row formatting', () => {
   assert.equal(Model.formatSize(142), '142 MB');
   assert.equal(Model.formatSize(null), '');
   assert.equal(Model.formatBytes(1500000000), '1.5 GB');
+  assert.equal(Model.formatBytes(4217), '4.2 KB');
+  assert.equal(Model.formatBytes(999), '999 B');
+  assert.equal(Model.formatBytes(1000), '1 KB');
+  assert.equal(Model.formatBytes(0), '0 B');
+  assert.equal(Model.formatBytes(142000000), '142 MB');
+  assert.equal(Model.formatBytes(undefined), '');
   assert.equal(Model.modelLine({name: 'x', size_mb: 75, downloaded: false}), '75 MB · not downloaded');
   assert.equal(Model.modelLine({name: 'x', size_mb: 75, on_disk_bytes: 80000000, downloaded: true, active: true}), '80 MB · active');
   assert.equal(Model.modelStatus({unknown: true}), 'on disk');
@@ -184,4 +190,23 @@ test('Model.js never touches Qt', () => {
   assert.doesNotMatch(src, /\bQt\./);
   assert.doesNotMatch(src, /Quickshell/);
   assert.doesNotMatch(src, /^import |^\.import /m);
+});
+
+test('GPU card renders structured lines, never the raw CLI dump', () => {
+  const raw = '=== Voxtype Backend Status ===\n\nNext launch: GPU (Vulkan) (no daemon running)\nGPUs detected:\n';
+  same(Model.gpuLines({ok: true, text: raw, backend: 'GPU (Vulkan)', gpus: [{vendor: 'nvidia', label: 'NVIDIA — RTX 3090'}, {vendor: 'amd', label: 'AMD — Raphael'}], device: 'auto'}),
+       ['Backend: GPU (Vulkan)', 'GPUs: NVIDIA — RTX 3090, AMD — Raphael', 'Device: auto']);
+  same(Model.gpuLines({ok: true, text: raw, backend: null, gpus: [], device: 'nvidia'}), ['Backend: unknown', 'GPUs: none', 'Device: nvidia']);
+  same(Model.gpuLines(null), ['Checking GPU status…']);
+  same(Model.gpuLines({ok: false, text: raw, error: 'voxtype: not found'}), ['GPU status unavailable: voxtype: not found']);
+  for (const line of Model.gpuLines({ok: true, text: raw, backend: 'CPU', gpus: [], device: 'auto'})) assert.doesNotMatch(line, /no daemon running|===/);
+});
+
+test('model row actions explain why they are blocked', () => {
+  assert.equal(Model.modelActionBlock({active: true, downloaded: true}, 'delete'), 'Set another model active first');
+  assert.equal(Model.modelActionBlock({downloaded: false}, 'delete'), 'Not downloaded');
+  assert.equal(Model.modelActionBlock({downloaded: true, active: false}, 'delete'), '');
+  assert.equal(Model.modelActionBlock({downloaded: true}, 'download'), 'Already downloaded');
+  assert.equal(Model.modelActionBlock({downloaded: false}, 'download'), '');
+  assert.equal(Model.modelActionBlock(null, 'delete'), '');
 });

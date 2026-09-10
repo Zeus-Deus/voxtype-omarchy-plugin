@@ -305,3 +305,50 @@ test('u resets the cursor setting to its default only when the key is actually s
   assert.match(panel, /component ResetButton: PanelActionButton \{[\s\S]*?iconText: "󰕌"[\s\S]*?onClicked: root\.unsetSetting\(settingKey\)/);
   assert.match(panel, /visible: !labelRow\.isSet; text: "default"/);
 });
+
+test('x on the active or not-downloaded model shows a footer notice instead of a silent no-op', () => {
+  const h = panelHarness();
+  h.root.section = 'models';
+  h.root.modelsEngine = 'whisper';
+  h.root.modelRows = [{name: 'base', downloaded: true, active: true}, {name: 'tiny', downloaded: false, active: false}, {name: 'small', downloaded: true, active: false}];
+  h.root.setCursor('rows', 0);
+  h.root.deleteSelected();
+  assert.equal(h.root.confirmation.opened, false);
+  assert.equal(h.root.notice, 'Set another model active first');
+  assert.equal(h.root.noticeTimer.running, true);
+  h.root.setCursor('rows', 1);
+  h.root.deleteSelected();
+  assert.equal(h.root.notice, 'Not downloaded');
+  h.root.setCursor('rows', 2);
+  h.root.deleteSelected();
+  assert.equal(h.root.confirmation.opened, true, 'a deletable model still confirms');
+  h.root.confirmation.opened = false;
+  h.root.setCursor('rows', 0);
+  h.root.handleTextKey('d');
+  assert.equal(h.root.notice, 'Already downloaded');
+  // The bridge's own refusal reaches the footer as the error text.
+  h.complete('models.delete', {ok: false, error: 'model base is active'}, {op: 'models.delete', name: 'base'});
+  assert.equal(h.root.errorText, 'model base is active');
+});
+
+test('the export form and the import preview scroll into view when they open', () => {
+  const h = panelHarness();
+  h.root.section = 'models';
+  h.root.toggleExport();
+  assert.equal(h.root.exportOpen, true);
+  assert.equal(h.root.body.contentY, 0, 'deferred until the form has laid out');
+  h.root.exportForm.visible = true;
+  h.flush();
+  assert.equal(h.root.body.contentY, 600, 'clamped to contentHeight - height');
+  h.root.body.contentY = 0;
+  h.root.body.contentHeight = 2000;
+  h.complete('import.preview', {ok: true, format: 'v2', warnings: [], diff: {}}, {op: 'import.preview'});
+  h.root.importCard.visible = true;
+  h.flush();
+  assert.equal(h.root.body.contentY, 700 - 12);
+  h.root.body.contentY = 0;
+  h.root.toggleExport();
+  h.flush();
+  assert.equal(h.root.exportOpen, false);
+  assert.equal(h.root.body.contentY, 0, 'closing does not scroll');
+});

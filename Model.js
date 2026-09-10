@@ -195,7 +195,35 @@ function formatSize(mb) {
 
 function formatBytes(bytes) {
     if (bytes === null || bytes === undefined || isNaN(bytes)) return "";
-    return formatSize(bytes / 1000000);
+    var b = Number(bytes);
+    if (b < 1000) return Math.round(b) + " B";
+    if (b < 1000000) return (b / 1000).toFixed(1).replace(/\.0$/, "") + " KB";
+    return formatSize(b / 1000000);
+}
+
+// Structured lines for the GPU card: never the raw CLI dump, which carries
+// unrelated advice and a misleading "(no daemon running)" note.
+function gpuLines(gpu) {
+    if (!gpu) return ["Checking GPU status…"];
+    if (gpu.ok === false) return ["GPU status unavailable" + (gpu.error ? ": " + sanitize(gpu.error, 80) : "")];
+    var lines = ["Backend: " + (gpu.backend ? sanitize(gpu.backend, 60) : "unknown")];
+    var gpus = gpu.gpus || [];
+    var labels = [];
+    for (var i = 0; i < gpus.length; i++) if (gpus[i] && gpus[i].label) labels.push(sanitize(gpus[i].label, 60));
+    lines.push("GPUs: " + (labels.length ? labels.join(", ") : "none"));
+    lines.push("Device: " + sanitize(gpu.device || "auto", 20));
+    return lines;
+}
+
+// Why `x` / Enter on a model row does nothing, in words for the footer.
+function modelActionBlock(m, action) {
+    if (!m) return "";
+    if (action === "delete") {
+        if (m.active) return "Set another model active first";
+        if (!m.downloaded) return "Not downloaded";
+    }
+    if (action === "download" && m.downloaded) return "Already downloaded";
+    return "";
 }
 
 function modelStatus(m) {
