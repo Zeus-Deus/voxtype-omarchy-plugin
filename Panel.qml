@@ -101,7 +101,7 @@ Panel {
         }
         if (sectionName === "vocabulary") return ["search", "rows"];
         if (sectionName === "dictionary") return ["search", "rows"];
-        if (sectionName === "settings") return settingsTargets;
+        if (sectionName === "settings") return settingsTargets.filter(function(k) { return k !== "remote.clear" || Model.settingValue(config, "whisper.remote_api_key_set", false) === true; });
         if (sectionName === "models") return ["engine", "rows", "export", "import"];
         return [];
     }
@@ -1037,6 +1037,7 @@ Panel {
                                             fontFamily: root.fontFamily
                                             fontSize: Style.font.bodySmall
                                             onHovered: function(h) { if (h) root.setCursor(settingKey, -1) }
+                                            onHasCursorChanged: if (hasCursor) root.ensureVisible(this)
                                             onClicked: root.toggleModifier(modelData)
                                         }
                                     }
@@ -1137,6 +1138,7 @@ Panel {
                                         hasCursor: root.cursorIs("remote.clear")
                                         foreground: root.foreground; fontFamily: root.fontFamily; fontSize: Style.font.bodySmall
                                         onHovered: function(h) { if (h) root.setCursor("remote.clear", -1) }
+                                        onHasCursorChanged: if (hasCursor) root.ensureVisible(clearKey)
                                         onClicked: root.unsetSetting("whisper.remote_api_key")
                                     }
                                 }
@@ -1162,6 +1164,7 @@ Panel {
                                         foreground: root.foreground; fontFamily: root.fontFamily
                                         hasCursor: root.cursorIs("gpu.device")
                                         onHovered: function(h) { if (h) root.setCursor("gpu.device", -1) }
+                                        onHasCursorChanged: if (hasCursor) root.ensureVisible(gpuDevice)
                                         onPopupOpenChanged: root.notePopup(popupOpen)
                                         onChanged: function(v) { if (!root.locked) service.run({op: "gpu.set_device", vendor: v}) }
                                     }
@@ -1177,6 +1180,7 @@ Panel {
                                             enabled: root.terminalAvailable
                                             tooltipText: root.terminalAvailable ? "Opens a terminal running sudo voxtype setup gpu --enable" : Model.ERROR_TERMINAL_MISSING
                                             onHovered: function(h) { if (h) root.setCursor("gpu.enable", -1) }
+                                            onHasCursorChanged: if (hasCursor) root.ensureVisible(gpuButtons)
                                             onClicked: root.launchGpu(true)
                                         }
                                         Button {
@@ -1187,6 +1191,7 @@ Panel {
                                             enabled: root.terminalAvailable
                                             tooltipText: root.terminalAvailable ? "Opens a terminal running sudo voxtype setup gpu --disable" : Model.ERROR_TERMINAL_MISSING
                                             onHovered: function(h) { if (h) root.setCursor("gpu.disable", -1) }
+                                            onHasCursorChanged: if (hasCursor) root.ensureVisible(gpuButtons)
                                             onClicked: root.launchGpu(false)
                                         }
                                     }
@@ -1211,6 +1216,7 @@ Panel {
                                         foreground: root.foreground; fontFamily: root.fontFamily
                                         hasCursor: root.cursorIs("engine")
                                         onHovered: function(h) { if (h) root.setCursor("engine", -1) }
+                                        onHasCursorChanged: if (hasCursor) root.ensureVisible(engineDropdown)
                                         onPopupOpenChanged: root.notePopup(popupOpen)
                                         onChanged: function(v) { root.setSetting("engine", v) }
                                     }
@@ -1304,12 +1310,14 @@ Panel {
                                 PanelSeparator { width: parent.width; foreground: root.foreground }
                                 PanelSectionHeader { text: "BACKUP"; foreground: root.foreground; fontFamily: root.fontFamily }
                                 Row {
+                                    id: backupRow
                                     spacing: Style.space(8)
                                     Button {
                                         text: "Export…"; iconText: "󰈝"; bordered: true; selected: root.exportOpen
                                         hasCursor: root.cursorIs("export")
                                         foreground: root.foreground; fontFamily: root.fontFamily
                                         onHovered: function(h) { if (h) root.setCursor("export", -1) }
+                                        onHasCursorChanged: if (hasCursor) root.ensureVisible(backupRow)
                                         onClicked: root.toggleExport()
                                     }
                                     Button {
@@ -1319,6 +1327,7 @@ Panel {
                                         foreground: root.foreground; fontFamily: root.fontFamily
                                         tooltipText: root.pickerAvailable ? "Choose a voxtype-tui bundle; changes are previewed before anything is written" : Model.ERROR_PICKER_MISSING
                                         onHovered: function(h) { if (h) root.setCursor("import", -1) }
+                                        onHasCursorChanged: if (hasCursor) root.ensureVisible(backupRow)
                                         onClicked: root.beginImport()
                                     }
                                 }

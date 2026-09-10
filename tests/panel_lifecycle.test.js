@@ -86,6 +86,10 @@ function panelHarness(overrides) {
   for (const m of panel.matchAll(/^    readonly property \w+ (\w+): (.+)$/gm)) {
     if (!(m[1] in root) && !m[2].endsWith('[')) bind(m[1], m[2]);
   }
+  // Multi-line array bindings (sectionOptions, settingsTargets).
+  for (const m of panel.matchAll(/^    readonly property var (\w+): \[\n([\s\S]*?)\n    \]/gm)) {
+    if (!(m[1] in root)) bind(m[1], '[' + m[2] + ']');
+  }
   Object.defineProperty(root, 'opened', {get: () => root.controller.open});
   installFunctions(panel, context);
   const serviceSource = objectSource(panel, 'service');
@@ -397,4 +401,23 @@ test('the panel forgets options and gpu status when appropriate, and asks the br
   assert.equal(h.root.gpu, null, 'gpu status is stale once the terminal runs setup');
   assert.match(panel, /onOpenedChanged: \{[\s\S]*?options = null;/, 'options invalidated on close');
   assert.match(panel, /if \(op === "status"\) \{ root\.status = result; service\.status = result; \}/);
+});
+
+test('every Settings cursor target is reachable and visible: Clear key is skipped until a key is set, GPU controls scroll into view', () => {
+  const h = panelHarness();
+  h.root.section = 'settings';
+  assert.ok(h.root.targetsFor('settings').indexOf('remote.clear') < 0, 'no key stored: the invisible Clear button is not a cursor stop');
+  h.root.snapshot = {settings: {'whisper.remote_api_key_set': true}};
+  assert.ok(h.root.targetsFor('settings').indexOf('remote.clear') >= 0);
+  for (const key of ['gpu.device', 'gpu.enable', 'gpu.disable']) assert.ok(h.root.targetsFor('settings').indexOf(key) >= 0, key);
+  assert.match(panel, /setCursor\("gpu\.device", -1\) \}\n\s*onHasCursorChanged: if \(hasCursor\) root\.ensureVisible\(gpuDevice\)/);
+  assert.equal((panel.match(/root\.ensureVisible\(gpuButtons\)/g) || []).length, 2);
+  assert.match(panel, /root\.ensureVisible\(clearKey\)/);
+  assert.match(panel, /onClicked: root\.toggleModifier\(modelData\)/);
+  assert.match(panel, /onHasCursorChanged: if \(hasCursor\) root\.ensureVisible\(this\)\n\s*onClicked: root\.toggleModifier/);
+  // Models: every non-row cursor target scrolls into view too, so Enter never lands on an off-screen Import button.
+  assert.equal((panel.match(/root\.ensureVisible\(backupRow\)/g) || []).length, 2);
+  assert.match(panel, /root\.ensureVisible\(engineDropdown\)/);
+  const cursorTargets = new Set([...panel.matchAll(/setCursor\("([\w.]+)", -1\)/g)].map(m => m[1]));
+  for (const key of ['export', 'import', 'engine', 'gpu.device', 'gpu.enable', 'gpu.disable', 'remote.clear', 'record', 'restart', 'download', 'test', 'search']) assert.ok(cursorTargets.has(key), key);
 });
