@@ -188,6 +188,41 @@ def _count_leaves(node: Any) -> int:
     return 1
 
 
+def _dir_size(path: Path) -> int:
+    total = 0
+    try:
+        for root, _dirs, files in os.walk(path):
+            for name in files:
+                try:
+                    total += os.lstat(os.path.join(root, name)).st_size
+                except OSError:
+                    continue
+    except OSError:
+        return 0
+    return total
+
+
+def _tui_private(module: Any, name: str) -> Callable[..., Any]:
+    """Fetch a private ``voxtype_tui`` helper the bridge has no public
+    substitute for. A missing attribute (upstream rename) becomes a
+    readable error instead of an AttributeError with a traceback."""
+    fn = getattr(module, name, None)
+    if not callable(fn):
+        raise BridgeError(
+            f"installed voxtype-tui ({_tui_version() or 'unknown'}) lacks "
+            f"{module.__name__}.{name} — update the plugin"
+        )
+    return fn
+
+
+# Private voxtype_tui helpers the bridge depends on; pinned by
+# tests/test_bridge.py::test_private_tui_helpers_exist.
+TUI_PRIVATE_HELPERS: tuple[tuple[str, str], ...] = (
+    ("voxtype_tui.sync", "_bundle_with_stripped_settings"),
+    ("voxtype_tui.sync", "_filter_uninstalled_models"),
+)
+
+
 def _run(argv: list[str], timeout: float) -> tuple[int, str, str]:
     """argv-only subprocess wrapper. Never raises; missing binaries and
     timeouts come back as non-zero codes with a message in stderr."""
@@ -946,10 +981,10 @@ def _import_load(args: dict, paths: Paths):
         raise BridgeError(str(e)) from e
     st = _load_state(paths)
     if not include_settings and bundle.sync.get("settings"):
-        bundle = sync._bundle_with_stripped_settings(bundle)
+        bundle = _tui_private(sync, "_bundle_with_stripped_settings")(bundle)
     # Same guard as the startup reader: never point the daemon at a model
     # we don't have on disk.
-    bundle.sync, model_warnings, _skipped = sync._filter_uninstalled_models(
+    bundle.sync, model_warnings, _skipped = _tui_private(sync, "_filter_uninstalled_models")(
         bundle.sync, paths.models_dir,
     )
     warnings = list(warnings) + list(model_warnings)
@@ -1145,7 +1180,7 @@ def op_models_delete(args: dict, paths: Paths) -> dict[str, Any]:
     if not path.exists():
         raise BridgeError(f"'{name}' is not downloaded — nothing to delete")
     try:
-        freed = path.stat().st_size if path.is_file() else models._dir_size(path)
+        freed = path.stat().st_size if path.is_file() else _dir_size(path)
         if path.is_dir():
             shutil.rmtree(path)
         else:

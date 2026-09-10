@@ -1043,9 +1043,36 @@ def test_models_delete(env: Env):
 
 
 def test_models_delete_directory_engine(env: Env):
-    p = env.add_model("parakeet", "parakeet-tdt-0.6b-v3")
-    env.ok("models.delete", engine="parakeet", name="parakeet-tdt-0.6b-v3")
+    p = env.add_model("parakeet", "parakeet-tdt-0.6b-v3", size=500)
+    (p / "sub").mkdir()
+    (p / "sub" / "tokens.txt").write_bytes(b"t" * 25)
+    res = env.ok("models.delete", engine="parakeet", name="parakeet-tdt-0.6b-v3")
+    assert res["freed_bytes"] == 525
     assert not p.exists()
+
+
+def test_private_tui_helpers_exist():
+    import importlib
+
+    src = BRIDGE.read_text()
+    assert "_dir_size(" in src and "models._dir_size" not in src
+    for mod_name, attr in bridge.TUI_PRIVATE_HELPERS:
+        mod = importlib.import_module(mod_name)
+        assert callable(getattr(mod, attr, None)), f"{mod_name}.{attr} missing"
+    # Every `sync._x(` / `models._x(` use in bridge.py must go through the
+    # guarded accessor.
+    direct = re.findall(r"\b(?:sync|models|settings|config|state)\._[a-z_]+\(", src)
+    assert direct == [], direct
+
+
+def test_private_tui_helper_missing_is_friendly_error(env: Env, monkeypatch):
+    from voxtype_tui import sync
+
+    monkeypatch.delattr(sync, "_filter_uninstalled_models")
+    p = _bundle(env)
+    res = env.fail("import.preview", path=str(p))
+    assert "_filter_uninstalled_models" in res["error"]
+    assert "voxtype-tui" in res["error"] and "AttributeError" not in res["error"]
 
 
 # ---------------------------------------------------------------------------
