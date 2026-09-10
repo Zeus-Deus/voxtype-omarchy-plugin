@@ -352,3 +352,49 @@ test('the export form and the import preview scroll into view when they open', (
   assert.equal(h.root.exportOpen, false);
   assert.equal(h.root.body.contentY, 0, 'closing does not scroll');
 });
+
+test('footer hints mirror the live key bindings: every hinted key is bound and every section-scoped binding is hinted', () => {
+  const h = panelHarness();
+  const Model = h.root.Model;
+  const textKeys = panel.match(/function handleTextKey\(t\) \{[\s\S]*?\n    \}/)[0];
+  // Section-scoped letter bindings actually present in handleTextKey.
+  const bound = {};
+  for (const m of textKeys.matchAll(/t === "([a-z\/])" && section === "(\w+)"/g)) (bound[m[2]] = bound[m[2]] || new Set()).add(m[1]);
+  assert.match(textKeys, /t === "\/"/, '/ is bound for every section');
+  assert.match(textKeys, /t === "r" \|\| t === "R"/, 'r is global');
+  // Catcher-level verbs available everywhere.
+  const catcher = {Enter: /onActivateRequested: root\.activateCursor\(\)/, x: /onDeleteRequested: root\.deleteSelected\(\)/, Tab: /onTabRequested/, '↑↓': /onMoveRequested/, Esc: /onCloseRequested: root\.close\(\)/, 'Ctrl+R': /Qt\.Key_R\) \{ restartDaemon\(\)/, '1–5': /Model\.sectionForKey\(t\)/};
+  for (const section of Model.SECTIONS) {
+    for (const editing of [false, true]) for (const cursorActive of [false, true]) {
+      const pairs = Model.hintPairs(section, {editing, cursorActive});
+      const text = Model.sectionHints(section, {editing, cursorActive});
+      assert.equal(text, pairs.map(p => p.join(' ')).join('   '));
+      for (const [key] of pairs) {
+        if (catcher[key]) { assert.match(panel, catcher[key], key + ' in ' + section); continue; }
+        if (key === '/' || key === 'r') continue;
+        assert.ok(bound[section] && bound[section].has(key), section + ' hints "' + key + '" but handleTextKey does not bind it');
+      }
+      if (!cursorActive && !editing) assert.equal(pairs[0][0], '↑↓', 'no cursor yet: show how to get one');
+      if (cursorActive && !editing) assert.notEqual(pairs[0][0], '↑↓', 'cursor active: hints show the verbs instead');
+      if (editing) assert.ok(pairs.some(p => p[0] === 'Esc'), 'editing: Esc leaves the field');
+    }
+    // and the reverse: every letter bound for this section appears in its idle hints
+    const idle = new Set(Model.hintPairs(section, {editing: false, cursorActive: true}).map(p => p[0]));
+    for (const key of bound[section] || []) assert.ok(idle.has(key), section + ' binds "' + key + '" without hinting it');
+  }
+  assert.match(panel, /Model\.sectionHints\(root\.section, \{editing: root\.editing, cursorActive: root\.cursorActive\}\)/);
+  assert.doesNotMatch(panel, /pid " \+/, 'the idle footer no longer prints the PID');
+  assert.match(panel, /"Daemon running" : "Daemon stopped"/);
+});
+
+test('the panel forgets options and gpu status when appropriate, and asks the bridge for an 18 s restart wait', () => {
+  const h = panelHarness();
+  h.root.options = {engines: ['whisper']};
+  h.root.gpu = {ok: true};
+  h.root.restartDaemon();
+  assert.deepEqual(JSON.parse(JSON.stringify(h.requests.pop())), {op: 'daemon.restart', timeout: 18});
+  h.root.launchGpu(true);
+  assert.equal(h.root.gpu, null, 'gpu status is stale once the terminal runs setup');
+  assert.match(panel, /onOpenedChanged: \{[\s\S]*?options = null;/, 'options invalidated on close');
+  assert.match(panel, /if \(op === "status"\) \{ root\.status = result; service\.status = result; \}/);
+});

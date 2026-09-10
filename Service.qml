@@ -10,7 +10,11 @@ Item {
     id: root
     readonly property string pythonBinary: "/usr/bin/python3"
     readonly property string bridgePath: decodeURIComponent(Qt.resolvedUrl("bridge.py").toString().replace(/^file:\/\//, ""))
-    readonly property string stateFilePath: Quickshell.env("XDG_RUNTIME_DIR") + "/voxtype/state"
+    // The bridge reports the resolved state file (null when disabled); until
+    // the first status arrives, derive it from the runtime dir.
+    property var status: null
+    readonly property var fallbackStateFilePath: Model.defaultStateFilePath(Quickshell.env("XDG_RUNTIME_DIR"), Quickshell.env("DBUS_SESSION_BUS_ADDRESS"), Quickshell.env("UID"))
+    readonly property var stateFilePath: Model.stateFilePath(status, fallbackStateFilePath)
 
     property bool busy: false
     property var request: ({})
@@ -140,7 +144,7 @@ Item {
         recordDeadline.stop();
         recording = false;
         recordFinished(code === 0);
-        stateFile.reload();
+        if (stateFilePath !== null) stateFile.reload();
     }
 
     // The panel is a full-screen overlay layer, so the file chooser is only
@@ -341,7 +345,7 @@ Item {
     // Cheap bar-button poll: the daemon writes one word to its state file.
     FileView {
         id: stateFile
-        path: root.stateFilePath
+        path: root.stateFilePath === null ? "" : root.stateFilePath
         printErrors: false
         watchChanges: false
         onLoaded: root.applyStateText(text())
@@ -350,8 +354,10 @@ Item {
     Timer {
         interval: root.pollIntervalMs
         repeat: true
-        running: root.pollState
+        // A disabled state file (null) has nothing to poll.
+        running: root.pollState && root.stateFilePath !== null
         triggeredOnStart: true
         onTriggered: stateFile.reload()
     }
+    onStateFilePathChanged: if (stateFilePath === null) daemonState = "unknown"; else if (pollState) stateFile.reload()
 }

@@ -113,6 +113,33 @@ function barGlyph(state) {
 
 function barActive(state) { return state === "recording" || state === "transcribing"; }
 
+// Where the daemon writes its one-word state. `status.state_file_path` is
+// authoritative once known: a string, or null when the config disables it.
+// Before the bridge answers, the runtime dir comes from XDG_RUNTIME_DIR,
+// else the session bus address (unix:path=/run/user/<uid>/bus), else a UID
+// env; with none of them there is nothing to poll (null).
+function defaultStateFilePath(runtimeDir, dbusAddress, uid) {
+    var dir = String(runtimeDir || "");
+    if (dir === "") {
+        var m = /unix:path=(\/run\/user\/\d+)\//.exec(String(dbusAddress || ""));
+        if (m) dir = m[1];
+    }
+    if (dir === "") {
+        var id = String(uid || "").replace(/\D/g, "");
+        if (id !== "") dir = "/run/user/" + id;
+    }
+    return dir === "" ? null : dir + "/voxtype/state";
+}
+
+function stateFilePath(status, fallback) {
+    if (status && typeof status === "object" && "state_file_path" in status) {
+        var p = status.state_file_path;
+        if (p === null) return null;
+        if (typeof p === "string" && p !== "") return p;
+    }
+    return fallback;
+}
+
 function readStateFile(text) {
     var s = String(text || "").trim().toLowerCase();
     if (s === "idle" || s === "recording" || s === "transcribing") return s;
@@ -312,14 +339,26 @@ function labelled(list) {
     return out;
 }
 
-function sectionHints(section, context) {
+// Footer hints as [key, verb] pairs, derived from the same state the key
+// bindings read (section, editing, cursorActive). tests/panel_lifecycle
+// checks every key here is bound in Panel.qml and every bound key is hinted.
+function hintPairs(section, context) {
     var c = context || {};
-    if (section === "dictate") return "Enter record   Ctrl+R restart   1–5 sections";
-    if (section === "vocabulary") return c.editing ? "Enter add   Esc back" : "/ search   a add   x delete   Tab next";
-    if (section === "dictionary") return c.editing ? "Enter save   Esc cancel" : "/ search   a add   c category   x delete";
-    if (section === "settings") return c.editing ? "Enter save   Esc cancel" : "↑↓ move   Enter change   u reset   Tab next";
-    if (section === "models") return "↑↓ move   Enter set active   d download   x delete";
-    return "";
+    if (c.editing) return section === "vocabulary" ? [["Enter", "add"], ["Esc", "back"]] : [["Enter", "save"], ["Esc", "cancel"]];
+    var move = c.cursorActive ? [] : [["↑↓", "move"]];
+    if (section === "dictate") return move.concat([["r", "record"], ["Ctrl+R", "restart"], ["1–5", "sections"]]);
+    if (section === "vocabulary") return move.concat([["/", "search"], ["a", "add"], ["x", "delete"], ["Tab", "next"]]);
+    if (section === "dictionary") return move.concat([["/", "search"], ["a", "add"], ["c", "category"], ["x", "delete"]]);
+    if (section === "settings") return move.concat([["Enter", "change"], ["u", "reset"], ["Tab", "next"]]);
+    if (section === "models") return move.concat([["Enter", "set active"], ["d", "download"], ["x", "delete"]]);
+    return [];
+}
+
+function sectionHints(section, context) {
+    var pairs = hintPairs(section, context);
+    var out = [];
+    for (var i = 0; i < pairs.length; i++) out.push(pairs[i][0] + " " + pairs[i][1]);
+    return out.join("   ");
 }
 
 function footerNotice(state) {

@@ -213,6 +213,9 @@ Panel {
             vocabSearch.text = "";
             dictSearch.text = "";
             service.cancelQueued("status");
+            // Slow enumerations (devices, compiled engines) are cached per
+            // panel open only.
+            options = null;
         }
     }
     function refreshAll() {
@@ -234,7 +237,9 @@ Panel {
     function restartDaemon() {
         if (locked || service.restarting) return;
         notice = "Restarting daemon…";
-        service.run({op: "daemon.restart"});
+        // The bridge waits up to `timeout` s for readiness; the Service kills
+        // the call at its own 30 s deadline.
+        service.run({op: "daemon.restart", timeout: 18});
     }
     function restartIfStale() { if (stale) restartDaemon() }
     function runPrimary() {
@@ -393,6 +398,8 @@ Panel {
         // A terminal opened under the full-screen panel layer is invisible;
         // hide first, then hand the sudo prompt to the user's terminal.
         controller.hide();
+        // The terminal will change the backend; the card re-reads on reopen.
+        gpu = null;
         service.launchGpuSetup(enable);
     }
     function toggleExport() {
@@ -510,7 +517,7 @@ Panel {
             }
             root.tuiMissing = false;
             if (op !== "status") root.errorText = "";
-            if (op === "status") root.status = result;
+            if (op === "status") { root.status = result; service.status = result; }
             else if (op === "load") { root.applySnapshot(result.snapshot); root.loaded = true; }
             else if (op === "options") root.options = result;
             else if (op === "models.list") {
@@ -1408,7 +1415,7 @@ Panel {
                             busyText: service.picking ? "Choosing a bundle…" : (service.restarting ? "Restarting daemon…" : ""),
                             notice: root.notice,
                             restartNeeded: root.stale,
-                            idleText: root.locked ? "" : (root.status ? (root.status.daemon && root.status.daemon.active ? "Daemon running · pid " + (root.status.daemon.main_pid || "?") : "Daemon stopped") : "")
+                            idleText: root.locked ? "" : (root.status ? (root.status.daemon && root.status.daemon.active ? "Daemon running" : "Daemon stopped") : "")
                         })
                         Text {
                             anchors.left: parent.left; anchors.right: hints.left; anchors.rightMargin: Style.space(12); anchors.verticalCenter: parent.verticalCenter
@@ -1420,7 +1427,7 @@ Panel {
                             id: hints
                             anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
                             textFormat: Text.PlainText
-                            text: root.locked ? (root.lockedCommand !== "" ? "Enter copy   Esc close" : "Esc close") : Model.sectionHints(root.section, {editing: root.editing})
+                            text: root.locked ? (root.lockedCommand !== "" ? "Enter copy   Esc close" : "Esc close") : Model.sectionHints(root.section, {editing: root.editing, cursorActive: root.cursorActive})
                             color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption
                         }
                     }

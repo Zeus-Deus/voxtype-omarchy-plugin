@@ -18,7 +18,7 @@ The panel is a thin QML front end over the installed **voxtype-tui** Python pack
 
 ## Keyboard
 
-`1`–`5` jump to a section, `Tab`/`Shift+Tab` cycle, `↑↓`/`j k` move the cursor, `Enter`/`Space` activate, `←→` nudge sliders, `/` or `Ctrl+F` focus search, `a` add, `c` cycle category, `d` download, `x` delete, `r` toggle recording, `Ctrl+R` restart the daemon, `Esc` leaves a field, then closes the panel.
+`1`–`5` jump to a section, `Tab`/`Shift+Tab` cycle, `↑↓`/`j k` move the cursor, `Enter`/`Space` activate, `←→` nudge sliders, `/` or `Ctrl+F` focus search, `a` add, `c` cycle category, `d` download, `u` reset a setting to its default, `x` delete, `r` toggle recording, `Ctrl+R` restart the daemon, `Esc` leaves a field, then closes the panel.
 
 ## Dependencies
 

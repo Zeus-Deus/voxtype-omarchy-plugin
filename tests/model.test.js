@@ -210,3 +210,17 @@ test('model row actions explain why they are blocked', () => {
   assert.equal(Model.modelActionBlock({downloaded: false}, 'download'), '');
   assert.equal(Model.modelActionBlock(null, 'delete'), '');
 });
+
+test('state file path prefers the bridge, honours null (disabled), and falls back sanely', () => {
+  assert.equal(Model.defaultStateFilePath('/run/user/1000', '', ''), '/run/user/1000/voxtype/state');
+  assert.equal(Model.defaultStateFilePath('', 'unix:path=/run/user/1000/bus', ''), '/run/user/1000/voxtype/state');
+  assert.equal(Model.defaultStateFilePath('', '', '1000'), '/run/user/1000/voxtype/state');
+  assert.equal(Model.defaultStateFilePath('', '', ''), null, 'nothing to poll without a runtime dir');
+  assert.equal(Model.defaultStateFilePath(undefined, undefined, undefined), null);
+  const fb = '/run/user/1000/voxtype/state';
+  assert.equal(Model.stateFilePath(null, fb), fb);
+  assert.equal(Model.stateFilePath({}, fb), fb, 'older bridge without the key');
+  assert.equal(Model.stateFilePath({state_file_path: '/tmp/x/state'}, fb), '/tmp/x/state');
+  assert.equal(Model.stateFilePath({state_file_path: null}, fb), null, 'disabled in config');
+  assert.equal(Model.stateFilePath({state_file_path: ''}, fb), fb);
+});

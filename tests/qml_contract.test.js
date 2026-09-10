@@ -60,7 +60,7 @@ function serviceHarness() {
     recording: false, recordGeneration: 0, picking: false, pickerGeneration: 0, pickerStarted: false, pickCancelRequested: false, daemonState: 'unknown',
     worker: process(), downloader: process(), recorder: process(), picker: process(), clipboard: process(),
     copying: false, copyText: '', copyGeneration: 0, clipboardDeadline: timer(), copyFinished: ok => copies.push(ok),
-    output: {text: ''}, pickerOutput: {text: ''},
+    output: {text: ''}, pickerOutput: {text: ''}, status: null, stateFilePath: '/run/user/1000/voxtype/state',
     deadline: timer(), recordDeadline: timer(), pickerDeadline: timer(),
     stateFile: {reloads: 0, reload() { this.reloads++; }},
     Quickshell: {detached: [], execDetached(argv) { this.detached.push(argv); }},
@@ -348,9 +348,11 @@ test('bridge responses are size-capped and parsed strictly via Model.parseRespon
   assert.match(read('Model.js'), /RESPONSE_CAP = 2 \* 1024 \* 1024/);
 });
 
-test('the state poll reads XDG_RUNTIME_DIR/voxtype/state and the status poll is bound to opened', () => {
-  assert.match(service, /Quickshell\.env\("XDG_RUNTIME_DIR"\) \+ "\/voxtype\/state"/);
-  assert.match(service, /FileView \{[\s\S]*?path: root\.stateFilePath/);
+test('the state poll follows status.state_file_path, falls back to the runtime dir, and stops when disabled', () => {
+  assert.match(service, /readonly property var stateFilePath: Model\.stateFilePath\(status, fallbackStateFilePath\)/);
+  assert.match(service, /Model\.defaultStateFilePath\(Quickshell\.env\("XDG_RUNTIME_DIR"\), Quickshell\.env\("DBUS_SESSION_BUS_ADDRESS"\), Quickshell\.env\("UID"\)\)/);
+  assert.match(service, /FileView \{[\s\S]*?path: root\.stateFilePath === null \? "" : root\.stateFilePath/);
+  assert.match(service, /running: root\.pollState && root\.stateFilePath !== null/);
   assert.match(panel, /id: statusPoll[\s\S]*?running: root\.opened && !root\.locked/);
   assert.match(panel, /interval: root\.pollIntervalMs/);
   assert.match(panel, /setting\("pollIntervalSec", 2\)/);
@@ -384,7 +386,7 @@ test('closeForPopoutSwitch is overridden and clears the attach flag so a late ch
   assert.match(panel, /function resumeAfterPick\(\) \{[\s\S]*?if \(popoutTakenElsewhere\(\)\) return;[\s\S]*?controller\.show\(\)/);
   assert.match(panel, /bar\.activePopout !== owner/);
   assert.match(panel, /function beginImport\(\)[\s\S]{0,300}attaching = true;[\s\S]{0,120}controller\.hide\(\);[\s\S]{0,80}service\.pick\(\)/);
-  assert.match(panel, /function launchGpu\(enable\)[\s\S]{0,400}controller\.hide\(\);[\s\S]{0,60}service\.launchGpuSetup\(enable\)/);
+  assert.match(panel, /function launchGpu\(enable\)[\s\S]{0,400}controller\.hide\(\);[\s\S]{0,160}service\.launchGpuSetup\(enable\)/);
   assert.match(widget, /function closeForPopoutSwitch\(\) \{ if \(panelLoader\.item\) panelLoader\.item\.closeForPopoutSwitch\(\) \}/);
 });
 
