@@ -420,3 +420,16 @@ function sanitize(text, max) {
     var lim = max || 200;
     return s.length > lim ? s.slice(0, lim - 1) + "…" : s;
 }
+
+// Wheel scrolling for the panel body. Qt's Flickable turns each notch into a
+// decelerating flick, which reads as sluggish next to GTK and browsers; this
+// steps contentY directly. Touchpads report pixelDelta and are passed
+// through 1:1; a mouse wheel notch (angleDelta 120) moves `stepPx`.
+function wheelContentY(contentY, contentHeight, viewHeight, pixelDeltaY, angleDeltaY, stepPx) {
+    var maxY = Math.max(0, (contentHeight || 0) - (viewHeight || 0));
+    var delta;
+    if (pixelDeltaY) delta = -pixelDeltaY;
+    else if (angleDeltaY) delta = -(angleDeltaY / 120) * (stepPx || 0);
+    else return contentY || 0;
+    return Math.max(0, Math.min(maxY, (contentY || 0) + delta));
+}

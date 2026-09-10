@@ -670,6 +670,19 @@ Panel {
                         flickableDirection: Flickable.VerticalFlick
                         interactive: contentHeight > height
                         Controls.ScrollBar.vertical: Controls.ScrollBar { policy: Controls.ScrollBar.AsNeeded }
+                        // A wheel notch scrolls three rows immediately instead of
+                        // starting a Flickable kinetic flick, so it matches the
+                        // rest of the desktop. Touchpads pass pixelDelta through.
+                        WheelHandler {
+                            acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                            onWheel: function(event) {
+                                if (!body.interactive) return;
+                                body.contentY = Model.wheelContentY(body.contentY, body.contentHeight, body.height,
+                                                                    event.pixelDelta.y, event.angleDelta.y,
+                                                                    Style.spacing.popupRowHeight * 3);
+                                event.accepted = true;
+                            }
+                        }
 
                         // ---- locked / dependency-missing state --------------
                         Column {
