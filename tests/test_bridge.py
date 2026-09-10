@@ -437,6 +437,17 @@ def test_cli_empty_request(env: Env):
     assert out["ok"] is False and out["error"] == "empty request"
 
 
+@pytest.mark.parametrize("raw", ["null", "true", "1", '"x"', "[]", "[1, 2]"])
+def test_cli_non_object_json_is_clean_error(env: Env, raw: str):
+    r = subprocess.run([sys.executable, str(BRIDGE)], input=raw,
+                       capture_output=True, text=True, env=env.subprocess_env())
+    assert r.returncode == 0, r.stderr
+    assert "Traceback" not in r.stderr
+    out = json.loads(r.stdout)
+    assert isinstance(out, dict)
+    assert out["ok"] is False and "JSON object" in out["error"]
+
+
 def test_cli_roundtrip_write_op(env: Env):
     r = env.run_cli({"op": "vocab.add", "phrase": "Omarchy"})
     assert r.returncode == 0, r.stderr

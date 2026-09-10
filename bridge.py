@@ -1486,16 +1486,17 @@ def main(argv: list[str] | None = None, stdin=None, stdout=None) -> int:
     raw = stdin.read(MAX_REQUEST_BYTES + 1)
     if len(raw) > MAX_REQUEST_BYTES:
         response: dict[str, Any] = {"ok": False, "error": "request too large"}
+    elif not raw.strip():
+        response = {"ok": False, "error": "empty request", "ops": sorted(OPS)}
     else:
         try:
-            request = json.loads(raw) if raw.strip() else {}
+            request = json.loads(raw)
         except ValueError as e:
-            request = None
             response = {"ok": False, "error": f"invalid JSON request: {e}"}
-        if raw.strip() and request is not None:
+        else:
+            # handle() validates the shape itself (null/true/1/"x"/[] all
+            # become {"ok": false, "error": "request must be a JSON object"}).
             response = handle(request)
-        elif not raw.strip():
-            response = {"ok": False, "error": "empty request", "ops": sorted(OPS)}
     stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
     stdout.flush()
     return 0
