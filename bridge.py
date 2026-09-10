@@ -576,6 +576,41 @@ def _mtime(path: Path) -> float | None:
         return None
 
 
+# Per-engine on-disk layout, mirrored from voxtype_tui.models.model_file_path
+# (pinned by tests/test_bridge.py::test_status_model_path_matches_tui).
+# Inlined so `status` never imports the Textual-backed models module.
+# Whisper is the only flat-file engine; the others are directories.
+_MODEL_PATH_TEMPLATES: dict[str, str] = {
+    "whisper": "ggml-{name}.bin",
+    "moonshine": "moonshine-{name}",
+    "sensevoice": "sensevoice-{name}",
+    "paraformer": "paraformer-{name}",
+    "dolphin": "dolphin-{name}",
+    "omnilingual": "omnilingual-{name}",
+    "parakeet": "{name}",
+}
+
+
+def _model_file_path(engine: str, name: str, models_dir: Path) -> Path:
+    template = _MODEL_PATH_TEMPLATES.get(engine, "{name}.bin")
+    return models_dir / template.format(name=name)
+
+
+def _model_present(path: Path) -> bool:
+    """Same rule as voxtype_tui.models.is_model_installed: a non-empty
+    file, or a directory containing at least one regular file."""
+    try:
+        if path.is_file():
+            return path.stat().st_size > 0
+        if path.is_dir():
+            for _root, _dirs, files in os.walk(path):
+                if files:
+                    return True
+    except OSError:
+        return False
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Read ops
 # ---------------------------------------------------------------------------
@@ -620,16 +655,9 @@ def op_status(args: dict, paths: Paths) -> dict[str, Any]:
         if model_name.startswith("/") or model_name.startswith("~"):
             model_path = Path(model_name).expanduser()
             present = model_path.exists()
-        elif engine == "whisper":
-            # whisper.cpp naming convention (same as voxtype_tui.models.
-            # model_file_path); inlined so status stays free of the
-            # Textual-backed models module.
-            model_path = paths.models_dir / f"ggml-{model_name}.bin"
-            present = model_path.is_file() and model_path.stat().st_size > 0
         else:
-            models = _import_models(paths)
-            model_path = models.model_file_path(engine, model_name, models_dir=paths.models_dir)
-            present = models.is_model_installed(engine, model_name, models_dir=paths.models_dir)
+            model_path = _model_file_path(engine, model_name, paths.models_dir)
+            present = _model_present(model_path)
     else:
         model_name = None
 

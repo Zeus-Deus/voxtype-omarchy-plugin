@@ -483,26 +483,58 @@ def test_status_stopped_daemon(env: Env):
     assert res["output_mode"] == "type"
 
 
-def test_status_is_fast_and_never_runs_voxtype_setup(env: Env):
+ENGINES = ("whisper", "moonshine", "sensevoice", "paraformer", "dolphin", "omnilingual", "parakeet")
+
+
+def _engine_config(engine: str, name: str) -> str:
+    if engine == "whisper":
+        return BASE_CONFIG.replace('model = "base.en"', f'model = "{name}"')
+    return f'engine = "{engine}"\n[{engine}]\nmodel = "{name}"\n' + BASE_CONFIG
+
+
+def test_status_engine_list_matches_tui():
+    from voxtype_tui import settings
+
+    assert set(ENGINES) == set(settings.ENGINES)
+    assert set(bridge._MODEL_PATH_TEMPLATES) == set(settings.ENGINES)
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_status_model_path_matches_tui(env: Env, engine: str):
+    from voxtype_tui import models
+
+    assert bridge._model_file_path(engine, "some-name", env.models_dir) == \
+        models.model_file_path(engine, "some-name", models_dir=env.models_dir)
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_status_is_fast_and_never_runs_voxtype_setup(env: Env, engine: str):
+    env.add_model(engine, "m1")
+    env.write_config(_engine_config(engine, "m1"))
     env.daemon(active=True)
     t = time.monotonic()
-    env.ok("status")
+    res = env.ok("status")
     elapsed = time.monotonic() - t
     assert elapsed < 0.15, elapsed
+    assert res["engine"] == engine and res["model"]["present"] is True
     assert env.voxtype_calls() == []
     assert env.systemctl_calls() == ["--user show voxtype -p MainPID -p ActiveState -p ExecMainStartTimestamp -p ExecMainStartTimestampMonotonic"]
 
 
-def test_status_does_not_import_textual(env: Env):
+@pytest.mark.parametrize("engine", ENGINES)
+def test_status_does_not_import_textual(env: Env, engine: str):
+    env.add_model(engine, "m1")
+    env.write_config(_engine_config(engine, "m1"))
     code = (
         "import sys; sys.path.insert(0, %r); import bridge; "
         "r = bridge.handle({'op': 'status'}); "
-        "print(r['ok'], 'textual' in sys.modules, 'voxtype_tui.models' in sys.modules)"
+        "print(r['ok'], r['engine'], r['model']['present'], "
+        "'textual' in sys.modules, 'voxtype_tui.models' in sys.modules)"
         % str(REPO)
     )
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                        env=env.subprocess_env())
-    assert r.stdout.strip() == "True False False", r.stderr
+    assert r.stdout.strip() == f"True {engine} True False False", r.stderr
 
 
 @pytest.mark.parametrize("word", ["idle", "recording", "transcribing"])
