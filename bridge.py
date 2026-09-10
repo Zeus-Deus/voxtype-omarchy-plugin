@@ -1246,9 +1246,28 @@ def _config_dict(paths: Paths) -> dict[str, Any]:
         return {}
 
 
+DAEMON_RESTART_READY_TIMEOUT = 18.0
+DAEMON_RESTART_READY_TIMEOUT_MAX = 60.0
+
+
+def _ready_timeout(args: dict) -> float:
+    """``timeout`` arg (seconds) for the post-restart ready wait.
+
+    ``voxtype_cli.restart_daemon`` itself blocks for up to 15 s, so the
+    default keeps the worst case (15 + 18 s) inside a 30 s QML deadline
+    only when the restart returns quickly; QML sends ``timeout: 18`` and
+    treats a deadline as "restarted, readiness unknown".
+    """
+    val = args.get("timeout", DAEMON_RESTART_READY_TIMEOUT)
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        raise BridgeError("'timeout' must be a number of seconds")
+    return min(max(float(val), 0.0), DAEMON_RESTART_READY_TIMEOUT_MAX)
+
+
 def op_daemon_restart(args: dict, paths: Paths) -> dict[str, Any]:
     from voxtype_tui import voxtype_cli
 
+    timeout = _ready_timeout(args)
     before = _unit_info()
     ok, message = voxtype_cli.restart_daemon()
     after = _unit_info()
@@ -1258,8 +1277,6 @@ def op_daemon_restart(args: dict, paths: Paths) -> dict[str, Any]:
     )
     ready = False
     if ok and changed:
-        timeout = args.get("timeout", 20.0)
-        timeout = float(timeout) if isinstance(timeout, (int, float)) else 20.0
         ready = _wait_for_daemon_ready(_state_file(paths, _config_dict(paths)), timeout)
     if ok and not changed:
         message = (
@@ -1272,6 +1289,7 @@ def op_daemon_restart(args: dict, paths: Paths) -> dict[str, Any]:
         "main_pid_after": after.main_pid,
         "changed": changed,
         "ready": ready,
+        "ready_timeout": timeout,
         "active": after.active,
         "message": message,
     }

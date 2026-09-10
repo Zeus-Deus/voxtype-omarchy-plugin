@@ -1325,8 +1325,37 @@ def test_daemon_restart_ready_timeout(env: Env, monkeypatch):
     # A restart that never writes the state file: fake systemctl writes
     # "idle" on restart, so point the daemon's state_file elsewhere.
     env.write_config(BASE_CONFIG.replace('state_file = "auto"', f'state_file = "{env.root}/never"'))
+    t0 = time.monotonic()
     res = env.call("daemon.restart", timeout=0.3)
+    elapsed = time.monotonic() - t0
     assert res["ok"] is True and res["changed"] is True and res["ready"] is False
+    assert res["ready_timeout"] == 0.3
+    assert elapsed < 3.0, elapsed
+
+
+def test_daemon_restart_timeout_arg_is_honoured(env: Env, monkeypatch):
+    env.daemon(active=True)
+    seen: list[float] = []
+
+    def fake_wait(path, timeout, poll=0.15):
+        seen.append(timeout)
+        return True
+
+    monkeypatch.setattr(bridge, "_wait_for_daemon_ready", fake_wait)
+    assert env.ok("daemon.restart")["ready_timeout"] == 18.0
+    assert env.ok("daemon.restart", timeout=5)["ready_timeout"] == 5.0
+    assert env.ok("daemon.restart", timeout=2.5)["ready_timeout"] == 2.5
+    assert env.ok("daemon.restart", timeout=999)["ready_timeout"] == bridge.DAEMON_RESTART_READY_TIMEOUT_MAX
+    assert seen == [18.0, 5.0, 2.5, bridge.DAEMON_RESTART_READY_TIMEOUT_MAX]
+    assert bridge.DAEMON_RESTART_READY_TIMEOUT == 18.0
+    env.fail("daemon.restart", timeout="soon")
+    env.fail("daemon.restart", timeout=True)
+    assert "--user restart voxtype" not in env.systemctl_calls()[-1]
+
+
+def test_design_documents_restart_timeout():
+    design = (REPO / "docs" / "DESIGN.md").read_text()
+    assert "timeout:18" in design or "timeout: 18" in design
 
 
 def test_daemon_restart_without_systemctl(env: Env):
