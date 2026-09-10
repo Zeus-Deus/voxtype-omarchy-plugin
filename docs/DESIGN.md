@@ -67,7 +67,7 @@ Environment overrides for tests (never set in production): `VOXTYPE_CONFIG`
 | `gpu.status` | — | `{ok, text, backend, gpus:[{vendor,label}], device: "auto"|"nvidia"|"amd"|"intel", dropin_path}` from `voxtype setup gpu --status` + `gpu.read_gpu_device`. |
 | `dictionary.preview` | `{text}` | `{input, output}` — runs `voxtype_tui.dictionary_engine` over current rules; lets the user test a phrase. |
 | `export.preview` | `{scope, include_secrets}` | `{default_path, counts:{vocabulary, replacements, settings, local, secrets}}` |
-| `import.preview` | `{path, include_local}` | `{format, warnings:[...], diff:{vocab_add:[], vocab_remove:[], replacements_add:[], replacements_change:[], settings_change:[{path, old, new, dangerous}]}}` |
+| `import.preview` | `{path, include_local, include_settings}` (defaults `false`, `true`) | `{format, source, has_local, include_local, warnings:[...], dangerous:[paths], diff:{vocab_add:[], vocab_remove:[] (always empty — import merges, never removes), vocab_unchanged:[], replacements_add:[{from,to}], replacements_change:[{from,old,new}], settings_change:[row]}}`. A `settings_change` row is `{path, old, new, dangerous}` **except** for the secret paths `whisper.remote_api_key`, `output.post_process.command`, `output.pre_output_command`, `output.post_output_command`, which are emitted **redacted** as `{path, dangerous:true, redacted:true, old_set:bool, new_set:bool}` with no `old`/`new` (the panel shows "API key: set → set", never the value). |
 
 ### Write ops (all return `{ok, snapshot, restart_needed:[...]}`)
 
@@ -166,7 +166,9 @@ while the panel is open; the bar button polls the state file
 - Sudo-needing actions (GPU enable/disable) are handed to the user's
   terminal; the plugin never prompts for a password.
 - Export defaults `include_secrets=false`; import refuses dangerous changes
-  unless explicitly accepted after the preview shows the exact strings.
+  unless explicitly accepted after the preview. Secret rows in the preview
+  (API key, shell-command hooks) are redacted to `old_set`/`new_set` — the
+  bridge never emits their values in any response.
 - Destructive actions (delete rule/word/model, import apply) go through
   `ConfirmDialog` defaulting to Cancel.
 - Response bytes from the bridge are capped (2 MB) and parsed strictly.

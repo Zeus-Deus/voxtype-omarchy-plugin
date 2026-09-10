@@ -1168,6 +1168,63 @@ def test_import_apply_can_skip_settings(env: Env):
     assert res["applied"]["settings_change"] == []
 
 
+def test_redacted_import_paths_match_tui():
+    from voxtype_tui import sync
+
+    assert bridge.REDACTED_IMPORT_PATHS == {".".join(p) for p in sync.SECRET_PATHS}
+
+
+def test_import_preview_and_apply_never_leak_secret_values(env: Env):
+    env.ok("settings.set", path="whisper.remote_api_key", value="sk-SECRET123")
+    env.ok("settings.set", path="output.post_process.command", value="old-hook --SECRETARG")
+    p = _bundle(
+        env,
+        secrets={
+            "whisper": {"remote_api_key": "sk-OTHER456"},
+            "output": {
+                "post_process": {"command": "new-hook --OTHERARG"},
+                "pre_output_command": "pre-hook --OTHERARG",
+            },
+        },
+    )
+    key_leaks = ("sk-SECRET123", "sk-OTHER456")
+    # The current post_process command is legitimately part of the
+    # snapshot (editable Settings field); it must not appear in the diff.
+    diff_leaks = key_leaks + ("SECRETARG", "OTHERARG")
+
+    res = env.ok("import.preview", path=str(p))
+    raw = json.dumps(res)
+    for s in diff_leaks:
+        assert s not in raw, s
+    rows = {c["path"]: c for c in res["diff"]["settings_change"]}
+    assert rows["whisper.remote_api_key"] == {
+        "path": "whisper.remote_api_key", "dangerous": True, "redacted": True,
+        "old_set": True, "new_set": True,
+    }
+    assert rows["output.post_process.command"] == {
+        "path": "output.post_process.command", "dangerous": True, "redacted": True,
+        "old_set": True, "new_set": True,
+    }
+    assert rows["output.pre_output_command"] == {
+        "path": "output.pre_output_command", "dangerous": True, "redacted": True,
+        "old_set": False, "new_set": True,
+    }
+    assert set(res["dangerous"]) == set(rows)
+
+    refused = env.fail("import.apply", path=str(p))
+    assert refused["error"] == "dangerous-changes"
+    for s in diff_leaks:
+        assert s not in json.dumps(refused), s
+
+    applied = env.ok("import.apply", path=str(p), accept_dangerous=True)
+    for s in key_leaks:
+        assert s not in json.dumps(applied), s
+    for s in diff_leaks:
+        assert s not in json.dumps(applied["applied"]), s
+    assert applied["applied"]["settings_change"] == res["diff"]["settings_change"]
+    assert env.config_dict()["whisper"]["remote_api_key"] == "sk-OTHER456"
+
+
 # ---------------------------------------------------------------------------
 # daemon ops
 # ---------------------------------------------------------------------------

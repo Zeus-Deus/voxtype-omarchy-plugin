@@ -844,6 +844,36 @@ def op_export_preview(args: dict, paths: Paths) -> dict[str, Any]:
     }
 
 
+# Import-diff rows whose values must never reach the panel: the remote
+# API key (credential) and the three shell-command hooks (a malicious
+# bundle could carry `bash -c ...`; the panel only needs to know a change
+# is proposed). Mirrors voxtype_tui.sync.SECRET_PATHS — pinned by
+# tests/test_bridge.py::test_redacted_import_paths_match_tui.
+REDACTED_IMPORT_PATHS = frozenset({
+    "whisper.remote_api_key",
+    "output.post_process.command",
+    "output.pre_output_command",
+    "output.post_output_command",
+})
+
+
+def _setting_change_row(change) -> dict[str, Any]:
+    if change.path in REDACTED_IMPORT_PATHS:
+        return {
+            "path": change.path,
+            "dangerous": True,
+            "redacted": True,
+            "old_set": change.old is not None and change.old != "",
+            "new_set": change.new is not None and change.new != "",
+        }
+    return {
+        "path": change.path,
+        "old": _plain(change.old),
+        "new": _plain(change.new),
+        "dangerous": change.dangerous,
+    }
+
+
 def _diff_to_json(preview) -> dict[str, Any]:
     return {
         "vocab_add": list(preview.vocab.added),
@@ -854,10 +884,7 @@ def _diff_to_json(preview) -> dict[str, Any]:
         "replacements_change": [
             {"from": f, "old": o, "new": n} for f, o, n in preview.replacements.updated
         ],
-        "settings_change": [
-            {"path": c.path, "old": _plain(c.old), "new": _plain(c.new), "dangerous": c.dangerous}
-            for c in preview.settings
-        ],
+        "settings_change": [_setting_change_row(c) for c in preview.settings],
     }
 
 
