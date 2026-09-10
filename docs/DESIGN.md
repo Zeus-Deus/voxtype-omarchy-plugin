@@ -46,7 +46,9 @@ object on stdout, exits 0. Every response has `ok: bool`; failures carry
 process itself cannot run (missing interpreter/package → exit 3, stdout
 `{"ok":false,"error":"voxtype-tui-missing"}`).
 
-Every request: `{"op": "<name>", ...args}`. All writes go through
+Every request: `{"op": "<name>", ...args}`. Failures from an op carry
+`{ok:false, error, op}`; an unknown op adds `ops:[...]` (the registry).
+All writes go through
 `voxtype_tui.state.AppState` → `save()` (validated, atomic, sidecar + sync
 bundle) and return the **fresh snapshot** (`snapshot` key, same shape as
 `load`) plus `restart_needed: [paths]` so the panel never has to guess. The
@@ -61,38 +63,46 @@ Environment overrides for tests (never set in production): `VOXTYPE_CONFIG`
 | op | args | result |
 |---|---|---|
 | `status` | — | `{ok, voxtype_installed, tui_version, daemon:{active, active_state, state:"idle"|"recording"|"transcribing"|"stopped", main_pid, started_at, start_monotonic_us, stale, ready, systemctl_available}, engine, model:{name, path, present}, hotkey:{key, modifiers:[], mode, enabled}, output_mode, config_path, config_exists, state_file_path, terminal_launcher_available, picker_available, warnings?:[str]}` — **must be fast (<150 ms)**: no `voxtype setup` calls, no Textual import, one `systemctl --user show` call. `stale` = config.toml **or** the GPU drop-in mtime > `ExecMainStartTimestampMonotonic`-derived start (or fallback: mtime > `started_at`). `ready` = state file holds idle/recording/transcribing (false when the file is missing or `state_file = "disabled"`). `systemctl_available=false` when `systemctl` is missing or fails (daemon then reads as stopped). `config_exists=false` (with `engine:"whisper"`, `model.name:null`) when config.toml is absent; a corrupt config adds `warnings`. `state_file_path` = the config's `state_file` resolved: `"auto"`/missing → `$XDG_RUNTIME_DIR/voxtype/state` (or `/run/user/<uid>/voxtype/state`), explicit path → that path (`~` expanded), `"disabled"` → `null` — the bar button polls exactly this path. `terminal_launcher_available` = `omarchy-launch-terminal` on PATH (GPU enable/disable buttons); `picker_available` = `zenity` on PATH (Import… button). |
-| `load` | — | `{snapshot}` where snapshot = `{vocabulary:[{phrase, added_at}], vocab_tokens:int, vocab_token_limit:224, replacements:[{from, to, category}], categories:["Replacement","Capitalization"], settings:{<dotted path>: value ...}, restart_sensitive:[paths], warnings:[str], migrations_applied:[str], sync:{applied_from, conflicts:[...], missing_model}}`. `settings` contains every key `voxtype_tui.settings` maps (engine, whisper.model, whisper.language, per-engine model keys, hotkey.*, audio.device/max_duration_secs/feedback.*, output.mode/fallback_to_clipboard/auto_submit/type_delay_ms, text.spoken_punctuation/smart_auto_submit, vad.*, output.post_process.command/timeout_ms, whisper.remote_endpoint/remote_model/remote_timeout_secs, and `whisper.remote_api_key_set: bool` — **never the key itself**). Missing keys are omitted (UI shows voxtype default). |
-| `options` | — | `{engines:[name], compiled_engines:[name], models_per_engine:{engine:[name]}, model_paths:{engine: "whisper.model"}, hotkey_modifiers:[...], hotkey_modes:[...], output_modes:[...], audio_devices:[{label, name}], feedback_themes:[...], gpu_vendors:[{label,value}]}` — may take a few seconds (`compiled_engines`, `pactl`). QML caches it per panel open. |
-| `models.list` | `{engine}` | `{engine, active, models:[{name, size_mb, on_disk_bytes|null, downloaded, unknown, active, path}]}` (catalog ∪ unknown files on disk, via `voxtype_tui.models`). |
-| `gpu.status` | — | `{ok, text, backend, gpus:[{vendor,label}], device: "auto"|"nvidia"|"amd"|"intel", dropin_path}` from `voxtype setup gpu --status` + `gpu.read_gpu_device`. |
-| `dictionary.preview` | `{text}` | `{input, output}` — runs `voxtype_tui.dictionary_engine` over current rules; lets the user test a phrase. |
-| `export.preview` | `{scope, include_secrets}` | `{default_path, counts:{vocabulary, replacements, settings, local, secrets}}` |
-| `import.preview` | `{path, include_local, include_settings}` (defaults `false`, `true`) | `{format, source, has_local, include_local, warnings:[...], dangerous:[paths], diff:{vocab_add:[], vocab_remove:[] (always empty — import merges, never removes), vocab_unchanged:[], replacements_add:[{from,to}], replacements_change:[{from,old,new}], settings_change:[row]}}`. A `settings_change` row is `{path, old, new, dangerous}` **except** for the secret paths `whisper.remote_api_key`, `output.post_process.command`, `output.pre_output_command`, `output.post_output_command`, which are emitted **redacted** as `{path, dangerous:true, redacted:true, old_set:bool, new_set:bool}` with no `old`/`new` (the panel shows "API key: set → set", never the value). Files larger than `sync.MAX_BUNDLE_BYTES` (1 MB) are refused by `stat()` before any byte is read (`ok:false, error:"file is N bytes; limit …"`). |
+| `load` | — | `{ok, snapshot}` where snapshot = `{vocabulary:[{phrase, added_at}], vocab_tokens:int, vocab_token_limit:224, replacements:[{from, to, category}], categories:["Replacement","Capitalization"], settings:{<dotted path>: value ...}, restart_sensitive:[paths], warnings:[str], migrations_applied:[str], sync:{applied_from, conflicts:[...], missing_model}}`. `settings` contains every key `voxtype_tui.settings` maps (engine, whisper.model, whisper.language, per-engine model keys, hotkey.*, audio.device/max_duration_secs/feedback.*, output.mode/fallback_to_clipboard/auto_submit/type_delay_ms, text.spoken_punctuation/smart_auto_submit, vad.*, output.post_process.command/timeout_ms, whisper.remote_endpoint/remote_model/remote_timeout_secs, and `whisper.remote_api_key_set: bool` — **never the key itself**). Missing keys are omitted (UI shows voxtype default). Missing config.toml → `ok:false` ("not found … run `voxtype setup`"). |
+| `options` | — | `{ok, engines:[name], compiled_engines:[name], models_per_engine:{engine:[name]}, model_paths:{engine: "whisper.model"}, hotkey_modifiers:[...], hotkey_modes:[...], output_modes:[...], audio_devices:[{label, name}], feedback_themes:[...], gpu_vendors:[{label,value}]}` — may take a few seconds (`compiled_engines`, `pactl`). QML caches it per panel open. |
+| `models.list` | `{engine}` | `{ok, engine, active:name|null, models:[{name, size_mb, on_disk_bytes|null, downloaded, unknown, active, path}], models_dir, total_bytes}` (catalog ∪ unknown files on disk, via `voxtype_tui.models`; `total_bytes` = disk usage of the whole models dir). |
+| `gpu.status` | — | `{ok, text, backend, gpus:[{vendor,label}], device: "auto"|"nvidia"|"amd"|"intel", dropin_path, error?}` from `voxtype setup gpu --status` + `gpu.read_gpu_device`; on failure `ok:false` with `error` but `device`/`dropin_path` still filled. |
+| `dictionary.preview` | `{text}` | `{ok, input, output, rules:int}` — runs `voxtype_tui.dictionary_engine` over current rules; lets the user test a phrase. |
+| `export.preview` | `{scope:"sync"|"sync+local", include_secrets:bool}` (defaults `"sync"`, `false`) | `{ok, default_path, scope, include_secrets, counts:{vocabulary, replacements, settings, local, secrets, secrets_available}}` — `secrets` is 0 unless `include_secrets`; `secrets_available` is how many secret fields exist on disk. |
+| `import.preview` | `{path, include_local, include_settings}` (defaults `false`, `true`) | `{ok, format, source, has_local, include_local, warnings:[...], dangerous:[paths], diff:{vocab_add:[], vocab_remove:[] (always empty — import merges, never removes), vocab_unchanged:[], replacements_add:[{from,to}], replacements_change:[{from,old,new}], settings_change:[row]}}`. A `settings_change` row is `{path, old, new, dangerous}` **except** for the secret paths `whisper.remote_api_key`, `output.post_process.command`, `output.pre_output_command`, `output.post_output_command`, which are emitted **redacted** as `{path, dangerous:true, redacted:true, old_set:bool, new_set:bool}` with no `old`/`new` (the panel shows "API key: set → set", never the value). Files larger than `sync.MAX_BUNDLE_BYTES` (1 MB) are refused by `stat()` before any byte is read (`ok:false, error:"file is N bytes; limit …"`). |
 
-### Write ops (all return `{ok, snapshot, restart_needed:[...]}`)
+### Write ops
 
-| op | args |
-|---|---|
-| `vocab.add` | `{phrase}` (rejects empty/duplicate → `ok:false`) |
-| `vocab.remove` | `{phrase}` |
-| `vocab.set` | `{phrases:[...]}` (bulk reorder/edit) |
-| `dict.upsert` | `{from, to, category}` |
-| `dict.remove` | `{from}` |
-| `dict.set_category` | `{from, category}` |
-| `settings.set` | `{path, value}` — value typed as JSON (bool/int/float/string/list). `path` must be in the allow-list derived from `voxtype_tui.settings`; unknown path → `ok:false`. `whisper.remote_api_key` is **refused** (`ok:false`, error points at `VOXTYPE_WHISPER_API_KEY` / config.toml) — only `settings.unset` may touch it. `null`/`""` value = unset. Setting `engine` also guarantees the required sections exist. |
-| `settings.unset` | `{path}` (revert to voxtype default) |
-| `models.set_active` | `{engine, name}` |
-| `models.delete` | `{engine, name}` — refuses the active model (`ok:false, error`). |
-| `gpu.set_device` | `{vendor: "auto"|"nvidia"|"amd"|"intel"}` → writes drop-in via `gpu.write_gpu_device`, runs `daemon_reload`; result includes `restart_needed:["gpu.device"]`. |
-| `export.write` | `{path, scope:"sync"|"sync+local", include_secrets:bool}` → `{path, bytes}` |
-| `import.apply` | `{path, include_local, accept_dangerous}` — refuses (`ok:false, error:"dangerous-changes"`) when the diff has dangerous changes and `accept_dangerous` is false. |
+Every write op returns `{ok, snapshot, restart_needed:[paths], daemon_stale:bool, ...extra}`.
+`restart_needed` lists the restart-sensitive paths that changed;
+`daemon_stale` is true for **any** config.toml write (voxtype reads its
+config once at start), so the panel lights the "Restart to apply" pill on
+`daemon_stale`, not only on `restart_needed`. Sidecar-only writes
+(`dict.set_category`) and non-config writes (`models.delete`,
+`export.write`) return `restart_needed:[]`, `daemon_stale:false`.
+
+| op | args | extra result keys |
+|---|---|---|
+| `vocab.add` | `{phrase}` (rejects empty/duplicate → `ok:false`) | — |
+| `vocab.remove` | `{phrase}` (unknown → `ok:false`) | — |
+| `vocab.set` | `{phrases:[...]}` (bulk reorder/edit; trims, dedupes, drops blanks) | — |
+| `dict.upsert` | `{from, to, category?}` (default category `Replacement`) | — |
+| `dict.remove` | `{from}` | — |
+| `dict.set_category` | `{from, category}` | `changed:bool` |
+| `settings.set` | `{path, value}` — value typed as JSON (bool/int/float/string/list). `path` must be in the allow-list derived from `voxtype_tui.settings`; unknown path → `ok:false`. `whisper.remote_api_key` is **refused** (`ok:false`, error points at `VOXTYPE_WHISPER_API_KEY` / config.toml) — only `settings.unset` may touch it. `null`/`""` value = unset. Setting `engine` also guarantees the required sections exist. Model paths (`whisper.model` etc.) must name a downloaded model or an existing absolute file. | `path, value` |
+| `settings.unset` | `{path}` (revert to voxtype default) | `path, changed:bool` |
+| `models.set_active` | `{engine, name}` — refuses a model that is not downloaded. | `engine, name` |
+| `models.delete` | `{engine, name}` — refuses the active model (`ok:false, error`). | `engine, name, freed_bytes` |
+| `gpu.set_device` | `{vendor: "auto"|"nvidia"|"amd"|"intel"}` → writes drop-in via `gpu.write_gpu_device`, runs `daemon_reload`; always `restart_needed:["gpu.device"]`, `daemon_stale:true`. | `device, dropin_path, daemon_reload:{ok, message}` |
+| `export.write` | `{path?, scope:"sync"|"sync+local", include_secrets:bool}` (default path = `export.preview.default_path`) | `path, bytes, scope, include_secrets` |
+| `import.apply` | `{path, include_local, include_settings, accept_dangerous}` — refuses (`ok:false, error:"dangerous-changes", dangerous:[paths], diff, warnings`) when the diff has dangerous changes and `accept_dangerous` is false. `include_settings:false` imports vocabulary/replacements only. | `format, applied:<diff, same shape and redaction as import.preview>, warnings` |
 
 ### Daemon ops
 
 | op | args | result |
 |---|---|---|
-| `daemon.restart` | `{timeout?}` — seconds for the post-restart ready wait, default **18**, clamped to 0–60 | uses `voxtype_cli.restart_daemon` (itself capped at 15 s) then `wait_for_daemon_ready` (≤ `timeout`) → `{ok, main_pid_before, main_pid_after, changed:bool, ready:bool, ready_timeout, active:bool, message}`; `ok` only if PID or start-timestamp actually changed. **QML sends `timeout: 18` and kills the process at a 30 s deadline**; if the deadline fires the panel treats it as "restart issued, readiness unknown" and re-polls `status`. |
-| `daemon.start` / `daemon.stop` | — | `systemctl --user start|stop voxtype` |
+| `daemon.restart` | `{timeout?}` — seconds for the post-restart ready wait, default **18**, clamped to 0–60 | uses `voxtype_cli.restart_daemon` (itself capped at 15 s) then `wait_for_daemon_ready` (≤ `timeout`) → `{ok, main_pid_before, main_pid_after, changed:bool, ready:bool, ready_timeout, active:bool, message}`; `ok` only if PID or start-timestamp actually changed (`changed`); `ready` is whether the state file reported idle/recording/transcribing before the timeout. **QML sends `timeout: 18` and kills the process at a 30 s deadline**; if the deadline fires the panel treats it as "restart issued, readiness unknown" and re-polls `status`. |
+| `daemon.start` / `daemon.stop` | — | `systemctl --user start|stop voxtype` → `{ok, message, daemon:{active, active_state, main_pid, started_at, start_monotonic_us}, error?}` (`error` only when `ok:false`). |
 | `record.toggle` | — | `voxtype record toggle` → `{ok, message}`; on failure `{ok:false, error}` where `error` is the CLI's stderr (ANSI stripped), suffixed with "(daemon is not running)" when the unit is inactive, or `"voxtype record toggle exited N"` when the CLI was silent. Kept for the panel's Record button; the bar button may use it too. |
 
 ### Streaming op (not JSON-response; used by a dedicated QML Process)

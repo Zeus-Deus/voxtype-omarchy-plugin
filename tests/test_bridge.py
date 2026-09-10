@@ -436,6 +436,47 @@ def test_every_design_op_is_registered():
     table_ops.discard("daemon.start / daemon.stop")
     missing = table_ops - set(bridge.OPS)
     assert not missing, missing
+    assert set(bridge.OPS) - table_ops == set(), set(bridge.OPS) - table_ops
+
+
+def test_design_result_tables_match_response_shapes(env: Env):
+    """The keys DESIGN.md advertises for each op must actually be emitted."""
+    design = (REPO / "docs" / "DESIGN.md").read_text()
+
+    def row(op: str) -> str:
+        m = re.search(rf"^\| `{re.escape(op)}` \|.*$", design, re.M)
+        assert m, op
+        return m.group(0)
+
+    env.daemon(active=True)
+    status = env.ok("status")
+    for key in ("config_exists", "state_file_path", "terminal_launcher_available", "picker_available"):
+        assert key in row("status") and key in status
+    for key in ("ready", "systemctl_available", "stale", "active_state", "start_monotonic_us"):
+        assert key in row("status") and key in status["daemon"]
+
+    ml = env.ok("models.list", engine="whisper")
+    for key in ("models_dir", "total_bytes"):
+        assert key in row("models.list") and key in ml
+
+    env.add_model("whisper", "tiny", size=10)
+    md = env.ok("models.delete", engine="whisper", name="tiny")
+    assert "freed_bytes" in row("models.delete") and md["freed_bytes"] == 10
+    assert md["daemon_stale"] is False and md["restart_needed"] == []
+
+    va = env.ok("vocab.add", phrase="Omarchy")
+    assert "daemon_stale" in design and va["daemon_stale"] is True
+
+    dr = env.ok("daemon.restart", timeout=1)
+    for key in ("changed", "ready", "ready_timeout", "active", "message"):
+        assert key in row("daemon.restart") and key in dr
+
+    assert "include_settings" in row("import.apply") and "include_settings" in row("import.preview")
+    assert "vocab_remove:[] (always empty" in row("import.preview")
+    assert "old_set" in row("import.preview") and "redacted" in row("import.preview")
+    ds = env.ok("daemon.stop")
+    m = re.search(r"^\| `daemon.start` / `daemon.stop` \|.*$", design, re.M)
+    assert m and "daemon:{" in m.group(0) and "daemon" in ds
 
 
 def test_cli_invalid_json_exits_zero_with_error(env: Env):
