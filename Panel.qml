@@ -161,7 +161,7 @@ Panel {
         body.contentY = 0;
         if (name === "models") loadModels();
         if (name === "settings") { loadModels(); if (!gpu) service.run({op: "gpu.status"}); }
-        keys.forceActiveFocus();
+        keyCatcher.forceActiveFocus();
     }
     function cycleSection(delta) { selectSection(Model.nextSection(section, delta)) }
 
@@ -170,7 +170,7 @@ Panel {
         controller.show();
         errorText = "";
         refreshAll();
-        Qt.callLater(function() { keys.forceActiveFocus() });
+        Qt.callLater(function() { keyCatcher.forceActiveFocus() });
     }
     function close() {
         if (confirmation.opened) return;
@@ -193,6 +193,10 @@ Panel {
             confirmAction = "";
             focusedEditor = null;
             openPopups = 0;
+            testField.text = "";
+            previewOutput = "";
+            vocabSearch.text = "";
+            dictSearch.text = "";
             service.cancelQueued("status");
         }
     }
@@ -256,7 +260,7 @@ Panel {
         service.run({op: "dict.upsert", from: from, to: to, category: dictCategory});
         dictFrom.text = "";
         dictTo.text = "";
-        keys.forceActiveFocus();
+        keyCatcher.forceActiveFocus();
     }
     function cycleRuleCategory() {
         var rule = filteredReplacements[cursorIndex];
@@ -277,7 +281,7 @@ Panel {
         confirmation.confirmText = confirmLabel;
         confirmation.selectedIndex = 0;
         confirmation.opened = true;
-        keys.forceActiveFocus();
+        keyCatcher.forceActiveFocus();
     }
     function deleteSelected() {
         if (cursorKey !== "rows") return;
@@ -377,7 +381,7 @@ Panel {
         if (!attaching) return;
         attaching = false;
         controller.show();
-        Qt.callLater(function() { keys.forceActiveFocus() });
+        Qt.callLater(function() { keyCatcher.forceActiveFocus() });
     }
     function askImport() {
         if (!importPreview) return;
@@ -523,7 +527,7 @@ Panel {
         owner: root.hostWidget || root
         bar: root.bar
         open: root.opened
-        focusTarget: keys
+        focusTarget: keyCatcher
         contentWidth: fittedContentWidth(Style.space(560))
         contentHeight: fittedContentHeight(Style.space(520))
 
@@ -655,8 +659,8 @@ Panel {
                                         rowSpacing: Style.space(10)
                                         StatusCell { width: (statusGrid.width - statusGrid.columnSpacing) / 2; label: "STATE"; value: root.status ? Model.titleCase(root.daemonState) : "…"; accent: root.daemonState === "recording" }
                                         StatusCell { width: (statusGrid.width - statusGrid.columnSpacing) / 2; label: "ENGINE"; value: root.status ? root.engine + " · " + (root.status.model ? root.status.model.name : "") : "…" }
-                                        StatusCell { width: (statusGrid.width - statusGrid.columnSpacing) / 2; label: "HOTKEY"; value: root.status ? Model.hotkeyLabel(root.status.hotkey) + (root.status.hotkey && root.status.hotkey.mode ? " · " + root.status.hotkey.mode.replace(/_/g, " ") : "") : "…" }
-                                        StatusCell { width: (statusGrid.width - statusGrid.columnSpacing) / 2; label: "OUTPUT"; value: root.status ? String(root.status.output_mode || "") : "…" }
+                                        StatusCell { width: (statusGrid.width - statusGrid.columnSpacing) / 2; label: "HOTKEY"; value: root.status ? Model.hotkeyLabel(root.status.hotkey) : "…" }
+                                        StatusCell { width: (statusGrid.width - statusGrid.columnSpacing) / 2; label: "OUTPUT"; value: root.status ? String(root.status.output_mode || "") + (root.status.hotkey && root.status.hotkey.mode ? " · " + String(root.status.hotkey.mode).replace(/_/g, " ") : "") : "…" }
                                     }
                                 }
 
@@ -722,7 +726,7 @@ Panel {
                                     onHoveredChanged: if (hovered) root.setCursor("test", -1)
                                     onActiveFocusChanged: root.noteEditor(testField, activeFocus)
                                     onTextChanged: previewDebounce.restart()
-                                    Keys.onEscapePressed: function(event) { keys.forceActiveFocus(); event.accepted = true }
+                                    Keys.onEscapePressed: function(event) { keyCatcher.forceActiveFocus(); event.accepted = true }
                                     Keys.onReturnPressed: root.previewPhrase()
                                 }
                                 Text {
@@ -752,8 +756,8 @@ Panel {
                                         onActiveFocusChanged: root.noteEditor(vocabSearch, activeFocus)
                                         onTextChanged: { root.cursorIndex = 0; body.contentY = 0 }
                                         Keys.onReturnPressed: root.addVocab()
-                                        Keys.onEscapePressed: function(event) { if (text !== "") text = ""; else keys.forceActiveFocus(); event.accepted = true }
-                                        Keys.onDownPressed: function(event) { keys.forceActiveFocus(); root.setCursor("rows", 0); event.accepted = true }
+                                        Keys.onEscapePressed: function(event) { if (text !== "") text = ""; else keyCatcher.forceActiveFocus(); event.accepted = true }
+                                        Keys.onDownPressed: function(event) { keyCatcher.forceActiveFocus(); root.setCursor("rows", 0); event.accepted = true }
                                     }
                                     Text {
                                         id: tokenMeter
@@ -814,7 +818,7 @@ Panel {
                                         foreground: root.foreground
                                         onActiveFocusChanged: root.noteEditor(dictFrom, activeFocus)
                                         Keys.onReturnPressed: { if (dictTo.text.trim() === "") dictTo.forceActiveFocus(); else root.upsertRule() }
-                                        Keys.onEscapePressed: function(event) { keys.forceActiveFocus(); event.accepted = true }
+                                        Keys.onEscapePressed: function(event) { keyCatcher.forceActiveFocus(); event.accepted = true }
                                     }
                                     TextField {
                                         id: dictTo
@@ -823,7 +827,7 @@ Panel {
                                         foreground: root.foreground
                                         onActiveFocusChanged: root.noteEditor(dictTo, activeFocus)
                                         Keys.onReturnPressed: root.upsertRule()
-                                        Keys.onEscapePressed: function(event) { keys.forceActiveFocus(); event.accepted = true }
+                                        Keys.onEscapePressed: function(event) { keyCatcher.forceActiveFocus(); event.accepted = true }
                                     }
                                     Button {
                                         id: categoryChip
@@ -856,9 +860,9 @@ Panel {
                                     onHoveredChanged: if (hovered) root.setCursor("search", -1)
                                     onActiveFocusChanged: root.noteEditor(dictSearch, activeFocus)
                                     onTextChanged: { root.cursorIndex = 0; body.contentY = 0 }
-                                    Keys.onReturnPressed: { keys.forceActiveFocus(); root.setCursor("rows", 0) }
-                                    Keys.onEscapePressed: function(event) { if (text !== "") text = ""; else keys.forceActiveFocus(); event.accepted = true }
-                                    Keys.onDownPressed: function(event) { keys.forceActiveFocus(); root.setCursor("rows", 0); event.accepted = true }
+                                    Keys.onReturnPressed: { keyCatcher.forceActiveFocus(); root.setCursor("rows", 0) }
+                                    Keys.onEscapePressed: function(event) { if (text !== "") text = ""; else keyCatcher.forceActiveFocus(); event.accepted = true }
+                                    Keys.onDownPressed: function(event) { keyCatcher.forceActiveFocus(); root.setCursor("rows", 0); event.accepted = true }
                                 }
                                 Repeater {
                                     model: root.filteredReplacements
@@ -1265,7 +1269,7 @@ Panel {
                                             foreground: root.foreground
                                             onActiveFocusChanged: root.noteEditor(exportPath, activeFocus)
                                             Keys.onReturnPressed: root.writeExport()
-                                            Keys.onEscapePressed: function(event) { keys.forceActiveFocus(); event.accepted = true }
+                                            Keys.onEscapePressed: function(event) { keyCatcher.forceActiveFocus(); event.accepted = true }
                                         }
                                         Button { id: exportButton; text: "Write"; bordered: true; foreground: root.foreground; fontFamily: root.fontFamily; enabled: exportPath.text.trim() !== "" && !service.busy; onClicked: root.writeExport() }
                                     }
@@ -1351,8 +1355,8 @@ Panel {
                 selectedIndex: 0
                 foreground: root.foreground
                 fontFamily: root.fontFamily
-                onCanceled: { opened = false; root.confirmAction = ""; root.confirmPayload = null; keys.forceActiveFocus() }
-                onConfirmed: { opened = false; root.applyConfirmed(); keys.forceActiveFocus() }
+                onCanceled: { opened = false; root.confirmAction = ""; root.confirmPayload = null; keyCatcher.forceActiveFocus() }
+                onConfirmed: { opened = false; root.applyConfirmed(); keyCatcher.forceActiveFocus() }
             }
         }
     }
@@ -1436,7 +1440,7 @@ Panel {
             var v = input.text.trim();
             if (v === "") root.unsetSetting(settingKey);
             else root.setSetting(settingKey, v);
-            keys.forceActiveFocus();
+            keyCatcher.forceActiveFocus();
         }
         width: parent ? parent.width : implicitWidth
         spacing: Style.spacing.labelGap
@@ -1452,7 +1456,7 @@ Panel {
             onHoveredChanged: if (hovered) root.setCursor(textRow.settingKey, -1)
             onActiveFocusChanged: { root.noteEditor(textRow, activeFocus); if (!activeFocus) textRow.sync() }
             Keys.onReturnPressed: textRow.commit()
-            Keys.onEscapePressed: function(event) { textRow.sync(); keys.forceActiveFocus(); event.accepted = true }
+            Keys.onEscapePressed: function(event) { textRow.sync(); keyCatcher.forceActiveFocus(); event.accepted = true }
         }
     }
     component SettingSlider: Column {
