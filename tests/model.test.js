@@ -235,3 +235,21 @@ test('wheelContentY steps a wheel notch by stepPx, passes pixelDelta through and
   assert.equal(Model.wheelContentY(100, 1000, 400, 0, 0, 84), 100, 'no delta is a no-op');
   assert.equal(Model.wheelContentY(100, 300, 400, 0, -120, 84), 0, 'content shorter than view stays at 0');
 });
+
+test('notices lists the TUI lock, sync conflicts, reconcile warnings, synced-from and migrations', () => {
+  assert.equal(Model.notices(null, null).length, 0);
+  assert.equal(Model.notices({tui_open_pid: null}, {}).length, 0);
+  const n = Model.notices({tui_open_pid: 4242}, {
+    warnings: ['Rebuilt vocabulary from config.toml\u202e'],
+    migrations_applied: ['enable_postprocess'],
+    sync: {applied_from: 'laptop', conflicts: ['a.json', 'b.json'], missing_model: null},
+  });
+  assert.equal(n.length, 5);
+  assert.equal(n[0].kind, 'warn'); assert.match(n[0].text, /pid 4242/); assert.match(n[0].text, /overwrites/);
+  assert.match(n[1].text, /2 sync conflict files/);
+  assert.equal(n[2].kind, 'info'); assert.ok(!n[2].text.includes('\u202e'));
+  assert.match(n[3].text, /synced from laptop/);
+  assert.match(n[4].text, /Migrated: enable_postprocess/);
+  assert.match(Model.notices({tui_open_pid: -1}, {}) [0].text, /^voxtype-tui is open —/);
+  assert.match(Model.notices(null, {sync: {conflicts: ['x']}})[0].text, /1 sync conflict file /);
+});

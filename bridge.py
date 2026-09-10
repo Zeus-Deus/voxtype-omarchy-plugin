@@ -36,6 +36,7 @@ are passed explicitly to ``AppState.load``; ``gpu.DROPIN_PATH`` is a
 from __future__ import annotations
 
 import json
+import fcntl
 import os
 import re
 import shutil
@@ -87,6 +88,7 @@ class Paths:
     models_dir: Path
     sync: Path
     dropin: Path
+    lock: Path
     runtime_state: Path
 
 
@@ -110,8 +112,49 @@ def _paths() -> Paths:
         models_dir=models_dir,
         sync=home / ".config" / "voxtype-tui" / "sync.json",
         dropin=home / ".config" / "systemd" / "user" / "voxtype.service.d" / "gpu.conf",
+        # The TUI holds an exclusive flock here for its whole lifetime; it
+        # keeps every edit in memory until Ctrl+S and then writes the whole
+        # config, so a panel write while it is open would be overwritten.
+        lock=sidecar.parent / ".lock",
         runtime_state=Path(runtime) / "voxtype" / "state",
     )
+
+
+# Ops that rewrite config.toml / metadata.json / the GPU drop-in. Refused
+# while the TUI is open (see Paths.lock); read and daemon ops are unaffected.
+WRITE_OPS: frozenset[str] = frozenset({
+    "vocab.add", "vocab.remove", "vocab.set",
+    "dict.upsert", "dict.remove", "dict.set_category",
+    "settings.set", "settings.unset",
+    "models.set_active", "models.delete", "gpu.set_device",
+    "import.apply",
+})
+
+
+def tui_lock_holder(paths: Paths) -> int | None:
+    """PID of a running voxtype-tui holding its single-instance lock, or
+    None when nobody does. Same file and flock protocol as
+    ``voxtype_tui.single_instance`` but read-only: the probe never
+    truncates the file or leaves a lock behind."""
+    if not paths.lock.exists():
+        return None
+    try:
+        fd = os.open(paths.lock, os.O_RDONLY)
+    except OSError:
+        return None
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            try:
+                data = os.read(fd, 32).decode("utf-8", errors="replace").split()
+                return int(data[0]) if data else -1
+            except (OSError, ValueError):
+                return -1
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return None
+    finally:
+        os.close(fd)
 
 
 def _apply_env_overrides(paths: Paths) -> None:
@@ -734,6 +777,7 @@ def op_status(args: dict, paths: Paths) -> dict[str, Any]:
         # Helpers the panel shells out to for sudo actions / file picking.
         "terminal_launcher_available": shutil.which("omarchy-launch-terminal") is not None,
         "picker_available": shutil.which("zenity") is not None,
+        "tui_open_pid": tui_lock_holder(paths),
     }
     if config_error:
         out["warnings"] = [f"config.toml could not be parsed: {config_error}"]
@@ -1432,6 +1476,11 @@ def handle(request: Any) -> dict[str, Any]:
         return {"ok": False, "error": f"unknown op {op!r}", "ops": sorted(OPS)}
     paths = _paths()
     _apply_env_overrides(paths)
+    if op in WRITE_OPS:
+        holder = tui_lock_holder(paths)
+        if holder is not None:
+            who = f"voxtype-tui is open (pid {holder})" if holder > 0 else "voxtype-tui is open"
+            return {"ok": False, "error": f"{who} — save and close it first; it would overwrite this change", "op": op, "tui_open_pid": holder}
     try:
         return OPS[op](request, paths)
     except BridgeError as e:

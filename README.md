@@ -49,7 +49,7 @@ Plugins run unsandboxed inside `omarchy-shell`, so:
 
 ```bash
 node --test tests/*.test.js
-python -m pytest tests/
+uv run --python /usr/bin/python3 --with pytest pytest -q tests/test_bridge.py
 qmllint -I /usr/share/omarchy/shell BarWidget.qml Panel.qml Service.qml VoxtypeIcon.qml
 omarchy plugin validate .
 omarchy-restart-shell && qs log -p /usr/share/omarchy/shell --tail 60

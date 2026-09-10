@@ -433,3 +433,22 @@ function wheelContentY(contentY, contentHeight, viewHeight, pixelDeltaY, angleDe
     else return contentY || 0;
     return Math.max(0, Math.min(maxY, (contentY || 0) + delta));
 }
+
+// Informational notices the TUI shows as banners: who else holds the
+// config, what the sidecar reconcile rewrote, where sync.json came from,
+// and Syncthing conflict files. Pure so the panel can list them.
+function notices(status, snapshot) {
+    var out = [];
+    var pid = status ? status.tui_open_pid : null;
+    if (pid !== null && pid !== undefined)
+        out.push({kind: "warn", text: "voxtype-tui is open" + (pid > 0 ? " (pid " + pid + ")" : "") + " — save and close it before editing here, or its next save overwrites these changes"});
+    var s = snapshot || {};
+    var sync = s.sync || {};
+    if (sync.conflicts && sync.conflicts.length)
+        out.push({kind: "warn", text: sync.conflicts.length + " sync conflict file" + (sync.conflicts.length === 1 ? "" : "s") + " in the voxtype-tui folder — resolve in the TUI"});
+    (s.warnings || []).forEach(function(w) { out.push({kind: "info", text: sanitize(w, 160)}); });
+    if (sync.applied_from)
+        out.push({kind: "info", text: "Settings synced from " + sanitize(sync.applied_from, 60) + " — save any change to keep them"});
+    (s.migrations_applied || []).forEach(function(m) { out.push({kind: "info", text: "Migrated: " + sanitize(m, 120)}); });
+    return out;
+}

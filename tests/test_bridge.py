@@ -1671,3 +1671,62 @@ def test_download_sigterm_cancels_and_removes_partial(env: Env):
     assert "LOG removed partial ggml-slow.bin" in rest
     assert not (env.models_dir / "ggml-slow.bin").exists()
     assert "PROGRESS 12.5" in seen
+
+
+# ---------------------------------------------------------------------------
+# TUI single-instance lock: the TUI buffers edits until Ctrl+S and then
+# rewrites the whole config, so a panel write while it is open would be lost.
+# ---------------------------------------------------------------------------
+
+
+def _hold_tui_lock(env: Env):
+    """Take the lock exactly the way voxtype-tui does at startup."""
+    from voxtype_tui import single_instance
+
+    lock = env.sidecar.parent / ".lock"
+    result = single_instance.acquire(lock)
+    assert result.acquired and result.fd is not None
+    return lock, result.fd
+
+
+def test_write_ops_are_refused_while_the_tui_holds_its_lock(env: Env):
+    env.ok("vocab.add", phrase="before")
+    lock, fd = _hold_tui_lock(env)
+    try:
+        res = env.fail("vocab.add", phrase="lost")
+        assert "voxtype-tui is open" in res["error"]
+        assert f"pid {os.getpid()}" in res["error"]
+        assert res["tui_open_pid"] == os.getpid()
+        for op, args in [
+            ("dict.upsert", {"from": "a", "to": "b", "category": "Replacement"}),
+            ("settings.set", {"path": "whisper.language", "value": "de"}),
+            ("settings.unset", {"path": "whisper.language"}),
+            ("vocab.remove", {"phrase": "before"}),
+        ]:
+            assert env.fail(op, **args)["tui_open_pid"] == os.getpid()
+        # Nothing reached disk and the lockfile still carries the holder PID.
+        assert env.config_dict()["whisper"]["initial_prompt"] == "before"
+        assert lock.read_text().strip() == str(os.getpid())
+        # Reads and status keep working and report who holds the lock.
+        assert env.ok("load")["snapshot"]["vocabulary"][0]["phrase"] == "before"
+        assert env.ok("status")["tui_open_pid"] == os.getpid()
+    finally:
+        os.close(fd)  # releases the flock, like the TUI exiting
+    assert env.ok("status")["tui_open_pid"] is None
+    assert env.ok("vocab.add", phrase="after")["snapshot"]["vocabulary"][1]["phrase"] == "after"
+
+
+def test_stale_lockfile_without_a_holder_does_not_block_writes(env: Env):
+    lock = env.sidecar.parent / ".lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("424242\n")  # left behind by a crashed TUI: flock is gone
+    assert env.ok("status")["tui_open_pid"] is None
+    assert env.ok("vocab.add", phrase="fine")["ok"]
+    assert lock.read_text() == "424242\n"  # the probe never rewrites the file
+
+
+def test_write_ops_set_matches_dispatch_table():
+    import bridge
+
+    mutating = {op for op in bridge.OPS if op.split(".")[0] in {"vocab", "dict", "settings", "models", "gpu"} or op == "import.apply"}
+    assert bridge.WRITE_OPS == mutating - {"models.list", "gpu.status"}

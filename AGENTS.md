@@ -17,14 +17,18 @@
 5. Sudo is never handled in QML or the bridge: GPU enable/disable is a detached `omarchy-launch-terminal sudo voxtype setup gpu --enable|--disable`.
 6. No hard-coded colours, fonts, radii or margins — `Color.*`, `Style.*`, `bar ? bar.foreground : Color.foreground`.
 7. `status` must stay fast (<150 ms, Textual-free, no `voxtype setup` calls); it is polled every 2 s while the panel is open.
-8. Recording toggles through the direct `voxtype record toggle` Process for latency; the bridge `record.toggle` op stays as the error-reporting fallback.
+8. Write ops are refused while the TUI holds `~/.config/voxtype-tui/.lock` (`bridge.WRITE_OPS`, `tui_lock_holder`): the TUI buffers edits until Ctrl+S and then rewrites the whole config, so a concurrent panel write would be lost. `status.tui_open_pid` drives the Dictate notice.
+9. Recording toggles through the direct `voxtype record toggle` Process for latency; the bridge `record.toggle` op stays as the error-reporting fallback.
 
 ## Gates
 
 ```bash
 node --test tests/*.test.js
 uv run --python /usr/bin/python3 --with pytest pytest -q tests/test_bridge.py   # /usr/bin/python3 has no pytest module
-qmllint -I /usr/share/omarchy/shell BarWidget.qml Panel.qml Service.qml VoxtypeIcon.qml   # exit 0, empty output
+qmllint -I /usr/share/omarchy/shell BarWidget.qml Panel.qml Service.qml VoxtypeIcon.qml   # exit 0, empty output (syntax only)
+# Semantic lint: the Qt 6 linter with the shell importable as `qs`:
+#   d=$(mktemp -d) && ln -s /usr/share/omarchy/shell "$d/qs" && /usr/lib/qt6/bin/qmllint -I "$d" -I /usr/lib/qt6/qml Panel.qml
+# Expected noise only: unqualified access inside inline components, Style.font.* / bar.* missing-property, onExited handler parameters.
 omarchy plugin validate .
 ```
 

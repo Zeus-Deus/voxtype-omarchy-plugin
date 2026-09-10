@@ -772,6 +772,32 @@ Panel {
                                     }
                                 }
 
+                                Repeater {
+                                    model: Model.notices(root.status, root.snapshot)
+                                    delegate: CursorSurface {
+                                        required property var modelData
+                                        width: parent.width
+                                        bordered: true
+                                        foreground: modelData.kind === "warn" ? root.urgent : root.foreground
+                                        accent: modelData.kind === "warn" ? root.urgent : Color.accent
+                                        implicitHeight: noticeRow.implicitHeight + Style.space(20)
+                                        Row {
+                                            id: noticeRow
+                                            anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                                            anchors.margins: Style.space(12)
+                                            spacing: Style.space(10)
+                                            Text { textFormat: Text.PlainText; text: modelData.kind === "warn" ? "󰀦" : "󰋽"; color: modelData.kind === "warn" ? root.urgent : Color.accent; font.family: root.fontFamily; font.pixelSize: Style.font.heading; anchors.verticalCenter: parent.verticalCenter }
+                                            Text {
+                                                width: parent.width - Style.space(30) - parent.spacing
+                                                textFormat: Text.PlainText; wrapMode: Text.WordWrap
+                                                text: modelData.text
+                                                color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body
+                                                anchors.verticalCenter: parent.verticalCenter
+                                            }
+                                        }
+                                    }
+                                }
+
                                 CursorSurface {
                                     visible: root.modelMissing
                                     width: parent.width
