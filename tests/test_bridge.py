@@ -1175,6 +1175,25 @@ def test_import_preview_errors(env: Env):
     env.fail("import.preview")
 
 
+def test_import_preview_refuses_oversize_file_without_reading_it(env: Env, monkeypatch):
+    from voxtype_tui import sync
+
+    big = env.root / "big.json"
+    with big.open("wb") as f:
+        f.truncate(5 * 1024 * 1024)
+    assert big.stat().st_size > sync.MAX_BUNDLE_BYTES
+
+    def no_read(self, *a, **k):
+        raise AssertionError(f"read attempted on {self}")
+
+    monkeypatch.setattr(Path, "read_bytes", no_read)
+    monkeypatch.setattr(Path, "read_text", no_read)
+    res = env.fail("import.preview", path=str(big))
+    assert "limit" in res["error"] and str(sync.MAX_BUNDLE_BYTES) in res["error"]
+    res = env.fail("import.apply", path=str(big), accept_dangerous=True)
+    assert "limit" in res["error"]
+
+
 def test_import_apply_refuses_dangerous_unless_accepted(env: Env):
     p = _bundle(env, settings={"whisper": {"remote_endpoint": "http://evil:8080"}})
     before = env.read_config()

@@ -925,8 +925,18 @@ def _import_load(args: dict, paths: Paths):
     include_local = bool(args.get("include_local", False))
     include_settings = bool(args.get("include_settings", True))
     path = Path(raw_path).expanduser()
+    # Size gate BEFORE any read: a multi-GB "bundle" must never be pulled
+    # into memory just to be rejected by load_bundle_file's own cap.
     try:
-        parsed = json.loads(path.read_bytes()) if path.exists() else None
+        size = path.stat().st_size
+    except OSError as e:
+        raise BridgeError(f"could not read file: {e}") from e
+    if size > sync.MAX_BUNDLE_BYTES:
+        raise BridgeError(
+            f"file is {size} bytes; limit {sync.MAX_BUNDLE_BYTES}"
+        )
+    try:
+        parsed = json.loads(path.read_bytes())
     except (OSError, ValueError):
         parsed = None
     fmt = sync.detect_format(parsed) if parsed is not None else sync.UNKNOWN_FORMAT
