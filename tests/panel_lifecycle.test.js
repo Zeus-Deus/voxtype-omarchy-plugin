@@ -191,3 +191,19 @@ test('every row text binding for bridge strings goes through Model.sanitize', ()
   assert.match(panel, /text: Model\.sanitize\(modelRow\.modelData\.name, 120\)/);
   assert.doesNotMatch(panel, /text: (vocabRow\.modelData\.phrase|ruleRow\.modelData\.(from|to)|modelRow\.modelData\.name)[;\s]/);
 });
+
+test('redacted import rows never reach a value formatter, in the card or the confirmation', () => {
+  const h = panelHarness();
+  h.root.importPath = '/tmp/b.json';
+  h.root.importPreview = {format: 'v2', warnings: [], diff: {settings_change: [
+    {path: 'whisper.remote_api_key', dangerous: true, redacted: true, old_set: true, new_set: true},
+    {path: 'output.post_process.command', dangerous: true, old: 'a', new: 'rm -rf'},
+  ]}};
+  h.root.askImport();
+  assert.match(h.root.confirmation.message, /whisper\.remote_api_key will be replaced/);
+  assert.match(h.root.confirmation.message, /output\.post_process\.command: a → rm -rf/);
+  assert.doesNotMatch(h.root.confirmation.message, /undefined/);
+  assert.equal(h.root.confirmation.confirmText, 'Import anyway');
+  assert.match(panel, /text: "󰀦 " \+ Model\.dangerLine\(modelData, 40, 60\)/);
+  assert.doesNotMatch(panel, /modelData\.(old|new)\b/);
+});

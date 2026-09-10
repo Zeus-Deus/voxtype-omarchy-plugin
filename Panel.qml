@@ -397,7 +397,7 @@ Panel {
         if (!importPreview) return;
         var danger = Model.dangerousChanges(importPreview.diff);
         var lines = [Model.diffSummary(importPreview.diff)];
-        for (var i = 0; i < danger.length; i++) lines.push("⚠ " + danger[i].path + " = " + Model.sanitize(danger[i].new, 60));
+        for (var i = 0; i < danger.length; i++) lines.push("⚠ " + Model.dangerLine(danger[i], 40, 60));
         ask("import.apply", null, "Import " + Model.sanitize(importPath.split("/").pop(), 60) + "?\n" + lines.join("\n"), danger.length ? "Import anyway" : "Import");
     }
     function noteEditor(item, focused) {
@@ -1307,7 +1307,7 @@ Panel {
                                             delegate: Text {
                                                 required property var modelData
                                                 width: importColumn.width; textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere
-                                                text: "󰀦 " + modelData.path + ": " + Model.sanitize(modelData.old, 40) + " → " + Model.sanitize(modelData.new, 60)
+                                                text: "󰀦 " + Model.dangerLine(modelData, 40, 60)
                                                 color: root.urgent; font.family: root.fontFamily; font.pixelSize: Style.font.caption
                                             }
                                         }

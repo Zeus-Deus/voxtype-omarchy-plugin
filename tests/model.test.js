@@ -149,6 +149,10 @@ test('import diff summary and dangerous rows', () => {
   assert.equal(Model.diffSummary(diff), '+1 vocab · +1 rules · 2 settings');
   assert.equal(Model.dangerousChanges(diff).length, 1);
   assert.equal(Model.diffSummary({}), 'No changes');
+  assert.equal(Model.dangerLine({path: 'p', old: 'a\u202e', new: 'b'}), 'p: a → b');
+  assert.equal(Model.dangerLine({path: 'whisper.remote_endpoint', dangerous: true, redacted: true, old_set: true, new_set: true}), 'whisper.remote_endpoint will be replaced');
+  assert.doesNotMatch(Model.dangerLine({path: 'p', redacted: true, old: 'LEAK', new: 'LEAK'}), /LEAK|undefined/);
+  assert.doesNotMatch(Model.dangerLine({path: 'p', dangerous: true}), /undefined/);
   assert.equal(Model.diffSummary(null), 'Nothing to import');
 });
 

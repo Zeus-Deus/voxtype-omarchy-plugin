@@ -297,6 +297,15 @@ function dangerousChanges(diff) {
     return out;
 }
 
+// A dangerous change may arrive redacted ({path, dangerous, redacted:true,
+// old_set, new_set}) with no old/new at all; never format values for those.
+function dangerLine(change, oldMax, newMax) {
+    if (!change) return "";
+    var path = sanitize(change.path, 80);
+    if (change.redacted === true) return path + " will be replaced";
+    return path + ": " + sanitize(change.old, oldMax || 40) + " → " + sanitize(change.new, newMax || 60);
+}
+
 function diffSummary(diff) {
     if (!diff) return "Nothing to import";
     var d = diff;
