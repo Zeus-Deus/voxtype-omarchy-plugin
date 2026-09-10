@@ -56,6 +56,9 @@ Panel {
     readonly property var filteredReplacements: Model.filterReplacements(replacements, dictSearch.text)
     readonly property string daemonState: service.daemonState
     readonly property string engine: String(Model.settingValue(config, "engine", status && status.engine ? status.engine : "whisper"))
+    // True until the catalog for the current engine has been read; an engine
+    // switch shows a neutral loading state rather than a stale "no models".
+    readonly property bool modelsLoading: modelsEngine !== engine || !loaded
     readonly property string modelPath: options && options.model_paths && options.model_paths[engine] ? options.model_paths[engine] : engine + ".model"
     readonly property bool stale: (status && status.daemon && status.daemon.stale) || restartNeeded.length > 0
     readonly property var lockedState: Model.lockedState(status, tuiMissing ? Model.ERROR_TUI_MISSING : "")
@@ -229,7 +232,7 @@ Panel {
         notice = daemonState === "recording" ? "Stopping…" : "Recording…";
     }
     function restartDaemon() {
-        if (locked || service.busy && service.request.op === "daemon.restart") return;
+        if (locked || service.restarting) return;
         notice = "Restarting daemon…";
         service.run({op: "daemon.restart"});
     }
@@ -602,7 +605,7 @@ Panel {
                                 focusable: false
                                 foreground: root.foreground
                                 fontFamily: root.fontFamily
-                                enabled: !service.recording && !(service.busy && service.request.op === "daemon.restart")
+                                enabled: !service.recording && !service.restarting
                                 tooltipText: root.primary === "record" ? "r · toggle recording" : (root.primary === "restart" ? "Ctrl+R · restart the daemon" : "Start the voxtype service")
                                 onClicked: root.runPrimary()
                             }
@@ -717,7 +720,7 @@ Panel {
                                         hasCursor: root.cursorIs("restart")
                                         foreground: root.foreground
                                         fontFamily: root.fontFamily
-                                        enabled: !(service.busy && service.request.op === "daemon.restart")
+                                        enabled: !service.restarting
                                         onHovered: function(h) { if (h) root.setCursor("restart", -1) }
                                         onClicked: root.restartDaemon()
                                     }
@@ -823,7 +826,7 @@ Panel {
                                             id: vocabActions
                                             anchors.right: parent.right; anchors.rightMargin: Style.space(8); anchors.verticalCenter: parent.verticalCenter
                                             opacity: vocabRow.hasCursor ? 1 : 0
-                                            enabled: vocabRow.hasCursor && !service.busy
+                                            enabled: vocabRow.hasCursor && !service.mutating
                                             PanelActionButton { iconText: "󰆴"; foreground: root.foreground; hoverColor: root.urgent; tooltipText: "x · remove word"; onClicked: { root.setCursor("rows", vocabRow.index); root.deleteSelected() } }
                                         }
                                     }
@@ -936,8 +939,8 @@ Panel {
                                                 text: String(ruleRow.modelData.category || "").toUpperCase(); textFormat: Text.PlainText
                                                 color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true; font.letterSpacing: 1
                                             }
-                                            PanelActionButton { visible: ruleRow.hasCursor; iconText: "󰑖"; foreground: root.foreground; tooltipText: "c · cycle category"; enabled: !service.busy; onClicked: { root.setCursor("rows", ruleRow.index); root.cycleRuleCategory() } }
-                                            PanelActionButton { visible: ruleRow.hasCursor; iconText: "󰆴"; foreground: root.foreground; hoverColor: root.urgent; tooltipText: "x · delete rule"; enabled: !service.busy; onClicked: { root.setCursor("rows", ruleRow.index); root.deleteSelected() } }
+                                            PanelActionButton { visible: ruleRow.hasCursor; iconText: "󰑖"; foreground: root.foreground; tooltipText: "c · cycle category"; enabled: !service.mutating; onClicked: { root.setCursor("rows", ruleRow.index); root.cycleRuleCategory() } }
+                                            PanelActionButton { visible: ruleRow.hasCursor; iconText: "󰆴"; foreground: root.foreground; hoverColor: root.urgent; tooltipText: "x · delete rule"; enabled: !service.mutating; onClicked: { root.setCursor("rows", ruleRow.index); root.deleteSelected() } }
                                         }
                                     }
                                 }
@@ -1170,7 +1173,7 @@ Panel {
                                     Text {
                                         anchors.bottom: parent.bottom; anchors.bottomMargin: Style.space(8)
                                         textFormat: Text.PlainText
-                                        text: root.options && root.options.compiled_engines && root.options.compiled_engines.indexOf(root.engine) < 0 ? "󰀦 not compiled into this voxtype build" : (root.modelsEngine === root.engine ? root.modelRows.length + " models in catalog" : "")
+                                        text: root.options && root.options.compiled_engines && root.options.compiled_engines.indexOf(root.engine) < 0 ? "󰀦 not compiled into this voxtype build" : (root.modelsLoading ? "" : root.modelRows.length + " models in catalog")
                                         color: root.options && root.options.compiled_engines && root.options.compiled_engines.indexOf(root.engine) < 0 ? root.urgent : root.muted
                                         font.family: root.fontFamily; font.pixelSize: Style.font.caption
                                     }
@@ -1240,7 +1243,7 @@ Panel {
                                             anchors.right: parent.right; anchors.rightMargin: Style.space(8); anchors.verticalCenter: parent.verticalCenter
                                             spacing: Style.space(4)
                                             opacity: modelRow.hasCursor ? 1 : 0
-                                            enabled: modelRow.hasCursor && !service.busy
+                                            enabled: modelRow.hasCursor && !service.mutating
                                             PanelActionButton { visible: modelRow.modelData.downloaded && !modelRow.modelData.active; iconText: "󰄬"; foreground: root.foreground; tooltipText: "Enter · set active"; onClicked: root.setActiveModel(modelRow.modelData) }
                                             PanelActionButton { visible: !modelRow.modelData.downloaded; iconText: "󰇚"; foreground: root.foreground; tooltipText: "d · download"; enabled: !service.downloading; onClicked: root.startDownload(modelRow.modelData) }
                                             PanelActionButton { visible: modelRow.modelData.downloaded && !modelRow.modelData.active; iconText: "󰆴"; foreground: root.foreground; hoverColor: root.urgent; tooltipText: "x · delete from disk"; onClicked: { root.setCursor("rows", modelRow.index); root.deleteSelected() } }
@@ -1249,9 +1252,9 @@ Panel {
                                 }
                                 EmptyState {
                                     visible: root.modelsEngine !== root.engine || root.modelRows.length === 0
-                                    glyph: "󰆼"
-                                    title: service.busy ? "Reading the model catalog…" : "No models known for " + root.engine
-                                    hint: "Models live under the voxtype data directory."
+                                    glyph: root.modelsLoading ? "󰔟" : "󰆼"
+                                    title: root.modelsLoading ? "Reading the model catalog…" : "No models known for " + root.engine
+                                    hint: root.modelsLoading ? "" : "Models live under the voxtype data directory."
                                 }
 
                                 PanelSeparator { width: parent.width; foreground: root.foreground }
@@ -1306,7 +1309,7 @@ Panel {
                                             Keys.onReturnPressed: root.writeExport()
                                             Keys.onEscapePressed: function(event) { keyCatcher.forceActiveFocus(); event.accepted = true }
                                         }
-                                        Button { id: exportButton; text: "Write"; bordered: true; foreground: root.foreground; fontFamily: root.fontFamily; enabled: exportPath.text.trim() !== "" && !service.busy; onClicked: root.writeExport() }
+                                        Button { id: exportButton; text: "Write"; bordered: true; foreground: root.foreground; fontFamily: root.fontFamily; enabled: exportPath.text.trim() !== "" && !service.mutating; onClicked: root.writeExport() }
                                     }
                                     Text {
                                         width: parent.width; textFormat: Text.PlainText; wrapMode: Text.WordWrap
@@ -1347,7 +1350,7 @@ Panel {
                                         }
                                         Row {
                                             spacing: Style.space(8)
-                                            Button { text: "Apply…"; bordered: true; foreground: root.foreground; fontFamily: root.fontFamily; fontSize: Style.font.bodySmall; enabled: !service.busy; onClicked: root.askImport() }
+                                            Button { text: "Apply…"; bordered: true; foreground: root.foreground; fontFamily: root.fontFamily; fontSize: Style.font.bodySmall; enabled: !service.mutating; onClicked: root.askImport() }
                                             Button { text: "Discard"; bordered: true; foreground: root.foreground; fontFamily: root.fontFamily; fontSize: Style.font.bodySmall; onClicked: root.importPreview = null }
                                         }
                                     }
@@ -1363,7 +1366,7 @@ Panel {
                         height: Style.space(30)
                         readonly property var notice: Model.footerNotice({
                             error: root.errorText,
-                            busyText: service.picking ? "Choosing a bundle…" : (service.busy && service.request.op === "daemon.restart" ? "Restarting daemon…" : ""),
+                            busyText: service.picking ? "Choosing a bundle…" : (service.restarting ? "Restarting daemon…" : ""),
                             notice: root.notice,
                             restartNeeded: root.stale,
                             idleText: root.locked ? "" : (root.status ? (root.status.daemon && root.status.daemon.active ? "Daemon running · pid " + (root.status.daemon.main_pid || "?") : "Daemon stopped") : "")

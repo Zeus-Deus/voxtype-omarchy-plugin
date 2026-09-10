@@ -101,6 +101,27 @@ test('a bridge call writes the request on stdin and completes once from a normal
   assert.equal(h.root.deadline.running, false);
 });
 
+test('mutating excludes the status poll so row actions do not flicker every 2 s', () => {
+  const h = serviceHarness();
+  const mutating = () => vm.runInContext(service.match(/readonly property bool mutating: (.+)/)[1], h.root);
+  const restarting = () => vm.runInContext(service.match(/readonly property bool restarting: (.+)/)[1], h.root);
+  vm.createContext(h.root);
+  assert.equal(mutating(), false);
+  h.root.run({op: 'status'});
+  assert.equal(mutating(), false, 'status poll is not a mutation');
+  h.fire('worker', 'onExited', 0);
+  h.root.run({op: 'vocab.add', phrase: 'x'});
+  assert.equal(mutating(), true);
+  assert.equal(restarting(), false);
+  h.fire('worker', 'onExited', 0);
+  h.root.run({op: 'daemon.restart'});
+  assert.equal(restarting(), true);
+  // Every row action / form button in the panel gates on mutating, never on raw busy.
+  const gates = stripComments(panel).match(/enabled: [^\n]*service\.(busy|mutating|restarting)[^\n]*/g) || [];
+  assert.ok(gates.length >= 8, 'found ' + gates.length + ' gates');
+  for (const g of gates) assert.doesNotMatch(g, /service\.busy/, g);
+});
+
 test('daemon.restart gets the long deadline', () => {
   const h = serviceHarness();
   h.root.run({op: 'daemon.restart'});

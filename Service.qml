@@ -14,6 +14,10 @@ Item {
 
     property bool busy: false
     property var request: ({})
+    // The 2 s status poll is not a mutation; only gate controls on real work
+    // so rows and buttons do not flicker on every poll.
+    readonly property bool mutating: busy && request.op !== "status"
+    readonly property bool restarting: busy && request.op === "daemon.restart"
     property bool timedOut: false
     property int workerGeneration: 0
     property var queue: []

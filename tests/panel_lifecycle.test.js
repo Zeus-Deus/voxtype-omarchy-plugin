@@ -256,3 +256,19 @@ test('a missing config.toml locks the panel with a copyable, never executed, vox
   h.root.status = Object.assign({}, h.root.status, {voxtype_installed: false});
   assert.equal(h.root.lockedCommand, 'omarchy install voxtype', 'not-installed wins over not-set-up');
 });
+
+test('an engine switch shows a neutral loading state until its catalog arrives', () => {
+  const h = panelHarness();
+  h.root.section = 'models';
+  h.root.loaded = false;
+  assert.equal(h.root.modelsLoading, true, 'nothing loaded yet');
+  h.root.loaded = true;
+  h.complete('models.list', {ok: true, engine: 'whisper', models: [{name: 'base', downloaded: true}]}, {op: 'models.list', engine: 'whisper'});
+  assert.equal(h.root.modelsLoading, false);
+  h.root.snapshot = {settings: {engine: 'parakeet'}};
+  assert.equal(h.root.engine, 'parakeet');
+  assert.equal(h.root.modelsLoading, true, 'stale whisper catalog is not shown as parakeet having no models');
+  h.complete('models.list', {ok: true, engine: 'parakeet', models: []}, {op: 'models.list', engine: 'parakeet'});
+  assert.equal(h.root.modelsLoading, false, 'now an honest empty state');
+  assert.match(panel, /title: root\.modelsLoading \? "Reading the model catalog…" : "No models known for " \+ root\.engine/);
+});
