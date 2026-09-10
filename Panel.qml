@@ -184,8 +184,15 @@ Panel {
         confirmAction = "";
         attaching = false;
         openPopups = 0;
+        service.cancelPick();
         controller.hide();
         Qt.callLater(function() { root.popoutSwitchClosing = false });
+    }
+    function popoutTakenElsewhere() {
+        // The bar hands the popout to whichever widget asked last; while this
+        // panel is hidden for a chooser the marker is foreign, not ours.
+        var owner = hostWidget || root;
+        return !!(bar && bar.activePopout && bar.activePopout !== owner);
     }
     onOpenedChanged: {
         if (!opened) {
@@ -380,6 +387,9 @@ Panel {
     function resumeAfterPick() {
         if (!attaching) return;
         attaching = false;
+        // A late chooser result must never reclaim the screen from the
+        // widget that took the popout meanwhile; the result is still kept.
+        if (popoutTakenElsewhere()) return;
         controller.show();
         Qt.callLater(function() { keyCatcher.forceActiveFocus() });
     }

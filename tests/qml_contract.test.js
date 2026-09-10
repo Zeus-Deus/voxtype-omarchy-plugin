@@ -224,6 +224,25 @@ test('file picker only reports a path on a clean exit', () => {
   same(h.picks, [null, '/tmp/bundle.json']);
 });
 
+test('cancelPick terminates a running chooser, or completes a stopped one as cancelled', () => {
+  const h = serviceHarness();
+  h.root.pick();
+  h.root.picker.running = true;
+  h.root.cancelPick();
+  same(h.root.picker.signals, [15]);
+  assert.equal(h.root.picking, true, 'completion arrives with the exit');
+  h.root.picker.running = false;
+  h.fire('picker', 'onExited', 143);
+  same(h.picks, [null]);
+  h.root.pick();
+  h.root.picker.running = false; // FailedToStart: nothing to signal
+  h.root.cancelPick();
+  assert.equal(h.root.picking, false);
+  same(h.picks, [null, null]);
+  h.root.cancelPick();
+  same(h.picks, [null, null], 'idle cancel is a no-op');
+});
+
 test('GPU setup goes to the terminal helper with a fixed argv and never a password', () => {
   const h = serviceHarness();
   h.root.launchGpuSetup(true);
@@ -293,7 +312,9 @@ test('no panel shortcut depends on a key PanelKeyCatcher swallows (h, l, j, k, x
 });
 
 test('closeForPopoutSwitch is overridden and clears the attach flag so a late chooser cannot reclaim the screen', () => {
-  assert.match(panel, /function closeForPopoutSwitch\(\) \{[\s\S]*?popoutSwitchClosing = true;[\s\S]*?attaching = false;[\s\S]*?controller\.hide\(\);[\s\S]*?Qt\.callLater\(function\(\) \{ root\.popoutSwitchClosing = false \}\)/);
+  assert.match(panel, /function closeForPopoutSwitch\(\) \{[\s\S]*?popoutSwitchClosing = true;[\s\S]*?attaching = false;[\s\S]*?service\.cancelPick\(\);[\s\S]*?controller\.hide\(\);[\s\S]*?Qt\.callLater\(function\(\) \{ root\.popoutSwitchClosing = false \}\)/);
+  assert.match(panel, /function resumeAfterPick\(\) \{[\s\S]*?if \(popoutTakenElsewhere\(\)\) return;[\s\S]*?controller\.show\(\)/);
+  assert.match(panel, /bar\.activePopout !== owner/);
   assert.match(panel, /function beginImport\(\)[\s\S]{0,300}attaching = true;[\s\S]{0,120}controller\.hide\(\);[\s\S]{0,80}service\.pick\(\)/);
   assert.match(panel, /function launchGpu\(enable\)[\s\S]{0,400}controller\.hide\(\);[\s\S]{0,60}service\.launchGpuSetup\(enable\)/);
   assert.match(widget, /function closeForPopoutSwitch\(\) \{ if \(panelLoader\.item\) panelLoader\.item\.closeForPopoutSwitch\(\) \}/);

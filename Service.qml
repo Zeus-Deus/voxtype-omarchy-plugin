@@ -142,6 +142,11 @@ Item {
         pickerDeadline.restart();
         return true;
     }
+    function cancelPick() {
+        if (!picking) return;
+        if (picker.running) picker.signal(15);
+        else finishPicker(-1);
+    }
     function finishPicker(code) {
         if (!picking) return;
         pickerDeadline.stop();
