@@ -137,6 +137,14 @@ if a[:1] == ["setup"]:
         sys.exit(0)
 
 if a[:2] == ["record", "toggle"]:
+    mode = os.environ.get("FAKE_VOXTYPE_TOGGLE", "ok")
+    if mode == "fail":
+        print("\x1b[31mError:\x1b[0m Failed to connect to daemon socket", file=sys.stderr)
+        sys.exit(1)
+    if mode == "silent-fail":
+        sys.exit(7)
+    if mode == "hang":
+        time.sleep(30)
     print("Recording started")
     sys.exit(0)
 
@@ -1459,11 +1467,35 @@ def test_daemon_start_failure(env: Env):
 
 
 def test_record_toggle(env: Env):
+    assert "record.toggle" in bridge.OPS  # QML may switch the bar button to it
     res = env.ok("record.toggle")
     assert res["message"] == "Recording started"
     assert env.voxtype_calls() == ["record toggle"]
     env.remove_fake("voxtype")
-    env.fail("record.toggle")
+    res = env.fail("record.toggle")
+    assert "voxtype binary not found" in res["error"]
+
+
+def test_record_toggle_failures_carry_real_error(env: Env, monkeypatch):
+    monkeypatch.setenv("FAKE_VOXTYPE_TOGGLE", "fail")
+    res = env.fail("record.toggle")
+    assert "Failed to connect to daemon socket" in res["error"]
+    assert "\x1b[" not in res["error"]
+    assert "daemon is not running" in res["error"]  # fixture daemon is stopped
+
+    env.daemon(active=True)
+    res = env.fail("record.toggle")
+    assert "daemon is not running" not in res["error"]
+
+    monkeypatch.setenv("FAKE_VOXTYPE_TOGGLE", "silent-fail")
+    res = env.fail("record.toggle")
+    assert "exited 7" in res["error"]
+
+    monkeypatch.setenv("FAKE_VOXTYPE_TOGGLE", "hang")
+    real_run = bridge._run
+    monkeypatch.setattr(bridge, "_run", lambda argv, timeout: real_run(argv, 0.3))
+    res = env.fail("record.toggle")
+    assert "timed out" in res["error"]
 
 
 # ---------------------------------------------------------------------------

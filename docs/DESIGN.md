@@ -93,7 +93,7 @@ Environment overrides for tests (never set in production): `VOXTYPE_CONFIG`
 |---|---|---|
 | `daemon.restart` | `{timeout?}` — seconds for the post-restart ready wait, default **18**, clamped to 0–60 | uses `voxtype_cli.restart_daemon` (itself capped at 15 s) then `wait_for_daemon_ready` (≤ `timeout`) → `{ok, main_pid_before, main_pid_after, changed:bool, ready:bool, ready_timeout, active:bool, message}`; `ok` only if PID or start-timestamp actually changed. **QML sends `timeout: 18` and kills the process at a 30 s deadline**; if the deadline fires the panel treats it as "restart issued, readiness unknown" and re-polls `status`. |
 | `daemon.start` / `daemon.stop` | — | `systemctl --user start|stop voxtype` |
-| `record.toggle` | — | `voxtype record toggle` → `{ok}` |
+| `record.toggle` | — | `voxtype record toggle` → `{ok, message}`; on failure `{ok:false, error}` where `error` is the CLI's stderr (ANSI stripped), suffixed with "(daemon is not running)" when the unit is inactive, or `"voxtype record toggle exited N"` when the CLI was silent. Kept for the panel's Record button; the bar button may use it too. |
 
 ### Streaming op (not JSON-response; used by a dedicated QML Process)
 
