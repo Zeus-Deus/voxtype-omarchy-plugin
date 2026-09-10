@@ -725,6 +725,12 @@ def op_status(args: dict, paths: Paths) -> dict[str, Any]:
         "output_mode": str(output.get("mode") or "type"),
         "config_path": str(paths.config),
         "config_exists": paths.config.exists(),
+        # Resolved daemon state file (what the bar button polls); null
+        # when config sets state_file = "disabled".
+        "state_file_path": str(state_path) if state_path is not None else None,
+        # Helpers the panel shells out to for sudo actions / file picking.
+        "terminal_launcher_available": shutil.which("omarchy-launch-terminal") is not None,
+        "picker_available": shutil.which("zenity") is not None,
     }
     if config_error:
         out["warnings"] = [f"config.toml could not be parsed: {config_error}"]

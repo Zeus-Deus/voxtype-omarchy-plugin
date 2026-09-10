@@ -659,6 +659,41 @@ def test_status_without_systemctl(env: Env):
     assert res["daemon"]["state"] == "stopped"
 
 
+def test_status_state_file_path_resolution(env: Env, monkeypatch):
+    # "auto" -> $XDG_RUNTIME_DIR/voxtype/state
+    assert env.ok("status")["state_file_path"] == str(env.runtime / "voxtype" / "state")
+    # missing key behaves like "auto"
+    env.write_config(BASE_CONFIG.replace('state_file = "auto"\n', ""))
+    assert env.ok("status")["state_file_path"] == str(env.runtime / "voxtype" / "state")
+    # no XDG_RUNTIME_DIR -> /run/user/<uid>/voxtype/state
+    monkeypatch.delenv("XDG_RUNTIME_DIR")
+    assert env.ok("status")["state_file_path"] == f"/run/user/{os.getuid()}/voxtype/state"
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(env.runtime))
+    # explicit path (with ~ expansion)
+    env.write_config(BASE_CONFIG.replace('state_file = "auto"', 'state_file = "~/vox.state"'))
+    assert env.ok("status")["state_file_path"] == str(env.home / "vox.state")
+    # disabled -> null
+    env.write_config(BASE_CONFIG.replace('state_file = "auto"', 'state_file = "disabled"'))
+    assert env.ok("status")["state_file_path"] is None
+    # no config at all -> still the auto path
+    env.config.unlink()
+    assert env.ok("status")["state_file_path"] == str(env.runtime / "voxtype" / "state")
+
+
+def test_status_reports_helper_availability(env: Env):
+    monkeypatch = env.monkeypatch
+    monkeypatch.setenv("PATH", str(env.fakebin))
+    res = env.ok("status")
+    assert res["terminal_launcher_available"] is False
+    assert res["picker_available"] is False
+    _install(env.fakebin / "omarchy-launch-terminal", "#!/bin/sh\nexit 0\n")
+    _install(env.fakebin / "zenity", "#!/bin/sh\nexit 0\n")
+    res = env.ok("status")
+    assert res["terminal_launcher_available"] is True
+    assert res["picker_available"] is True
+    assert env.voxtype_calls() == []  # availability is a PATH lookup, never a run
+
+
 # ---------------------------------------------------------------------------
 # load / options / models.list / gpu.status / dictionary.preview
 # ---------------------------------------------------------------------------
