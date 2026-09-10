@@ -58,7 +58,9 @@ Panel {
     readonly property string engine: String(Model.settingValue(config, "engine", status && status.engine ? status.engine : "whisper"))
     readonly property string modelPath: options && options.model_paths && options.model_paths[engine] ? options.model_paths[engine] : engine + ".model"
     readonly property bool stale: (status && status.daemon && status.daemon.stale) || restartNeeded.length > 0
-    readonly property bool locked: tuiMissing || (status !== null && status.voxtype_installed === false)
+    readonly property var lockedState: Model.lockedState(status, tuiMissing ? Model.ERROR_TUI_MISSING : "")
+    readonly property bool locked: lockedState !== null
+    readonly property string lockedCommand: lockedState ? lockedState.command : ""
     readonly property bool modelMissing: status !== null && status.model && status.model.present === false
     // Undefined means an older bridge: assume the helper exists.
     readonly property bool terminalAvailable: !(status && status.terminal_launcher_available === false)
@@ -333,6 +335,7 @@ Panel {
         if (m && !m.downloaded) startDownload(m);
     }
     function activateCursor() {
+        if (locked) { copyLockedCommand(); return; }
         if (!cursorActive) { moveCursor(1); return; }
         var key = cursorKey;
         if (section === "dictate") {
@@ -361,6 +364,11 @@ Panel {
         var item = settingsForm.controlFor(key);
         if (!item) return;
         if (typeof item.activate === "function") item.activate();
+    }
+    function copyLockedCommand() {
+        if (lockedCommand === "" || !service.copy(lockedCommand)) return;
+        notice = "Copied";
+        noticeTimer.restart();
     }
     function launchGpu(enable) {
         if (locked || !terminalAvailable) return;
@@ -523,6 +531,7 @@ Panel {
             service.run({op: "import.preview", path: path, include_local: root.importLocal});
         }
         onPickCanceled: root.resumeAfterPick()
+        onCopyFinished: function(ok) { if (!ok) { root.notice = ""; root.errorText = "Could not copy: is wl-copy installed?" } }
         onPickFailed: { root.resumeAfterPick(); root.errorText = Model.ERROR_PICKER_MISSING }
     }
     Timer {
@@ -637,13 +646,23 @@ Panel {
                             Text { anchors.horizontalCenter: parent.horizontalCenter; textFormat: Text.PlainText; text: "󰍭"; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.space(38) }
                             Text {
                                 width: parent.width; horizontalAlignment: Text.AlignHCenter; textFormat: Text.PlainText
-                                text: root.tuiMissing ? "Install voxtype-tui (AUR) to manage Voxtype here" : "Voxtype is not installed"
+                                text: root.lockedState ? root.lockedState.title : ""
                                 color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.subtitle; wrapMode: Text.WordWrap
                             }
                             Text {
                                 width: parent.width; horizontalAlignment: Text.AlignHCenter; textFormat: Text.PlainText
-                                text: root.tuiMissing ? "The panel is a front end over the voxtype-tui Python package.\nInstall it from the AUR, then reopen this panel." : "Run this in a terminal, then reopen the panel:\nomarchy install voxtype"
+                                text: root.lockedState ? root.lockedState.hint : ""
                                 color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body; wrapMode: Text.WordWrap
+                            }
+                            // The command is shown and copied, never run by the panel.
+                            Button {
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                visible: root.lockedCommand !== ""
+                                text: root.lockedCommand; iconText: "󰆏"; bordered: true
+                                foreground: root.foreground; fontFamily: root.fontFamily
+                                tooltipText: "Copy to clipboard"
+                                enabled: !service.copying
+                                onClicked: root.copyLockedCommand()
                             }
                         }
 
@@ -1359,7 +1378,7 @@ Panel {
                             id: hints
                             anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
                             textFormat: Text.PlainText
-                            text: root.locked ? "Esc close" : Model.sectionHints(root.section, {editing: root.editing})
+                            text: root.locked ? (root.lockedCommand !== "" ? "Enter copy   Esc close" : "Esc close") : Model.sectionHints(root.section, {editing: root.editing})
                             color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption
                         }
                     }

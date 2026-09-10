@@ -65,9 +65,19 @@ function daemonState(status) {
     return status.daemon.state || "idle";
 }
 
+// Locked states, in precedence order. The hint command is shown and copied,
+// never executed by the panel.
+function lockedState(status, error) {
+    if (error === ERROR_TUI_MISSING) return {kind: "tui", title: "Install voxtype-tui (AUR) to manage Voxtype here", hint: "The panel is a front end over the voxtype-tui Python package.\nInstall it from the AUR, then reopen this panel.", command: ""};
+    if (status && status.voxtype_installed === false) return {kind: "voxtype", title: "Voxtype is not installed", hint: "Run this in a terminal, then reopen the panel:", command: "omarchy install voxtype"};
+    if (status && status.config_exists === false) return {kind: "setup", title: "Voxtype is installed but not set up", hint: "Run the setup wizard in a terminal, then reopen the panel:", command: "voxtype setup"};
+    return null;
+}
+
 function heroMeta(status, error) {
     if (error === ERROR_TUI_MISSING) return "voxtype-tui is not installed";
     if (status && status.voxtype_installed === false) return "Voxtype is not installed";
+    if (status && status.config_exists === false) return "Not set up yet";
     if (!status) return error ? "Unavailable" : "Checking…";
     var state = daemonState(status);
     if (state === "stopped") return "Stopped";
@@ -79,7 +89,7 @@ function heroMeta(status, error) {
 }
 
 function primaryAction(status) {
-    if (!status || status.voxtype_installed === false) return "";
+    if (!status || status.voxtype_installed === false || status.config_exists === false) return "";
     var state = daemonState(status);
     if (state === "stopped") return "start";
     if (status.daemon.stale) return "restart";

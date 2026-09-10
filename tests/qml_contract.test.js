@@ -51,14 +51,15 @@ function timer() {
 function process() { return {running: false, signals: [], signal(code) { this.signals.push(code); }}; }
 
 function serviceHarness() {
-  const deferred = [], completions = [], downloads = [], records = [], picks = [];
+  const deferred = [], completions = [], downloads = [], records = [], picks = [], copies = [];
   const Model = {};
   vm.runInNewContext(read('Model.js'), Model);
   const root = {
     Model, busy: false, request: {}, timedOut: false, workerGeneration: 0, queue: [],
     downloading: false, downloadEngine: '', downloadName: '', downloadProgress: 0, downloadLog: [], downloadFinished: false, downloadGeneration: 0,
     recording: false, recordGeneration: 0, picking: false, pickerGeneration: 0, pickerStarted: false, pickCancelRequested: false, daemonState: 'unknown',
-    worker: process(), downloader: process(), recorder: process(), picker: process(),
+    worker: process(), downloader: process(), recorder: process(), picker: process(), clipboard: process(),
+    copying: false, copyText: '', copyGeneration: 0, clipboardDeadline: timer(), copyFinished: ok => copies.push(ok),
     output: {text: ''}, pickerOutput: {text: ''},
     deadline: timer(), recordDeadline: timer(), pickerDeadline: timer(),
     stateFile: {reloads: 0, reload() { this.reloads++; }},
@@ -78,7 +79,7 @@ function serviceHarness() {
       write: text => { object.written = text; }, stdinEnabled: true});
     handler(objectSource(service, id), event, scope)(...args);
   };
-  return {root, completions, downloads, records, picks, fire, flush() { while (deferred.length) deferred.shift()(); }};
+  return {root, completions, downloads, records, picks, copies, fire, flush() { while (deferred.length) deferred.shift()(); }};
 }
 
 test('a bridge call writes the request on stdin and completes once from a normal exit', () => {
@@ -268,6 +269,26 @@ test('cancelPick terminates a running chooser, or completes a stopped one as can
   same(h.picks, [null, null], 'idle cancel is a no-op');
 });
 
+test('copy writes the text to wl-copy on stdin and completes once, including FailedToStart', () => {
+  const h = serviceHarness();
+  assert.equal(h.root.copy('voxtype setup'), true);
+  assert.equal(h.root.copy('again'), false, 'one copy at a time');
+  h.root.clipboard.running = true;
+  h.fire('clipboard', 'onStarted');
+  assert.equal(h.root.clipboard.written, 'voxtype setup');
+  h.root.clipboard.running = false;
+  h.fire('clipboard', 'onRunningChanged');
+  h.fire('clipboard', 'onExited', 0);
+  h.flush();
+  same(h.copies, [true]);
+  assert.equal(h.root.copyText, '');
+  h.root.copy('x');
+  h.root.clipboard.running = false;
+  h.fire('clipboard', 'onRunningChanged');
+  h.flush();
+  same(h.copies, [true, false], 'missing wl-copy reports failure');
+});
+
 test('GPU setup goes to the terminal helper with a fixed argv and never a password', () => {
   const h = serviceHarness();
   h.root.launchGpuSetup(true);
@@ -294,8 +315,9 @@ test('every spawned command is an argv array against a fixed binary; the bridge 
   assert.match(code, /readonly property string pythonBinary: "\/usr\/bin\/python3"/);
   assert.match(code, /Qt\.resolvedUrl\("bridge\.py"\)/);
   const spawns = code.match(/command: \[[^\]]*\]/g) || [];
-  assert.equal(spawns.length, 4);
-  for (const spawn of spawns) assert.match(spawn, /^command: \[(root\.pythonBinary|"voxtype"|"zenity")/);
+  assert.equal(spawns.length, 5);
+  for (const spawn of spawns) assert.match(spawn, /^command: \[(root\.pythonBinary|"voxtype"|"zenity"|"wl-copy")/);
+  assert.match(code, /command: \["wl-copy", "--type", "text\/plain;charset=utf-8"\]/, 'clipboard text travels over stdin, never argv');
   assert.doesNotMatch(stripComments(panel + service + widget), /bash", "-c|sh", "-c|bash -c/);
   assert.doesNotMatch(code, /stdinEnabled: true[\s\S]*?output\.text = /, 'StdioCollector.text is read-only');
 });

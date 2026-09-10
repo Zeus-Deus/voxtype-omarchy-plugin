@@ -81,14 +81,10 @@ function panelHarness(overrides) {
   root.root = root;
   const context = vm.createContext(root);
   const bind = (name, expr) => Object.defineProperty(root, name, {get: () => vm.runInContext(expr, context), configurable: true});
-  const binding = name => {
-    const m = panel.match(new RegExp('readonly property \\w+ ' + name + ': (.+)'));
-    assert.ok(m, 'binding exists: ' + name);
-    return m[1];
-  };
-  for (const name of ['vocabulary', 'replacements', 'config', 'categories', 'filteredVocabulary', 'filteredReplacements', 'daemonState',
-                      'engine', 'modelPath', 'stale', 'locked', 'lockedCommand', 'modelMissing', 'primary', 'editing', 'terminalAvailable', 'pickerAvailable']) {
-    if (panel.match(new RegExp('readonly property \\w+ ' + name + ':'))) bind(name, binding(name));
+  // Every single-line readonly property binding of the panel becomes a live
+  // getter, so derived state (locked, engine, editing…) follows the real QML.
+  for (const m of panel.matchAll(/^    readonly property \w+ (\w+): (.+)$/gm)) {
+    if (!(m[1] in root) && !m[2].endsWith('[')) bind(m[1], m[2]);
   }
   Object.defineProperty(root, 'opened', {get: () => root.controller.open});
   installFunctions(panel, context);
@@ -238,4 +234,25 @@ test('missing helpers disable Import and the GPU buttons; an old bridge without 
   assert.equal((panel.match(/enabled: root\.terminalAvailable/g) || []).length, 2, 'both GPU buttons');
   assert.match(panel, /tooltipText: root\.terminalAvailable \? "Opens a terminal running sudo voxtype setup gpu --enable" : Model\.ERROR_TERMINAL_MISSING/);
   assert.match(panel, /tooltipText: root\.pickerAvailable \? "[^"]+" : Model\.ERROR_PICKER_MISSING/);
+});
+
+test('a missing config.toml locks the panel with a copyable, never executed, voxtype setup hint', () => {
+  const h = panelHarness();
+  assert.equal(h.root.locked, false);
+  h.root.status = Object.assign({}, h.root.status, {config_exists: false});
+  assert.equal(h.root.locked, true);
+  assert.equal(h.root.lockedState.title, 'Voxtype is installed but not set up');
+  assert.equal(h.root.lockedCommand, 'voxtype setup');
+  assert.equal(h.root.primary, '');
+  h.root.activateCursor();
+  assert.deepEqual(h.copies, ['voxtype setup'], 'Enter copies the command');
+  assert.equal(h.root.notice, 'Copied');
+  h.root.toggleRecord();
+  h.root.setSetting('engine', 'parakeet');
+  assert.equal(h.requests.length, 0, 'locked: no bridge writes');
+  assert.doesNotMatch(panel, /execDetached|"voxtype", "setup"/);
+  assert.match(panel, /text: root\.lockedCommand; iconText: "󰆏"/);
+  assert.match(panel, /onClicked: root\.copyLockedCommand\(\)/);
+  h.root.status = Object.assign({}, h.root.status, {voxtype_installed: false});
+  assert.equal(h.root.lockedCommand, 'omarchy install voxtype', 'not-installed wins over not-set-up');
 });

@@ -34,6 +34,10 @@ Item {
     property bool pickerStarted: false
     property bool pickCancelRequested: false
 
+    property bool copying: false
+    property string copyText: ""
+    property int copyGeneration: 0
+
     property string daemonState: "unknown"
     property bool pollState: false
     property int pollIntervalMs: 1500
@@ -44,6 +48,7 @@ Item {
     signal picked(string path)
     signal pickCanceled()
     signal pickFailed()
+    signal copyFinished(bool ok)
 
     // One bridge call at a time. Later requests queue in order so a write
     // never races a status poll for the same config file; status polls are
@@ -165,6 +170,24 @@ Item {
         else pickCanceled();
     }
 
+    // Clipboard via wl-copy over stdin: the text never appears in argv.
+    function copy(text) {
+        if (copying) return false;
+        copying = true;
+        copyText = String(text);
+        copyGeneration++;
+        clipboard.running = true;
+        clipboardDeadline.restart();
+        return true;
+    }
+    function finishClipboard(code) {
+        if (!copying) return;
+        clipboardDeadline.stop();
+        copying = false;
+        copyText = "";
+        copyFinished(code === 0);
+    }
+
     // Privileged GPU toggles are handed to the user's own terminal; the shell
     // never sees a password. Fixed argv, no shell string.
     function launchGpuSetup(enable) {
@@ -278,6 +301,36 @@ Item {
             if (!root.picking) return;
             if (picker.running) picker.signal(15);
             else root.finishPicker(-1);
+        }
+    }
+
+    Process {
+        id: clipboard
+        command: ["wl-copy", "--type", "text/plain;charset=utf-8"]
+        stdinEnabled: true
+        onStarted: {
+            write(root.copyText);
+            stdinEnabled = false;
+            stdinEnabled = true;
+        }
+        onRunningChanged: {
+            if (!running) {
+                var generation = root.copyGeneration;
+                Qt.callLater(function() {
+                    if (generation === root.copyGeneration && !clipboard.running && root.copying)
+                        root.finishClipboard(-1);
+                });
+            }
+        }
+        onExited: function(code) { root.finishClipboard(code) }
+    }
+    Timer {
+        id: clipboardDeadline
+        interval: 5000
+        onTriggered: {
+            if (!root.copying) return;
+            if (clipboard.running) clipboard.signal(9);
+            else root.finishClipboard(-1);
         }
     }
 

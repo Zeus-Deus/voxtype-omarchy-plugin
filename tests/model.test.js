@@ -45,6 +45,13 @@ test('hero meta and primary action follow the design table', () => {
   assert.equal(Model.heroMeta({voxtype_installed: false}, ''), 'Voxtype is not installed');
   assert.equal(Model.primaryAction({voxtype_installed: false}), '');
   assert.equal(Model.heroMeta(null, 'voxtype-tui-missing'), 'voxtype-tui is not installed');
+  assert.equal(Model.heroMeta({voxtype_installed: true, config_exists: false, daemon: {active: true, state: 'idle'}}, ''), 'Not set up yet');
+  assert.equal(Model.primaryAction({voxtype_installed: true, config_exists: false, daemon: {active: false}}), '');
+  assert.equal(Model.lockedState(base, ''), null);
+  assert.equal(Model.lockedState(null, 'voxtype-tui-missing').kind, 'tui');
+  assert.equal(Model.lockedState({voxtype_installed: false, config_exists: false}, '').command, 'omarchy install voxtype');
+  same(Model.lockedState({voxtype_installed: true, config_exists: false}, ''), {kind: 'setup', title: 'Voxtype is installed but not set up', hint: 'Run the setup wizard in a terminal, then reopen the panel:', command: 'voxtype setup'});
+  assert.equal(Model.lockedState({voxtype_installed: true}, ''), null, 'an older bridge without config_exists is not locked');
   assert.equal(Model.heroMeta(null, ''), 'Checking…');
   assert.equal(Model.primaryLabel('record', 'recording'), 'Stop');
   assert.equal(Model.primaryLabel('record', 'idle'), 'Record');
