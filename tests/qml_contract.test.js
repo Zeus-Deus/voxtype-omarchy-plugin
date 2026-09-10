@@ -346,6 +346,23 @@ test('the panel is built from the shipped kit with no hard-coded colours, fonts 
   assert.match(panel, /bar \? bar\.foreground : Color\.foreground/);
 });
 
+test('every Text element in Panel.qml declares textFormat (PlainText: no rich-text injection from bridge strings)', () => {
+  const re = /(?<![A-Za-z])Text \{/g;
+  let count = 0;
+  for (let m = re.exec(panel); m; m = re.exec(panel)) {
+    let depth = 0, i = m.index + 5;
+    for (; i < panel.length; i++) {
+      if (panel[i] === '{') depth++;
+      else if (panel[i] === '}' && --depth === 0) break;
+    }
+    const body = panel.slice(m.index, i + 1);
+    const line = panel.slice(0, m.index).split('\n').length;
+    assert.match(body, /textFormat: Text\.PlainText/, 'Text at line ' + line + ' declares textFormat');
+    count++;
+  }
+  assert.ok(count >= 30, 'found ' + count + ' Text elements');
+});
+
 test('bar button: left toggles, right records (setting), middle restarts when stale', () => {
   assert.match(widget, /Qt\.LeftButton\) root\.toggle\(\)/);
   assert.match(widget, /Qt\.RightButton && root\.rightClickRecords\) panelLoader\.item\.toggleRecord\(\)/);

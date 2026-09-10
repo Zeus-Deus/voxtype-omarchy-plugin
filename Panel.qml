@@ -284,7 +284,7 @@ Panel {
         if (locked) return;
         confirmAction = action;
         confirmPayload = payload;
-        confirmation.message = message;
+        confirmation.message = Model.sanitize(message, 600);
         confirmation.confirmText = confirmLabel;
         confirmation.selectedIndex = 0;
         confirmation.opened = true;
@@ -294,13 +294,13 @@ Panel {
         if (cursorKey !== "rows") return;
         if (section === "vocabulary") {
             var word = filteredVocabulary[cursorIndex];
-            if (word) ask("vocab.remove", {phrase: word.phrase}, "Remove “" + word.phrase + "” from the vocabulary?", "Remove");
+            if (word) ask("vocab.remove", {phrase: word.phrase}, "Remove “" + Model.sanitize(word.phrase, 60) + "” from the vocabulary?", "Remove");
         } else if (section === "dictionary") {
             var rule = filteredReplacements[cursorIndex];
-            if (rule) ask("dict.remove", {from: rule.from}, "Delete the rule “" + rule.from + " → " + rule.to + "”?", "Delete");
+            if (rule) ask("dict.remove", {from: rule.from}, "Delete the rule “" + Model.sanitize(rule.from, 60) + " → " + Model.sanitize(rule.to, 60) + "”?", "Delete");
         } else if (section === "models") {
             var m = modelRows[cursorIndex];
-            if (m && m.downloaded && !m.active) ask("models.delete", {engine: modelsEngine, name: m.name}, "Delete " + m.name + " from disk?\nIt can be downloaded again later.", "Delete");
+            if (m && m.downloaded && !m.active) ask("models.delete", {engine: modelsEngine, name: m.name}, "Delete " + Model.sanitize(m.name, 60) + " from disk?\nIt can be downloaded again later.", "Delete");
         }
     }
     function applyConfirmed() {
@@ -398,7 +398,7 @@ Panel {
         var danger = Model.dangerousChanges(importPreview.diff);
         var lines = [Model.diffSummary(importPreview.diff)];
         for (var i = 0; i < danger.length; i++) lines.push("⚠ " + danger[i].path + " = " + Model.sanitize(danger[i].new, 60));
-        ask("import.apply", null, "Import " + importPath.split("/").pop() + "?\n" + lines.join("\n"), danger.length ? "Import anyway" : "Import");
+        ask("import.apply", null, "Import " + Model.sanitize(importPath.split("/").pop(), 60) + "?\n" + lines.join("\n"), danger.length ? "Import anyway" : "Import");
     }
     function noteEditor(item, focused) {
         if (focused) focusedEditor = item;
@@ -630,7 +630,7 @@ Panel {
                             anchors.horizontalCenter: parent.horizontalCenter
                             spacing: Style.space(14)
                             topPadding: Style.space(40)
-                            Text { anchors.horizontalCenter: parent.horizontalCenter; text: "󰍭"; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.space(38) }
+                            Text { anchors.horizontalCenter: parent.horizontalCenter; textFormat: Text.PlainText; text: "󰍭"; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.space(38) }
                             Text {
                                 width: parent.width; horizontalAlignment: Text.AlignHCenter; textFormat: Text.PlainText
                                 text: root.tuiMissing ? "Install voxtype-tui (AUR) to manage Voxtype here" : "Voxtype is not installed"
@@ -668,7 +668,7 @@ Panel {
                                         columnSpacing: Style.space(16)
                                         rowSpacing: Style.space(10)
                                         StatusCell { width: (statusGrid.width - statusGrid.columnSpacing) / 2; label: "STATE"; value: root.status ? Model.titleCase(root.daemonState) : "…"; accent: root.daemonState === "recording" }
-                                        StatusCell { width: (statusGrid.width - statusGrid.columnSpacing) / 2; label: "ENGINE"; value: root.status ? root.engine + " · " + (root.status.model ? root.status.model.name : "") : "…" }
+                                        StatusCell { width: (statusGrid.width - statusGrid.columnSpacing) / 2; label: "ENGINE"; value: root.status ? root.engine + " · " + Model.sanitize(root.status.model ? root.status.model.name : "", 60) : "…" }
                                         StatusCell { width: (statusGrid.width - statusGrid.columnSpacing) / 2; label: "HOTKEY"; value: root.status ? Model.hotkeyLabel(root.status.hotkey) : "…" }
                                         StatusCell { width: (statusGrid.width - statusGrid.columnSpacing) / 2; label: "OUTPUT"; value: root.status ? String(root.status.output_mode || "") + (root.status.hotkey && root.status.hotkey.mode ? " · " + String(root.status.hotkey.mode).replace(/_/g, " ") : "") : "…" }
                                     }
@@ -714,15 +714,15 @@ Panel {
                                         anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
                                         anchors.margins: Style.space(12)
                                         spacing: Style.space(10)
-                                        Text { text: "󰀦"; color: root.urgent; font.family: root.fontFamily; font.pixelSize: Style.font.heading; anchors.verticalCenter: parent.verticalCenter }
+                                        Text { textFormat: Text.PlainText; text: "󰀦"; color: root.urgent; font.family: root.fontFamily; font.pixelSize: Style.font.heading; anchors.verticalCenter: parent.verticalCenter }
                                         Text {
                                             width: parent.width - Style.space(30) - downloadHint.width - parent.spacing * 2
                                             textFormat: Text.PlainText; wrapMode: Text.WordWrap
-                                            text: "Model " + (root.status && root.status.model ? root.status.model.name : "") + " is not downloaded"
+                                            text: "Model " + Model.sanitize(root.status && root.status.model ? root.status.model.name : "", 60) + " is not downloaded"
                                             color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body
                                             anchors.verticalCenter: parent.verticalCenter
                                         }
-                                        Text { id: downloadHint; text: "Download →"; color: root.urgent; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true; anchors.verticalCenter: parent.verticalCenter }
+                                        Text { id: downloadHint; textFormat: Text.PlainText; text: "Download →"; color: root.urgent; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true; anchors.verticalCenter: parent.verticalCenter }
                                     }
                                 }
 
@@ -793,7 +793,7 @@ Panel {
                                         Text {
                                             anchors.left: parent.left; anchors.right: vocabActions.left; anchors.verticalCenter: parent.verticalCenter
                                             anchors.leftMargin: Style.space(12); anchors.rightMargin: Style.space(8)
-                                            text: vocabRow.modelData.phrase; textFormat: Text.PlainText; elide: Text.ElideRight
+                                            text: Model.sanitize(vocabRow.modelData.phrase, 120); textFormat: Text.PlainText; elide: Text.ElideRight
                                             color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.subtitle
                                         }
                                         Row {
@@ -892,14 +892,14 @@ Panel {
                                             spacing: Style.space(8)
                                             Text {
                                                 width: Math.min(implicitWidth, parent.width * 0.45)
-                                                text: ruleRow.modelData.from; textFormat: Text.PlainText; elide: Text.ElideRight
+                                                text: Model.sanitize(ruleRow.modelData.from, 120); textFormat: Text.PlainText; elide: Text.ElideRight
                                                 color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body
                                                 anchors.verticalCenter: parent.verticalCenter
                                             }
-                                            Text { text: "→"; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body; anchors.verticalCenter: parent.verticalCenter }
+                                            Text { textFormat: Text.PlainText; text: "→"; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body; anchors.verticalCenter: parent.verticalCenter }
                                             Text {
                                                 width: Math.min(implicitWidth, parent.width * 0.45)
-                                                text: ruleRow.modelData.to; textFormat: Text.PlainText; elide: Text.ElideRight
+                                                text: Model.sanitize(ruleRow.modelData.to, 120); textFormat: Text.PlainText; elide: Text.ElideRight
                                                 color: Color.accent; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true
                                                 anchors.verticalCenter: parent.verticalCenter
                                             }
@@ -1205,7 +1205,7 @@ Panel {
                                             anchors.left: parent.left; anchors.right: modelActions.left; anchors.verticalCenter: parent.verticalCenter
                                             anchors.leftMargin: Style.space(12); anchors.rightMargin: Style.space(8)
                                             spacing: Style.space(2)
-                                            Text { width: parent.width; text: modelRow.modelData.name; textFormat: Text.PlainText; elide: Text.ElideRight
+                                            Text { width: parent.width; text: Model.sanitize(modelRow.modelData.name, 120); textFormat: Text.PlainText; elide: Text.ElideRight
                                                 color: modelRow.modelData.downloaded ? root.foreground : root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.subtitle; font.bold: modelRow.modelData.active === true }
                                             Text { width: parent.width; text: Model.modelLine(modelRow.modelData); textFormat: Text.PlainText; elide: Text.ElideRight
                                                 color: modelRow.modelData.active ? Color.accent : root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
@@ -1352,6 +1352,7 @@ Panel {
                         Text {
                             id: hints
                             anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                            textFormat: Text.PlainText
                             text: root.locked ? "Esc close" : Model.sectionHints(root.section, {editing: root.editing})
                             color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption
                         }
@@ -1378,7 +1379,7 @@ Panel {
         property string value: ""
         property bool accent: false
         spacing: Style.space(2)
-        Text { text: cell.label; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true; font.letterSpacing: 1 }
+        Text { textFormat: Text.PlainText; text: cell.label; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true; font.letterSpacing: 1 }
         Text { width: parent.width; text: cell.value; textFormat: Text.PlainText; elide: Text.ElideRight; color: cell.accent ? Color.accent : root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.subtitle }
     }
     component EmptyState: Column {
@@ -1389,7 +1390,7 @@ Panel {
         width: parent ? parent.width : implicitWidth
         spacing: Style.space(10)
         topPadding: Style.space(24)
-        Text { anchors.horizontalCenter: parent.horizontalCenter; text: empty.glyph; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.space(32) }
+        Text { anchors.horizontalCenter: parent.horizontalCenter; textFormat: Text.PlainText; text: empty.glyph; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.space(32) }
         Text { width: parent.width; horizontalAlignment: Text.AlignHCenter; textFormat: Text.PlainText; wrapMode: Text.WordWrap; text: empty.title; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.subtitle }
         Text { width: parent.width; horizontalAlignment: Text.AlignHCenter; textFormat: Text.PlainText; wrapMode: Text.WordWrap; text: empty.hint; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body }
     }

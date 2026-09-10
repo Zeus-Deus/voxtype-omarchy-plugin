@@ -123,6 +123,8 @@ test('settings helpers', () => {
   same(Model.toggleInList(['A'], 'B'), ['A', 'B']);
   same(Model.modelOptions([{name: 'a', downloaded: true}, {name: 'b', downloaded: false}], 'c'),
        [{value: 'a', label: 'a'}, {value: 'b', label: 'b  (not downloaded)'}, {value: 'c', label: 'c'}]);
+  same(Model.modelOptions([{name: 'a\u202eb', downloaded: true}], 'c\u0007'),
+       [{value: 'a\u202eb', label: 'ab'}, {value: 'c\u0007', label: 'c'}], 'labels are sanitized, values stay exact');
   same(Model.plainOptions(['x']), [{value: 'x', label: 'x'}]);
   same(Model.labelled([{label: 'Yeti', name: 'alsa_input.yeti'}, {label: 'Auto', value: 'auto'}]),
        [{value: 'alsa_input.yeti', label: 'Yeti'}, {value: 'auto', label: 'Auto'}]);

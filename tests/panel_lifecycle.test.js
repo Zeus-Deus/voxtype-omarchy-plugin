@@ -153,3 +153,41 @@ test('closeForPopoutSwitch cancels a running chooser and drops the attach flag',
   h.flush();
   assert.equal(h.root.popoutSwitchClosing, false);
 });
+
+test('confirmation messages and row text strip bidi/control characters from untrusted strings', () => {
+  const h = panelHarness();
+  const evil = 'evil\u202ephrase\u0007!';
+  h.root.snapshot = {vocabulary: [{phrase: evil}], replacements: [{from: evil, to: 'x\u202e', category: 'Replacement'}], settings: {}};
+  h.root.section = 'vocabulary';
+  h.root.setCursor('rows', 0);
+  h.root.deleteSelected();
+  assert.equal(h.root.confirmation.opened, true);
+  assert.doesNotMatch(h.root.confirmation.message, /[\u202e\u0007]/);
+  assert.match(h.root.confirmation.message, /evilphrase!/);
+  assert.equal(h.root.confirmPayload.phrase, evil, 'the bridge still gets the exact phrase to remove');
+  h.root.confirmation.opened = false;
+  h.root.section = 'dictionary';
+  h.root.setCursor('rows', 0);
+  h.root.deleteSelected();
+  assert.doesNotMatch(h.root.confirmation.message, /[\u202e\u0007]/);
+  h.root.confirmation.opened = false;
+  h.root.section = 'models';
+  h.root.modelsEngine = 'whisper';
+  h.root.modelRows = [{name: 'm\u202e' + 'x'.repeat(100), downloaded: true, active: false}];
+  h.root.setCursor('rows', 0);
+  h.root.deleteSelected();
+  assert.doesNotMatch(h.root.confirmation.message, /\u202e/);
+  assert.ok(h.root.confirmation.message.length < 120, 'dialog strings are capped at 60');
+  h.root.confirmation.opened = false;
+  h.root.ask('vocab.remove', {}, 'a\u202eb'.repeat(400), 'Remove');
+  assert.doesNotMatch(h.root.confirmation.message, /\u202e/);
+  assert.ok(h.root.confirmation.message.length <= 600);
+});
+
+test('every row text binding for bridge strings goes through Model.sanitize', () => {
+  assert.match(panel, /text: Model\.sanitize\(vocabRow\.modelData\.phrase, 120\)/);
+  assert.match(panel, /text: Model\.sanitize\(ruleRow\.modelData\.from, 120\)/);
+  assert.match(panel, /text: Model\.sanitize\(ruleRow\.modelData\.to, 120\)/);
+  assert.match(panel, /text: Model\.sanitize\(modelRow\.modelData\.name, 120\)/);
+  assert.doesNotMatch(panel, /text: (vocabRow\.modelData\.phrase|ruleRow\.modelData\.(from|to)|modelRow\.modelData\.name)[;\s]/);
+});

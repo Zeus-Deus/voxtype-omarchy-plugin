@@ -232,9 +232,9 @@ function modelOptions(models, current) {
         var m = models[i];
         if (!m || !m.name) continue;
         if (m.name === current) seen = true;
-        out.push({value: m.name, label: m.name + (m.downloaded ? "" : "  (not downloaded)")});
+        out.push({value: m.name, label: sanitize(m.name, 80) + (m.downloaded ? "" : "  (not downloaded)")});
     }
-    if (current && !seen) out.push({value: current, label: current});
+    if (current && !seen) out.push({value: current, label: sanitize(current, 80)});
     return out;
 }
 
