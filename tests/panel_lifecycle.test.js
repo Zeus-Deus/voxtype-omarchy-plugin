@@ -207,3 +207,35 @@ test('redacted import rows never reach a value formatter, in the card or the con
   assert.match(panel, /text: "󰀦 " \+ Model\.dangerLine\(modelData, 40, 60\)/);
   assert.doesNotMatch(panel, /modelData\.(old|new)\b/);
 });
+
+test('a missing zenity reopens the panel with an install hint instead of a silent cancel', () => {
+  const h = panelHarness();
+  h.root.beginImport();
+  h.pickFailed();
+  assert.equal(h.root.controller.open, true);
+  assert.equal(h.root.errorText, h.root.Model.ERROR_PICKER_MISSING);
+  assert.match(h.root.errorText, /zenity is not installed — install it to import a bundle/);
+  h.root.beginImport();
+  h.pickCanceled();
+  assert.equal(h.root.errorText, h.root.Model.ERROR_PICKER_MISSING, 'a cancel does not touch the error text');
+});
+
+test('missing helpers disable Import and the GPU buttons; an old bridge without the flags keeps them enabled', () => {
+  const h = panelHarness();
+  assert.equal(h.root.pickerAvailable, true);
+  assert.equal(h.root.terminalAvailable, true);
+  h.root.status = Object.assign({}, h.root.status, {picker_available: false, terminal_launcher_available: false});
+  assert.equal(h.root.pickerAvailable, false);
+  assert.equal(h.root.terminalAvailable, false);
+  h.root.beginImport();
+  assert.equal(h.picks.length, 0, 'no chooser spawned');
+  assert.equal(h.root.controller.open, true, 'panel stays visible');
+  const hides = [];
+  h.root.controller.hide = () => hides.push(1);
+  h.root.launchGpu(true);
+  assert.equal(hides.length, 0, 'panel not hidden for a terminal that cannot open');
+  assert.match(panel, /enabled: !service\.picking && root\.pickerAvailable/);
+  assert.equal((panel.match(/enabled: root\.terminalAvailable/g) || []).length, 2, 'both GPU buttons');
+  assert.match(panel, /tooltipText: root\.terminalAvailable \? "Opens a terminal running sudo voxtype setup gpu --enable" : Model\.ERROR_TERMINAL_MISSING/);
+  assert.match(panel, /tooltipText: root\.pickerAvailable \? "[^"]+" : Model\.ERROR_PICKER_MISSING/);
+});

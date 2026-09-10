@@ -60,6 +60,9 @@ Panel {
     readonly property bool stale: (status && status.daemon && status.daemon.stale) || restartNeeded.length > 0
     readonly property bool locked: tuiMissing || (status !== null && status.voxtype_installed === false)
     readonly property bool modelMissing: status !== null && status.model && status.model.present === false
+    // Undefined means an older bridge: assume the helper exists.
+    readonly property bool terminalAvailable: !(status && status.terminal_launcher_available === false)
+    readonly property bool pickerAvailable: !(status && status.picker_available === false)
     readonly property string primary: root.locked ? "" : Model.primaryAction(status)
     readonly property string tooltip: "Voxtype · " + Model.heroMeta(status, tuiMissing ? Model.ERROR_TUI_MISSING : "")
     readonly property color foreground: bar ? bar.foreground : Color.foreground
@@ -360,7 +363,7 @@ Panel {
         if (typeof item.activate === "function") item.activate();
     }
     function launchGpu(enable) {
-        if (locked) return;
+        if (locked || !terminalAvailable) return;
         // A terminal opened under the full-screen panel layer is invisible;
         // hide first, then hand the sudo prompt to the user's terminal.
         controller.hide();
@@ -378,7 +381,7 @@ Panel {
         service.run({op: "export.write", path: path, scope: exportScope, include_secrets: exportSecrets});
     }
     function beginImport() {
-        if (locked || service.picking) return;
+        if (locked || service.picking || !pickerAvailable) return;
         attaching = true;
         exportOpen = false;
         controller.hide();
@@ -520,6 +523,7 @@ Panel {
             service.run({op: "import.preview", path: path, include_local: root.importLocal});
         }
         onPickCanceled: root.resumeAfterPick()
+        onPickFailed: { root.resumeAfterPick(); root.errorText = Model.ERROR_PICKER_MISSING }
     }
     Timer {
         id: statusPoll
@@ -1104,7 +1108,8 @@ Panel {
                                             text: "Enable acceleration"; iconText: "󰢮"; bordered: true; width: Style.space(170)
                                             hasCursor: root.cursorIs("gpu.enable")
                                             foreground: root.foreground; fontFamily: root.fontFamily; fontSize: Style.font.bodySmall
-                                            tooltipText: "Opens a terminal running sudo voxtype setup gpu --enable"
+                                            enabled: root.terminalAvailable
+                                            tooltipText: root.terminalAvailable ? "Opens a terminal running sudo voxtype setup gpu --enable" : Model.ERROR_TERMINAL_MISSING
                                             onHovered: function(h) { if (h) root.setCursor("gpu.enable", -1) }
                                             onClicked: root.launchGpu(true)
                                         }
@@ -1113,7 +1118,8 @@ Panel {
                                             text: "Disable (CPU)"; iconText: "󰘚"; bordered: true; width: Style.space(170)
                                             hasCursor: root.cursorIs("gpu.disable")
                                             foreground: root.foreground; fontFamily: root.fontFamily; fontSize: Style.font.bodySmall
-                                            tooltipText: "Opens a terminal running sudo voxtype setup gpu --disable"
+                                            enabled: root.terminalAvailable
+                                            tooltipText: root.terminalAvailable ? "Opens a terminal running sudo voxtype setup gpu --disable" : Model.ERROR_TERMINAL_MISSING
                                             onHovered: function(h) { if (h) root.setCursor("gpu.disable", -1) }
                                             onClicked: root.launchGpu(false)
                                         }
@@ -1243,9 +1249,9 @@ Panel {
                                     Button {
                                         text: "Import…"; iconText: "󰈞"; bordered: true
                                         hasCursor: root.cursorIs("import")
-                                        enabled: !service.picking
+                                        enabled: !service.picking && root.pickerAvailable
                                         foreground: root.foreground; fontFamily: root.fontFamily
-                                        tooltipText: "Choose a voxtype-tui bundle; changes are previewed before anything is written"
+                                        tooltipText: root.pickerAvailable ? "Choose a voxtype-tui bundle; changes are previewed before anything is written" : Model.ERROR_PICKER_MISSING
                                         onHovered: function(h) { if (h) root.setCursor("import", -1) }
                                         onClicked: root.beginImport()
                                     }

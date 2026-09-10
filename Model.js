@@ -7,6 +7,8 @@ var TOKEN_LIMIT = 224;
 var TOKEN_AMBER = 200;
 var RESPONSE_CAP = 2 * 1024 * 1024;
 var ERROR_TUI_MISSING = "voxtype-tui-missing";
+var ERROR_PICKER_MISSING = "zenity is not installed — install it to import a bundle";
+var ERROR_TERMINAL_MISSING = "omarchy-launch-terminal is not available — run sudo voxtype setup gpu in a terminal";
 
 var MODIFIER_LABELS = {LEFTCTRL: "Ctrl", LEFTALT: "Alt", LEFTSHIFT: "Shift", LEFTMETA: "Super",
                        RIGHTCTRL: "Ctrl", RIGHTALT: "AltGr", RIGHTSHIFT: "Shift", RIGHTMETA: "Super"};

@@ -57,7 +57,7 @@ function serviceHarness() {
   const root = {
     Model, busy: false, request: {}, timedOut: false, workerGeneration: 0, queue: [],
     downloading: false, downloadEngine: '', downloadName: '', downloadProgress: 0, downloadLog: [], downloadFinished: false, downloadGeneration: 0,
-    recording: false, recordGeneration: 0, picking: false, pickerGeneration: 0, daemonState: 'unknown',
+    recording: false, recordGeneration: 0, picking: false, pickerGeneration: 0, pickerStarted: false, pickCancelRequested: false, daemonState: 'unknown',
     worker: process(), downloader: process(), recorder: process(), picker: process(),
     output: {text: ''}, pickerOutput: {text: ''},
     deadline: timer(), recordDeadline: timer(), pickerDeadline: timer(),
@@ -67,7 +67,7 @@ function serviceHarness() {
     completed: (op, result, req) => completions.push({op, result, req}),
     downloadDone: (engine, name, ok, reason) => downloads.push({engine, name, ok, reason}),
     recordFinished: ok => records.push(ok),
-    picked: p => picks.push(p), pickCanceled: () => picks.push(null),
+    picked: p => picks.push(p), pickCanceled: () => picks.push(null), pickFailed: () => picks.push('failed'),
   };
   root.root = root;
   const context = vm.createContext(root);
@@ -224,6 +224,31 @@ test('file picker only reports a path on a clean exit', () => {
   same(h.picks, [null, '/tmp/bundle.json']);
 });
 
+test('a chooser that never starts reports pickFailed, a user cancel does not', () => {
+  const h = serviceHarness();
+  h.root.pick();
+  h.root.picker.running = false;
+  h.fire('picker', 'onRunningChanged');
+  h.flush();
+  same(h.picks, ['failed'], 'FailedToStart without onStarted');
+  h.root.pick();
+  h.root.picker.running = true;
+  h.fire('picker', 'onStarted');
+  assert.equal(h.root.pickerStarted, true);
+  h.root.picker.running = false;
+  h.fire('picker', 'onRunningChanged');
+  h.fire('picker', 'onExited', 1);
+  h.flush();
+  same(h.picks, ['failed', null], 'exit 1 is the user backing out');
+  h.root.pick();
+  h.fire('picker', 'onStarted');
+  h.fire('pickerDeadline', 'onTriggered');
+  same(h.root.picker.signals, [15], 'a started chooser is terminated by the deadline');
+  h.root.picker.running = false;
+  h.fire('picker', 'onExited', 143);
+  same(h.picks, ['failed', null, null], 'deadline on a started chooser is a cancel');
+});
+
 test('cancelPick terminates a running chooser, or completes a stopped one as cancelled', () => {
   const h = serviceHarness();
   h.root.pick();
@@ -235,10 +260,10 @@ test('cancelPick terminates a running chooser, or completes a stopped one as can
   h.fire('picker', 'onExited', 143);
   same(h.picks, [null]);
   h.root.pick();
-  h.root.picker.running = false; // FailedToStart: nothing to signal
+  h.root.picker.running = false; // not started yet: nothing to signal
   h.root.cancelPick();
   assert.equal(h.root.picking, false);
-  same(h.picks, [null, null]);
+  same(h.picks, [null, null], 'a requested cancel is never reported as a missing chooser');
   h.root.cancelPick();
   same(h.picks, [null, null], 'idle cancel is a no-op');
 });

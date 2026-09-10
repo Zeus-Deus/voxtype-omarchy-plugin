@@ -31,6 +31,8 @@ Item {
 
     property bool picking: false
     property int pickerGeneration: 0
+    property bool pickerStarted: false
+    property bool pickCancelRequested: false
 
     property string daemonState: "unknown"
     property bool pollState: false
@@ -41,6 +43,7 @@ Item {
     signal recordFinished(bool ok)
     signal picked(string path)
     signal pickCanceled()
+    signal pickFailed()
 
     // One bridge call at a time. Later requests queue in order so a write
     // never races a status poll for the same config file; status polls are
@@ -137,6 +140,8 @@ Item {
     function pick() {
         if (picking) return false;
         picking = true;
+        pickerStarted = false;
+        pickCancelRequested = false;
         pickerGeneration++;
         picker.running = true;
         pickerDeadline.restart();
@@ -144,6 +149,7 @@ Item {
     }
     function cancelPick() {
         if (!picking) return;
+        pickCancelRequested = true;
         if (picker.running) picker.signal(15);
         else finishPicker(-1);
     }
@@ -153,6 +159,9 @@ Item {
         picking = false;
         var path = String(pickerOutput.text || "").replace(/\r?\n$/, "");
         if (code === 0 && path !== "") picked(path);
+        // -1 is the FailedToStart/deadline path (no process ever exited):
+        // the chooser binary is missing, not the user backing out.
+        else if (code === -1 && !pickerStarted && !pickCancelRequested) pickFailed();
         else pickCanceled();
     }
 
@@ -249,6 +258,7 @@ Item {
         command: ["zenity", "--file-selection", "--title=Import a voxtype-tui bundle", "--file-filter=JSON bundles | *.json"]
         stdout: StdioCollector { id: pickerOutput; waitForEnd: true }
         stderr: StdioCollector { waitForEnd: true }
+        onStarted: root.pickerStarted = true
         onRunningChanged: {
             if (!running) {
                 var generation = root.pickerGeneration;
