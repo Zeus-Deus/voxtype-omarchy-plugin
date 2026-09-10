@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.zeus-deus.voxtype",
+  "name": "Voxtype",
+  "version": "0.1.0",
+  "author": "Zeus-Deus",
+  "license": "MIT",
+  "description": "Manage Voxtype voice-to-text from the bar: record, restart, vocabulary, dictionary rules, settings, models and backups, all through voxtype-tui.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {"barWidget": "BarWidget.qml"},
+  "barWidget": {
+    "displayName": "Voxtype",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {"pollIntervalSec": 2, "rightClickRecords": true},
+    "schema": [
+      {"key": "pollIntervalSec", "type": "integer", "label": "Status poll interval while the panel is open (seconds)", "min": 1, "max": 10, "step": 1, "defaultValue": 2},
+      {"key": "rightClickRecords", "type": "boolean", "label": "Right-click the bar button to start or stop recording", "defaultValue": true}
+    ]
+  }
+}
