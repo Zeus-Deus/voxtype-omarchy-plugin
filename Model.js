@@ -387,6 +387,41 @@ function restartNeededSummary(paths) {
     return paths.length === 1 ? "Restart to apply " + paths[0] : "Restart to apply " + paths.length + " changes";
 }
 
+// The Settings section's keyboard cursor order. Eight controls in Panel.qml
+// live inside Rows that are conditionally visible, so a static list walks the
+// highlight onto things that are not on screen and Enter then calls
+// forceActiveFocus() on an invisible TextField or open() on an invisible
+// Dropdown. These predicates MIRROR the `visible:` bindings that drive those
+// Rows — keep them in step:
+//   whisper.language                       Panel.qml  engine === "whisper"
+//   audio.feedback.theme / .volume         Row        audio.feedback.enabled
+//   vad.threshold / vad.model              Row        vad.enabled
+//   whisper.remote_endpoint                Panel.qml  engine === "whisper"
+//   whisper.remote_model / _timeout_secs   Row        engine === "whisper"
+//   remote.clear                           Button     engine === "whisper"
+//                                                     && remote_api_key_set
+function settingsTargets(config, engine, modelPath) {
+    var eng = String(engine || "whisper");
+    var whisper = eng === "whisper";
+    var feedback = settingValue(config, "audio.feedback.enabled", true) === true;
+    var vad = settingValue(config, "vad.enabled", false) === true;
+    var keySet = settingValue(config, "whisper.remote_api_key_set", false) === true;
+    var out = ["engine", String(modelPath || (eng + ".model"))];
+    if (whisper) out.push("whisper.language");
+    out = out.concat(["hotkey.key", "hotkey.mod.LEFTCTRL", "hotkey.mod.LEFTALT", "hotkey.mod.LEFTSHIFT", "hotkey.mod.LEFTMETA", "hotkey.mode", "hotkey.enabled",
+                      "audio.device", "audio.max_duration_secs", "audio.feedback.enabled"]);
+    if (feedback) out = out.concat(["audio.feedback.theme", "audio.feedback.volume"]);
+    out = out.concat(["output.mode", "output.fallback_to_clipboard", "output.auto_submit", "text.smart_auto_submit", "text.spoken_punctuation", "output.type_delay_ms",
+                      "vad.enabled"]);
+    if (vad) out = out.concat(["vad.threshold", "vad.model"]);
+    out = out.concat(["output.post_process.command", "output.post_process.timeout_ms"]);
+    if (whisper) {
+        out = out.concat(["whisper.remote_endpoint", "whisper.remote_model", "whisper.remote_timeout_secs"]);
+        if (keySet) out.push("remote.clear");
+    }
+    return out.concat(["gpu.device", "gpu.enable", "gpu.disable"]);
+}
+
 function dangerousChanges(diff) {
     var out = [];
     var changes = diff && diff.settings_change ? diff.settings_change : [];
@@ -403,6 +438,68 @@ function dangerLine(change, oldMax, newMax) {
     return path + ": " + sanitize(change.old, oldMax || 40) + " → " + sanitize(change.new, newMax || 60);
 }
 
+// Every settings row the import would write, in the order the user should
+// read them: dangerous first (so nothing dangerous can fall below the cut),
+// then the rest. Formatting goes through dangerLine, which is the
+// redaction-aware path, so a secret value is never rendered. The list is a
+// bridge response of arbitrary length, so it is capped and the remainder is
+// reported as one overflow line rather than overflowing the card.
+var IMPORT_CARD_ROWS = 12;
+
+function settingsRows(diff, max) {
+    var changes = (diff && diff.settings_change) ? diff.settings_change : [];
+    var lim = max || IMPORT_CARD_ROWS;
+    var ordered = [];
+    var i;
+    for (i = 0; i < changes.length; i++) if (changes[i] && changes[i].dangerous) ordered.push(changes[i]);
+    for (i = 0; i < changes.length; i++) if (changes[i] && !changes[i].dangerous) ordered.push(changes[i]);
+    var out = [];
+    for (i = 0; i < ordered.length && i < lim; i++)
+        out.push({text: dangerLine(ordered[i], 40, 60), dangerous: ordered[i].dangerous === true, overflow: false});
+    var rest = ordered.length - lim;
+    if (rest > 0) out.push({text: "and " + rest + " more change" + (rest === 1 ? "" : "s"), dangerous: false, overflow: true});
+    return out;
+}
+
+// The import confirmation, and with it the ONE thing allowed to set
+// `accept_dangerous` on import.apply. The bridge's own refusal is the second
+// half of the gate, so the panel must never claim an acknowledgement the
+// dialog did not actually obtain: `accept` is true only when the message
+// below named every dangerous row.
+//
+// Tiers, because the kit's ConfirmDialog card grows with its message and an
+// unbounded list would push the buttons off the screen:
+//   <= IMPORT_CONFIRM_ROWS  every row with its old -> new values
+//   <= IMPORT_CONFIRM_MAX   every row by path only (values live in the card)
+//   more                    nothing can be acknowledged here; accept stays
+//                           false and the bridge refuses. The escape hatch is
+//                           the include-settings toggle, which is off by
+//                           default and removes settings rows from the diff.
+var IMPORT_CONFIRM_ROWS = 8;
+var IMPORT_CONFIRM_MAX = 24;
+
+function importConfirmation(fileName, diff) {
+    var danger = dangerousChanges(diff);
+    var lines = ["Import " + sanitize(fileName, 60) + "?", diffSummary(diff)];
+    var named = 0;
+    var i;
+    if (danger.length > 0 && danger.length <= IMPORT_CONFIRM_ROWS) {
+        for (i = 0; i < danger.length; i++) { lines.push("⚠ " + dangerLine(danger[i], 30, 40)); named++; }
+    } else if (danger.length > IMPORT_CONFIRM_ROWS && danger.length <= IMPORT_CONFIRM_MAX) {
+        var paths = [];
+        for (i = 0; i < danger.length; i++) { paths.push(sanitize(danger[i].path, 60)); named++; }
+        lines.push("⚠ " + danger.length + " dangerous changes: " + paths.join(", "));
+    } else if (danger.length > IMPORT_CONFIRM_MAX) {
+        lines.push("⚠ " + danger.length + " dangerous changes — too many to review here. Turn off “Include settings”, or import a smaller bundle.");
+    }
+    return {
+        message: lines.join("\n"),
+        confirmText: danger.length ? "Import anyway" : "Import",
+        accept: danger.length > 0 && named === danger.length,
+        dangerous: danger.length
+    };
+}
+
 function diffSummary(diff) {
     if (!diff) return "Nothing to import";
     var d = diff;
@@ -415,9 +512,37 @@ function diffSummary(diff) {
     return parts.length ? parts.join(" · ") : "No changes";
 }
 
+// Characters that must never reach a Text element: C0 controls, DEL, the
+// bidi overrides/isolates, and the invisible formatters that let an imported
+// value fake its own layout. U+2028/U+2029 are line/paragraph separators and
+// U+200B/U+00AD/U+FEFF are zero-width — all of them survive
+// `textFormat: PlainText`.
+var UNSAFE_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u00ad\u200b\u200e\u200f\u202a-\u202e\u2028\u2029\u2066-\u2069\ufeff]/g;
+
+// Untrusted fragments (phrases, rules, model names, bundle paths, bridge
+// errors). ConfirmDialog renders its message with wrapMode WordWrap, so a
+// value containing LF/CR/TAB becomes real lines and can push the genuine
+// question off the top of the card, putting its own question directly above
+// the Cancel/Confirm buttons. PlainText stops HTML, not line breaks — so
+// flatten them here, in the fragment, and assemble the static copy after.
 function sanitize(text, max) {
-    var s = String(text === null || text === undefined ? "" : text).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "");
+    var s = String(text === null || text === undefined ? "" : text)
+        .replace(UNSAFE_CHARS, "")
+        .replace(/[\r\n\t]+/g, " ")
+        .replace(/\s{2,}/g, " ");
     var lim = max || 200;
+    return s.length > lim ? s.slice(0, lim - 1) + "…" : s;
+}
+
+// Defence in depth for an ALREADY-assembled dialog message: strip the same
+// unsafe characters and cap, but keep "\n" because the panel's own static
+// copy uses it deliberately. Every untrusted fragment inside the message has
+// been through sanitize() first, so no injected break can reach this.
+function sanitizeMessage(text, max) {
+    var s = String(text === null || text === undefined ? "" : text)
+        .replace(UNSAFE_CHARS, "")
+        .replace(/[\r\t]+/g, " ");
+    var lim = max || 600;
     return s.length > lim ? s.slice(0, lim - 1) + "…" : s;
 }
 

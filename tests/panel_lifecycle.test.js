@@ -53,9 +53,10 @@ function panelHarness(overrides) {
     snapshot: {vocabulary: [], replacements: [], settings: {}}, options: null, modelRows: [], modelsEngine: '', gpu: null,
     restartNeeded: [], errorText: '', notice: '', tuiMissing: false, loaded: true, previewOutput: '',
     exportPreview: null, importPreview: null, importPath: '', attaching: false, popoutSwitchClosing: false,
+    importAcceptDangerous: false,
     section: 'dictate', cursorKey: '', cursorIndex: -1, cursorActive: false, focusedEditor: null, openPopups: 0,
     confirmAction: '', confirmPayload: null, dictCategory: 'Replacement', exportOpen: false, exportScope: 'sync',
-    exportSecrets: false, importLocal: false, hostWidget: {id: 'widget'}, bar: {activePopout: null},
+    exportSecrets: false, importLocal: false, importSettings: false, hostWidget: {id: 'widget'}, bar: {activePopout: null},
     anchorItem: null,
     controller: {open: true, show() { this.open = true; }, hide() { this.open = false; }},
     keyCatcher: field(), testField: field(), vocabSearch: field(), dictSearch: field(), dictFrom: field(), dictTo: field(), exportPath: field(),
@@ -100,7 +101,7 @@ function panelHarness(overrides) {
     picked(p) { root.service.picking = false; on('onPicked')(p); },
     pickCanceled() { root.service.picking = false; on('onPickCanceled')(); },
     pickFailed() { root.service.picking = false; on('onPickFailed')(); },
-    setInside(code) { vm.runInContext(code, context); },
+    setInside(code) { return vm.runInContext(code, context); },
     flush() { while (deferred.length) deferred.shift()(); },
   };
 }
@@ -204,8 +205,231 @@ test('redacted import rows never reach a value formatter, in the card or the con
   assert.match(h.root.confirmation.message, /output\.post_process\.command: a → rm -rf/);
   assert.doesNotMatch(h.root.confirmation.message, /undefined/);
   assert.equal(h.root.confirmation.confirmText, 'Import anyway');
-  assert.match(panel, /text: "󰀦 " \+ Model\.dangerLine\(modelData, 40, 60\)/);
+  assert.match(panel, /text: \(modelData\.dangerous \? "󰀦 " : \(modelData\.overflow \? "" : "· "\)\) \+ modelData\.text/);
   assert.doesNotMatch(panel, /modelData\.(old|new)\b/);
+});
+
+// ---- F3: the card renders every settings row, not only the dangerous ones -
+
+test('the import card renders every settings_change row, dangerous ones distinguished, inside the scrolling Flickable', () => {
+  const h = panelHarness();
+  const Model = h.root.Model;
+  // The Repeater model expression, taken from the QML rather than re-implemented.
+  const expr = panel.match(/model: root\.importPreview \? (Model\.settingsRows\([^\n]*?)\s*:\s*\[\]/)[1];
+  h.root.importPath = '/tmp/b.json';
+  h.root.importPreview = {format: 'v2', warnings: [], diff: {settings_change: [
+    {path: 'audio.device', old: 'default', new: 'yeti', dangerous: false},
+    {path: 'engine', old: 'whisper', new: 'parakeet', dangerous: true},
+    {path: 'whisper.remote_api_key', dangerous: true, redacted: true, old_set: true, new_set: true},
+  ]}};
+  const rows = JSON.parse(JSON.stringify(h.setInside('(' + expr + ')')));
+  assert.equal(rows.length, 3, 'the non-dangerous row is rendered too, not collapsed into "N settings"');
+  assert.ok(rows.some(r => r.text === 'audio.device: default → yeti'), 'old → new is visible');
+  assert.equal(rows.filter(r => r.dangerous).length, 2);
+  assert.ok(rows.some(r => r.text === 'whisper.remote_api_key will be replaced'));
+  for (const r of rows) assert.doesNotMatch(r.text, /undefined/);
+
+  // No cap-free rendering: a long bridge list ends in one overflow line.
+  const many = [];
+  for (let i = 0; i < 40; i++) many.push({path: 'meeting.hook' + i, old: 'a', new: 'b', dangerous: false});
+  h.root.importPreview = {format: 'v2', warnings: [], diff: {settings_change: many}};
+  const capped = JSON.parse(JSON.stringify(h.setInside('(' + expr + ')')));
+  assert.ok(capped.length <= Model.IMPORT_CARD_ROWS + 1, 'capped at ' + Model.IMPORT_CARD_ROWS + ' rows + overflow');
+  assert.equal(capped[capped.length - 1].overflow, true);
+  assert.match(capped[capped.length - 1].text, /and \d+ more changes/);
+
+  // The card lives inside the panel body Flickable, so a long list scrolls.
+  const bodyStart = panel.indexOf('Flickable {\n                        id: body');
+  assert.notEqual(bodyStart, -1);
+  const cardStart = panel.indexOf('id: importCard');
+  assert.ok(cardStart > bodyStart, 'importCard is nested inside the body Flickable');
+  assert.match(panel, /id: importCard[\s\S]{0,400}implicitHeight: importColumn\.implicitHeight/, 'the card grows with its content');
+});
+
+// ---- F1: accept_dangerous is an acknowledgement, not a constant -----------
+
+test('accept_dangerous is false for a clean diff and true only when the dialog named every dangerous row', () => {
+  const h = panelHarness();
+  h.root.importPath = '/tmp/b.json';
+  // No dangerous rows: the bridge gate must stay live.
+  h.root.importPreview = {format: 'v2', warnings: [], diff: {settings_change: [{path: 'audio.device', old: 'a', new: 'b', dangerous: false}]}};
+  h.root.askImport();
+  assert.equal(h.root.importAcceptDangerous, false);
+  assert.equal(h.root.confirmation.confirmText, 'Import', 'no dangerous rows: plain Import');
+  h.root.applyConfirmed();
+  const clean = h.requests.pop();
+  assert.equal(clean.op, 'import.apply');
+  assert.equal(clean.accept_dangerous, false, 'a clean import never pre-waives the bridge refusal');
+
+  // Dangerous rows the dialog fully enumerates: acknowledged.
+  h.root.importPreview = {format: 'v2', warnings: [], diff: {settings_change: [
+    {path: 'output.pre_recording_command', old: '', new: 'curl evil', dangerous: true},
+    {path: 'engine', old: 'whisper', new: 'parakeet', dangerous: true},
+  ]}};
+  h.root.askImport();
+  assert.equal(h.root.importAcceptDangerous, true);
+  assert.equal(h.root.confirmation.confirmText, 'Import anyway');
+  assert.match(h.root.confirmation.message, /output\.pre_recording_command/);
+  assert.match(h.root.confirmation.message, /engine/);
+  h.root.applyConfirmed();
+  const risky = h.requests.pop();
+  assert.equal(risky.accept_dangerous, true);
+  assert.equal(h.root.importAcceptDangerous, false, 'the acknowledgement is consumed, never sticky');
+});
+
+test('an unreviewable dangerous list is not acknowledged, so the bridge refuses instead of the panel waiving it', () => {
+  const h = panelHarness();
+  const Model = h.root.Model;
+  h.root.importPath = '/tmp/huge.json';
+  const rows = [];
+  for (let i = 0; i < 40; i++) rows.push({path: 'meeting.hook' + i, old: 'a', new: 'b', dangerous: true});
+  h.root.importPreview = {format: 'v2', warnings: [], diff: {settings_change: rows}};
+  h.root.askImport();
+  assert.equal(h.root.importAcceptDangerous, false, 'nothing the user could read = nothing acknowledged');
+  assert.match(h.root.confirmation.message, /40 dangerous changes/);
+  h.root.applyConfirmed();
+  assert.equal(h.requests.pop().accept_dangerous, false);
+  // The mid tier still names every path, so it counts as acknowledged.
+  const mid = [];
+  for (let i = 0; i < 12; i++) mid.push({path: 'meeting.hook' + i, old: 'a', new: 'b', dangerous: true});
+  assert.equal(Model.importConfirmation('x.json', {settings_change: mid}).accept, true);
+  assert.equal(Model.importConfirmation('x.json', {settings_change: rows}).accept, false);
+  assert.equal(Model.importConfirmation('x.json', {settings_change: []}).accept, false);
+});
+
+test('a dangerous-changes refusal from the bridge asks for a fresh preview instead of dumping the protocol error', () => {
+  const h = panelHarness();
+  h.root.importPath = '/tmp/b.json';
+  h.root.importPreview = {format: 'v2', warnings: [], diff: {settings_change: [{path: 'engine', old: 'a', new: 'b', dangerous: true}]}};
+  h.root.importAcceptDangerous = true;
+  h.complete('import.apply', {ok: false, error: 'dangerous-changes', dangerous: ['engine'], diff: {}, warnings: []}, {op: 'import.apply'});
+  assert.doesNotMatch(h.root.errorText, /dangerous-changes/, 'no raw protocol string in the UI');
+  assert.match(h.root.errorText, /[Pp]review it again/);
+  assert.equal(h.root.importPreview, null, 'the stale preview is dropped');
+  assert.equal(h.root.importAcceptDangerous, false, 'the stale acknowledgement is dropped too');
+});
+
+test('cancelling the import confirmation drops the acknowledgement', () => {
+  const h = panelHarness();
+  h.root.importPath = '/tmp/b.json';
+  h.root.importPreview = {format: 'v2', warnings: [], diff: {settings_change: [{path: 'engine', old: 'a', new: 'b', dangerous: true}]}};
+  h.root.askImport();
+  assert.equal(h.root.importAcceptDangerous, true);
+  h.root.closeForPopoutSwitch();
+  assert.equal(h.root.importAcceptDangerous, false);
+  assert.match(panel, /onCanceled: \{[^\n]*root\.importAcceptDangerous = false/, 'Cancel clears it too');
+});
+
+// ---- F2: include_settings is explicit on both ops and defaults OFF -------
+
+test('both import ops send include_settings explicitly, defaulting OFF like voxtype-tui', () => {
+  const h = panelHarness();
+  h.root.section = 'models';
+  h.root.beginImport();
+  h.picked('/tmp/bundle.json');
+  h.flush();
+  const preview = h.requests.find(r => r.op === 'import.preview');
+  assert.ok(preview, 'preview requested');
+  assert.equal('include_settings' in preview, true, 'never left to the bridge default');
+  assert.equal(preview.include_settings, false, 'voxtype-tui ships this OFF');
+  assert.equal(preview.include_local, false);
+
+  h.root.importPreview = {format: 'v2', warnings: [], diff: {settings_change: []}};
+  h.root.askImport();
+  h.root.applyConfirmed();
+  const apply = h.requests.pop();
+  assert.equal(apply.op, 'import.apply');
+  assert.equal('include_settings' in apply, true);
+  assert.equal(apply.include_settings, false);
+});
+
+test('toggling Include settings re-previews with the new flag so the reviewed diff is the applied diff', () => {
+  const h = panelHarness();
+  h.root.importPath = '/tmp/bundle.json';
+  h.root.importPreview = {format: 'v2', warnings: [], diff: {settings_change: [{path: 'engine', old: 'a', new: 'b', dangerous: true}]}};
+  h.root.askImport();
+  assert.equal(h.root.importAcceptDangerous, true);
+  h.requests.length = 0;
+
+  h.root.setImportSettings(true);
+  assert.equal(h.root.importSettings, true);
+  assert.equal(h.root.importAcceptDangerous, false, 'the old acknowledgement no longer describes the diff');
+  const again = h.requests.pop();
+  assert.equal(again.op, 'import.preview');
+  assert.equal(again.include_settings, true, 'the preview follows the toggle');
+  assert.equal(again.path, '/tmp/bundle.json');
+
+  h.root.setImportSettings(true);
+  assert.equal(h.requests.length, 0, 'no redundant preview when the value did not change');
+  h.root.setImportSettings(false);
+  assert.equal(h.requests.pop().include_settings, false);
+});
+
+test('a fresh import always starts with settings excluded, whatever the last bundle used', () => {
+  const h = panelHarness();
+  h.root.section = 'models';
+  h.root.importSettings = true;
+  h.root.importAcceptDangerous = true;
+  h.root.beginImport();
+  assert.equal(h.root.importSettings, false, 'the safe default is re-armed per bundle');
+  assert.equal(h.root.importAcceptDangerous, false);
+});
+
+test('the Include settings control is the shipped kit Toggle, not hand-rolled chrome', () => {
+  assert.match(panel, /Toggle \{\n\s*id: includeSettingsToggle[\s\S]{0,400}label: "Include settings"/);
+  assert.match(panel, /checked: root\.importSettings/);
+  assert.match(panel, /onClicked: root\.setImportSettings\(!root\.importSettings\)/);
+  assert.match(panel, /property bool importSettings: false/, 'default OFF, mirroring importLocal');
+});
+
+// ---- F4: the dialog-message BUILDER, end to end ---------------------------
+
+test('no untrusted value can inject a line break into a confirmation, on any ask() path', () => {
+  const h = panelHarness();
+  // A phrase that tries to push the real question off the card and render its
+  // own question right above the Cancel/Remove buttons.
+  const evil = 'coffee\u000a\u000d\u0009\u2028\u2029\u200b\u00ad\ufeff\n\n\n\n\n\n\n\n\n\nDelete every model?';
+  const breaks = /[\r\n\u2028\u2029]/;
+
+  h.root.snapshot = {vocabulary: [{phrase: evil}], replacements: [{from: evil, to: evil, category: 'Replacement'}], settings: {}};
+
+  h.root.section = 'vocabulary';
+  h.root.setCursor('rows', 0);
+  h.root.deleteSelected();
+  assert.equal(h.root.confirmation.opened, true);
+  assert.doesNotMatch(h.root.confirmation.message, breaks, 'vocab delete: no injected break');
+  assert.match(h.root.confirmation.message, /^Remove “coffee /, 'the real question stays first');
+  assert.equal(h.root.confirmPayload.phrase, evil, 'the bridge still gets the exact phrase');
+
+  h.root.confirmation.opened = false;
+  h.root.section = 'dictionary';
+  h.root.setCursor('rows', 0);
+  h.root.deleteSelected();
+  assert.doesNotMatch(h.root.confirmation.message, breaks, 'dict delete: no injected break');
+  assert.match(h.root.confirmation.message, /^Delete the rule /);
+
+  h.root.confirmation.opened = false;
+  h.root.section = 'models';
+  h.root.modelsEngine = 'whisper';
+  h.root.modelRows = [{name: evil, downloaded: true, active: false}];
+  h.root.setCursor('rows', 0);
+  h.root.deleteSelected();
+  // This path DOES carry a deliberate literal \n in the panel's own copy.
+  assert.match(h.root.confirmation.message, /^Delete coffee /, 'the real question stays first');
+  assert.equal(h.root.confirmation.message.split('\n').length, 2, 'exactly the one static newline the panel wrote');
+  assert.match(h.root.confirmation.message, /\nIt can be downloaded again later\.$/, 'the static \\n still works');
+
+  // The import confirmation builds from bundle path, diff rows and warnings.
+  h.root.confirmation.opened = false;
+  h.root.importPath = '/tmp/' + evil + '.json';
+  h.root.importPreview = {format: 'v2', warnings: [], diff: {settings_change: [
+    {path: evil, old: evil, new: evil, dangerous: true},
+  ]}};
+  h.root.askImport();
+  const lines = h.root.confirmation.message.split('\n');
+  assert.equal(lines.length, 3, 'exactly the lines importConfirmation joined, no injected extras');
+  assert.match(lines[0], /^Import coffee /);
+  for (const l of lines) assert.doesNotMatch(l, /[\u2028\u2029\u200b\u00ad\ufeff\r\t]/);
 });
 
 test('a missing zenity reopens the panel with an install hint instead of a silent cancel', () => {
@@ -396,7 +620,16 @@ test('the panel forgets options and gpu status when appropriate, and asks the br
   h.root.options = {engines: ['whisper']};
   h.root.gpu = {ok: true};
   h.root.restartDaemon();
-  assert.deepEqual(JSON.parse(JSON.stringify(h.requests.pop())), {op: 'daemon.restart', timeout: 18});
+  const restart = JSON.parse(JSON.stringify(h.requests.pop()));
+  assert.deepEqual(restart, {op: 'daemon.restart', timeout: 18});
+  // The readiness wait the panel asks for, plus systemctl's own blocking
+  // restart inside the bridge, must fit under the Service deadline — else the
+  // panel kills a bridge that succeeded. bridge.py owns the other half.
+  const service = fs.readFileSync(path.join(__dirname, '..', 'Service.qml'), 'utf8');
+  const deadlineMs = Number(service.match(/payload\.op === "daemon\.restart" \? (\d+)/)[1]);
+  assert.equal(deadlineMs, 40000);
+  assert.ok(restart.timeout * 1000 + 15000 < deadlineMs,
+    'timeout ' + restart.timeout + ' s + systemctl 15 s must stay under the ' + deadlineMs + ' ms deadline');
   h.root.launchGpu(true);
   assert.equal(h.root.gpu, null, 'gpu status is stale once the terminal runs setup');
   assert.match(panel, /onOpenedChanged: \{[\s\S]*?options = null;/, 'options invalidated on close');
@@ -420,4 +653,70 @@ test('every Settings cursor target is reachable and visible: Clear key is skippe
   assert.match(panel, /root\.ensureVisible\(engineDropdown\)/);
   const cursorTargets = new Set([...panel.matchAll(/setCursor\("([\w.]+)", -1\)/g)].map(m => m[1]));
   for (const key of ['export', 'import', 'engine', 'gpu.device', 'gpu.enable', 'gpu.disable', 'remote.clear', 'record', 'restart', 'download', 'test', 'search']) assert.ok(cursorTargets.has(key), key);
+});
+
+// ---- F6: conditionally-hidden Settings controls leave the cursor order ----
+//
+// Eight controls sit inside Rows with a `visible:` predicate. A static cursor
+// list walked j/k onto them while off screen, and Enter then called
+// forceActiveFocus() on an invisible TextField or open() on an invisible
+// Dropdown. Only the live shell shows that; here the predicate is pinned
+// against the very `visible:` bindings it mirrors.
+
+test('Settings cursor targets drop every conditionally-hidden control (engine, feedback, VAD, API key)', () => {
+  const h = panelHarness();
+  h.root.section = 'settings';
+  const targets = () => h.root.targetsFor('settings');
+  const has = key => targets().indexOf(key) >= 0;
+
+  const whisperOnly = ['whisper.language', 'whisper.remote_endpoint', 'whisper.remote_model', 'whisper.remote_timeout_secs'];
+  const feedbackOnly = ['audio.feedback.theme', 'audio.feedback.volume'];
+  const vadOnly = ['vad.threshold', 'vad.model'];
+
+  // Defaults: whisper engine, feedback on (fallback true), VAD off (fallback false), no API key.
+  h.root.snapshot = {settings: {}};
+  for (const k of whisperOnly) assert.ok(has(k), 'whisper engine shows ' + k);
+  for (const k of feedbackOnly) assert.ok(has(k), 'feedback defaults on: ' + k);
+  for (const k of vadOnly) assert.ok(!has(k), 'VAD defaults off: ' + k + ' must not be a cursor stop');
+  assert.ok(!has('remote.clear'), 'no stored key: Clear is hidden');
+
+  // A non-whisper engine hides the language field and the whole remote block.
+  h.root.snapshot = {settings: {engine: 'parakeet', 'whisper.remote_api_key_set': true}};
+  assert.equal(h.root.engine, 'parakeet');
+  for (const k of whisperOnly) assert.ok(!has(k), 'engine !== whisper must drop ' + k);
+  assert.ok(!has('remote.clear'), 'the Clear button is inside the whisper-only block');
+  assert.ok(has('engine') && has('gpu.enable'), 'unconditional controls stay');
+
+  // Feedback off hides its theme and volume Row.
+  h.root.snapshot = {settings: {'audio.feedback.enabled': false}};
+  for (const k of feedbackOnly) assert.ok(!has(k), 'feedback off must drop ' + k);
+  assert.ok(has('audio.feedback.enabled'), 'the toggle itself stays reachable');
+
+  // VAD on reveals its Row.
+  h.root.snapshot = {settings: {'vad.enabled': true}};
+  for (const k of vadOnly) assert.ok(has(k), 'VAD on shows ' + k);
+
+  // Everything hidden at once: j/k must never land on an invisible control.
+  h.root.snapshot = {settings: {engine: 'parakeet', 'audio.feedback.enabled': false, 'vad.enabled': false}};
+  for (const k of whisperOnly.concat(feedbackOnly, vadOnly, ['remote.clear'])) assert.ok(!has(k), k);
+  const list = JSON.parse(JSON.stringify(targets()));
+  assert.equal(new Set(list).size, list.length, 'no duplicate cursor stops');
+  h.root.cursorActive = false;
+  for (let i = 0; i < list.length + 3; i++) {
+    h.root.moveCursor(1);
+    assert.ok(list.indexOf(h.root.cursorKey) >= 0, 'j landed on ' + h.root.cursorKey + ', which is not on screen');
+  }
+});
+
+test('the cursor predicates mirror the visible: bindings that actually drive those Rows', () => {
+  // If a Row's condition is edited, this fails rather than drifting silently.
+  assert.match(panel, /visible: Model\.settingValue\(root\.config, "audio\.feedback\.enabled", true\) === true/);
+  assert.match(panel, /visible: Model\.settingValue\(root\.config, "vad\.enabled", false\) === true/);
+  assert.match(panel, /settingKey: "whisper\.language";[^\n]*visible: root\.engine === "whisper"/);
+  assert.match(panel, /settingKey: "whisper\.remote_endpoint";[^\n]*visible: root\.engine === "whisper"/);
+  assert.equal((panel.match(/visible: root\.engine === "whisper"/g) || []).length, 6, 'both separators, header, language, endpoint and the two whisper Rows');
+  assert.match(panel, /visible: Model\.settingValue\(root\.config, "whisper\.remote_api_key_set", false\) === true/);
+  // The predicate is Node-testable, not inlined in the QML.
+  assert.match(panel, /readonly property var settingsTargets: Model\.settingsTargets\(config, engine, modelPath\)/);
+  assert.match(panel, /if \(sectionName === "settings"\) return settingsTargets;/);
 });

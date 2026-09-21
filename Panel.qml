@@ -30,6 +30,10 @@ Panel {
     property var importPreview: null
     property string importPath: ""
     property bool attaching: false
+    // Set ONLY by askImport, from the confirmation the user actually saw.
+    // applyConfirmed sends it verbatim as accept_dangerous, so nothing else
+    // may raise it: a stale true would make the bridge's refusal dead code.
+    property bool importAcceptDangerous: false
 
     // Cursor / navigation
     property string section: "dictate"
@@ -45,6 +49,11 @@ Panel {
     property string exportScope: "sync"
     property bool exportSecrets: false
     property bool importLocal: false
+    // voxtype-tui's own import screen ships this OFF: importing an old bundle
+    // to restore vocabulary must not silently overwrite whisper.model and the
+    // rest of the settings block. The bridge defaults it to false too; the
+    // panel still sends it explicitly on both ops.
+    property bool importSettings: false
 
     readonly property var vocabulary: snapshot.vocabulary || []
     readonly property var replacements: snapshot.replacements || []
@@ -72,7 +81,11 @@ Panel {
     readonly property string tooltip: "Voxtype · " + Model.heroMeta(status, tuiMissing ? Model.ERROR_TUI_MISSING : "")
     readonly property color foreground: bar ? bar.foreground : Color.foreground
     readonly property color urgent: bar ? bar.urgent : Color.urgent
-    readonly property color muted: Qt.darker(foreground, 1.5)
+    // Commons/Color.qml ships `muted` from the theme (and a per-bar override
+    // wins when a bar supplies one). Qt.darker(foreground) was wrong on a
+    // light theme — it made "muted" text HEAVIER than the primary
+    // foreground, inverting the hierarchy — and it ignored user overrides.
+    readonly property color muted: bar && bar.muted ? bar.muted : Color.muted
     readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
     readonly property int pollIntervalMs: Math.max(1, Math.min(10, setting("pollIntervalSec", 2))) * 1000
     readonly property bool editing: focusedEditor !== null
@@ -81,16 +94,10 @@ Panel {
         {value: "dictate", label: "Dictate"}, {value: "vocabulary", label: "Vocabulary"},
         {value: "dictionary", label: "Dictionary"}, {value: "settings", label: "Settings"}, {value: "models", label: "Models"}
     ]
-    readonly property var settingsTargets: [
-        "engine", modelPath, "whisper.language",
-        "hotkey.key", "hotkey.mod.LEFTCTRL", "hotkey.mod.LEFTALT", "hotkey.mod.LEFTSHIFT", "hotkey.mod.LEFTMETA", "hotkey.mode", "hotkey.enabled",
-        "audio.device", "audio.max_duration_secs", "audio.feedback.enabled", "audio.feedback.theme", "audio.feedback.volume",
-        "output.mode", "output.fallback_to_clipboard", "output.auto_submit", "text.smart_auto_submit", "text.spoken_punctuation", "output.type_delay_ms",
-        "vad.enabled", "vad.threshold", "vad.model",
-        "output.post_process.command", "output.post_process.timeout_ms",
-        "whisper.remote_endpoint", "whisper.remote_model", "whisper.remote_timeout_secs", "remote.clear",
-        "gpu.device", "gpu.enable", "gpu.disable"
-    ]
+    // Only the controls that are actually on screen: the predicates live in
+    // Model.settingsTargets so Node can pin them against the `visible:`
+    // bindings below.
+    readonly property var settingsTargets: Model.settingsTargets(config, engine, modelPath)
 
     function targetsFor(sectionName) {
         if (sectionName === "dictate") {
@@ -101,7 +108,7 @@ Panel {
         }
         if (sectionName === "vocabulary") return ["search", "rows"];
         if (sectionName === "dictionary") return ["search", "rows"];
-        if (sectionName === "settings") return settingsTargets.filter(function(k) { return k !== "remote.clear" || Model.settingValue(config, "whisper.remote_api_key_set", false) === true; });
+        if (sectionName === "settings") return settingsTargets;
         if (sectionName === "models") return ["engine", "rows", "export", "import"];
         return [];
     }
@@ -190,6 +197,7 @@ Panel {
         popoutSwitchClosing = true;
         confirmation.opened = false;
         confirmAction = "";
+        importAcceptDangerous = false;
         attaching = false;
         openPopups = 0;
         service.cancelPick();
@@ -206,6 +214,7 @@ Panel {
         if (!opened) {
             confirmation.opened = false;
             confirmAction = "";
+            importAcceptDangerous = false;
             focusedEditor = null;
             openPopups = 0;
             testField.text = "";
@@ -237,8 +246,10 @@ Panel {
     function restartDaemon() {
         if (locked || service.restarting) return;
         notice = "Restarting daemon…";
-        // The bridge waits up to `timeout` s for readiness; the Service kills
-        // the call at its own 30 s deadline.
+        // The bridge waits up to `timeout` s for readiness on top of
+        // systemctl's own 15 s blocking restart; the Service deadline (40 s)
+        // must stay above that sum. See Service.qml run() and bridge.py's
+        // SYSTEMCTL_RESTART_TIMEOUT / DAEMON_RESTART_READY_TIMEOUT.
         service.run({op: "daemon.restart", timeout: 18});
     }
     function restartIfStale() { if (stale) restartDaemon() }
@@ -302,7 +313,9 @@ Panel {
         if (locked) return;
         confirmAction = action;
         confirmPayload = payload;
-        confirmation.message = Model.sanitize(message, 600);
+        // The untrusted fragments were sanitized by the caller; this only
+        // caps the assembled copy and keeps the panel's own literal "\n".
+        confirmation.message = Model.sanitizeMessage(message, 600);
         confirmation.confirmText = confirmLabel;
         confirmation.selectedIndex = 0;
         confirmation.opened = true;
@@ -329,7 +342,15 @@ Panel {
         var payload = confirmPayload;
         confirmAction = "";
         confirmPayload = null;
-        if (action === "import.apply") { service.run({op: "import.apply", path: importPath, include_local: importLocal, accept_dangerous: true}); return; }
+        if (action === "import.apply") {
+            // accept_dangerous mirrors the confirmation the user just read.
+            // With no dangerous rows it is false, so the bridge's own gate
+            // stays live rather than being pre-waived on every import.
+            var accept = importAcceptDangerous;
+            importAcceptDangerous = false;
+            service.run({op: "import.apply", path: importPath, include_local: importLocal, include_settings: importSettings, accept_dangerous: accept});
+            return;
+        }
         if (action === "") return;
         var req = {op: action};
         for (var k in payload) req[k] = payload[k];
@@ -418,6 +439,22 @@ Panel {
         body.contentY = Math.min(maxY, Math.max(0, top - Style.space(12)));
     }
     function refreshExportPreview() { if (exportOpen) service.run({op: "export.preview", scope: exportScope, include_secrets: exportSecrets}) }
+    // Both import ops carry include_local / include_settings explicitly, so a
+    // permissive bridge default can never widen an import behind the user's
+    // back, and the diff on screen is the diff that will be applied.
+    function requestImportPreview() {
+        if (importPath === "" || locked) return;
+        service.cancelQueued("import.preview");
+        service.run({op: "import.preview", path: importPath, include_local: importLocal, include_settings: importSettings});
+    }
+    // A toggle changes what the bundle would write, so the reviewed diff and
+    // any acknowledgement built from it are both invalidated.
+    function setImportSettings(value) {
+        if (importSettings === value) return;
+        importSettings = value;
+        importAcceptDangerous = false;
+        requestImportPreview();
+    }
     function writeExport() {
         var path = exportPath.text.trim();
         if (path === "" || locked) return;
@@ -427,6 +464,10 @@ Panel {
         if (locked || service.picking || !pickerAvailable) return;
         attaching = true;
         exportOpen = false;
+        // Every import starts from the safe default; a toggle left on from a
+        // previous bundle must not carry into the next one.
+        importSettings = false;
+        importAcceptDangerous = false;
         controller.hide();
         if (!service.pick()) { attaching = false; controller.show(); }
     }
@@ -441,10 +482,11 @@ Panel {
     }
     function askImport() {
         if (!importPreview) return;
-        var danger = Model.dangerousChanges(importPreview.diff);
-        var lines = [Model.diffSummary(importPreview.diff)];
-        for (var i = 0; i < danger.length; i++) lines.push("⚠ " + Model.dangerLine(danger[i], 40, 60));
-        ask("import.apply", null, "Import " + Model.sanitize(importPath.split("/").pop(), 60) + "?\n" + lines.join("\n"), danger.length ? "Import anyway" : "Import");
+        var confirmation = Model.importConfirmation(importPath.split("/").pop(), importPreview.diff);
+        // The dialog is the acknowledgement: accept_dangerous is whatever
+        // this message could actually show, never a constant.
+        importAcceptDangerous = confirmation.accept;
+        ask("import.apply", null, confirmation.message, confirmation.confirmText);
     }
     function noteEditor(item, focused) {
         if (focused) focusedEditor = item;
@@ -511,8 +553,17 @@ Panel {
         onCompleted: function(op, result, req) {
             if (Model.isTuiMissing(result)) { root.tuiMissing = true; root.errorText = ""; return; }
             if (!result.ok) {
+                // The bridge refuses an apply whose diff no longer matches
+                // what was acknowledged (the file changed between preview and
+                // apply, or the dangerous set grew). Say what to do instead of
+                // dumping the protocol error.
+                if (op === "import.apply" && result.error === "dangerous-changes") {
+                    root.importPreview = null;
+                    root.importAcceptDangerous = false;
+                    root.errorText = "Import refused: the bundle's dangerous changes no longer match what you reviewed. Preview it again.";
+                    return;
+                }
                 if (op !== "status" || !root.status) root.errorText = Model.sanitize(result.error, 200);
-                if (op === "import.apply" && result.error === "dangerous-changes") root.errorText = "Import refused: review the dangerous changes first.";
                 return;
             }
             root.tuiMissing = false;
@@ -564,7 +615,7 @@ Panel {
         onPicked: function(path) {
             root.resumeAfterPick();
             root.importPath = path;
-            service.run({op: "import.preview", path: path, include_local: root.importLocal});
+            root.requestImportPreview();
         }
         onPickCanceled: root.resumeAfterPick()
         onCopyFinished: function(ok) { if (!ok) { root.notice = ""; root.errorText = "Could not copy: is wl-copy installed?" } }
@@ -1424,13 +1475,20 @@ Panel {
                                         spacing: Style.space(6)
                                         Text { width: parent.width; textFormat: Text.PlainText; elide: Text.ElideMiddle; text: root.importPath.split("/").pop() + (root.importPreview ? "  ·  " + String(root.importPreview.format || "") : ""); color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
                                         Text { width: parent.width; textFormat: Text.PlainText; wrapMode: Text.WordWrap; text: root.importPreview ? Model.diffSummary(root.importPreview.diff) : ""; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+                                        // Every settings row, not just the
+                                        // dangerous ones: the panel must not
+                                        // show less than the TUI it fronts.
+                                        // Dangerous rows keep the warning
+                                        // glyph and the urgent colour.
                                         Repeater {
-                                            model: root.importPreview ? Model.dangerousChanges(root.importPreview.diff) : []
+                                            model: root.importPreview ? Model.settingsRows(root.importPreview.diff, Model.IMPORT_CARD_ROWS) : []
                                             delegate: Text {
                                                 required property var modelData
                                                 width: importColumn.width; textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere
-                                                text: "󰀦 " + Model.dangerLine(modelData, 40, 60)
-                                                color: root.urgent; font.family: root.fontFamily; font.pixelSize: Style.font.caption
+                                                text: (modelData.dangerous ? "󰀦 " : (modelData.overflow ? "" : "· ")) + modelData.text
+                                                color: modelData.dangerous ? root.urgent : root.muted
+                                                font.family: root.fontFamily; font.pixelSize: Style.font.caption
+                                                font.italic: modelData.overflow
                                             }
                                         }
                                         Repeater {
@@ -1441,6 +1499,17 @@ Panel {
                                                 text: "• " + Model.sanitize(modelData, 120)
                                                 color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption
                                             }
+                                        }
+                                        Toggle {
+                                            id: includeSettingsToggle
+                                            width: parent.width
+                                            label: "Include settings"
+                                            description: "Off by default: the bundle's vocabulary and rules are imported without overwriting your engine, model and other settings."
+                                            checked: root.importSettings
+                                            foreground: root.foreground; fontFamily: root.fontFamily
+                                            titleSize: Style.font.body
+                                            enabled: !service.mutating
+                                            onClicked: root.setImportSettings(!root.importSettings)
                                         }
                                         Row {
                                             spacing: Style.space(8)
@@ -1488,7 +1557,7 @@ Panel {
                 selectedIndex: 0
                 foreground: root.foreground
                 fontFamily: root.fontFamily
-                onCanceled: { opened = false; root.confirmAction = ""; root.confirmPayload = null; keyCatcher.forceActiveFocus() }
+                onCanceled: { opened = false; root.confirmAction = ""; root.confirmPayload = null; root.importAcceptDangerous = false; keyCatcher.forceActiveFocus() }
                 onConfirmed: { opened = false; root.applyConfirmed(); keyCatcher.forceActiveFocus() }
             }
         }
@@ -1530,7 +1599,10 @@ Panel {
             id: labelText
             anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
             textFormat: Text.PlainText; text: labelRow.label
-            color: labelRow.isSet ? Qt.darker(root.foreground, 1.4) : root.muted
+            // A set key reads at full strength, a default one is muted. Both
+            // are theme tokens: Qt.darker() here inverted the hierarchy on a
+            // light theme and ignored the theme's own muted colour.
+            color: labelRow.isSet ? root.foreground : root.muted
             font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true
         }
         Text {

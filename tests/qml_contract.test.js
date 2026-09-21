@@ -122,10 +122,26 @@ test('mutating excludes the status poll so row actions do not flicker every 2 s'
   for (const g of gates) assert.doesNotMatch(g, /service\.busy/, g);
 });
 
-test('daemon.restart gets the long deadline', () => {
+// The other half of this contract lives in bridge.py, which exports
+// SYSTEMCTL_RESTART_TIMEOUT (15.0) and DAEMON_RESTART_READY_TIMEOUT (18.0)
+// and asserts python-side that their sum stays below this deadline. A QML
+// deadline shorter than the child's own worst case SIGKILLs a bridge that
+// succeeded and reports a timeout after a restart that actually worked.
+const SYSTEMCTL_RESTART_TIMEOUT_MS = 15000;   // bridge.py SYSTEMCTL_RESTART_TIMEOUT
+const DAEMON_RESTART_READY_TIMEOUT_MS = 18000; // bridge.py DAEMON_RESTART_READY_TIMEOUT
+
+test('daemon.restart gets a deadline above the bridge worst case (systemctl 15 s + readiness 18 s)', () => {
   const h = serviceHarness();
   h.root.run({op: 'daemon.restart'});
-  assert.equal(h.root.deadline.interval, 30000);
+  assert.equal(h.root.deadline.interval, 40000, 'the deadline the bridge asserts against');
+  assert.ok(h.root.deadline.interval > SYSTEMCTL_RESTART_TIMEOUT_MS + DAEMON_RESTART_READY_TIMEOUT_MS,
+    'deadline(daemon.restart) must exceed 15000 + 18000 = 33000, or a successful restart is killed and reported as a timeout');
+  // The literal is in Service.qml, not only in the harness.
+  assert.match(stripComments(service), /payload\.op === "daemon\.restart" \? 40000 : 15000/);
+  // Every other op keeps the short deadline.
+  h.fire('worker', 'onExited', 0);
+  h.root.run({op: 'load'});
+  assert.equal(h.root.deadline.interval, 15000);
 });
 
 test('FailedToStart (runningChanged without exited) still completes, after a normal exit would have won', () => {
@@ -359,7 +375,10 @@ test('the state poll follows status.state_file_path, falls back to the runtime d
 });
 
 test('ConfirmDialog defaults to Cancel on every open and blocks the key catcher', () => {
-  assert.match(panel, /function ask\([\s\S]{0,400}confirmation\.selectedIndex = 0;[\s\S]{0,60}confirmation\.opened = true/);
+  assert.match(panel, /function ask\([\s\S]{0,600}confirmation\.selectedIndex = 0;[\s\S]{0,60}confirmation\.opened = true/);
+  // The assembled message keeps the panel's own literal \n; only the
+  // untrusted fragments the caller passed in were flattened by Model.sanitize.
+  assert.match(panel, /confirmation\.message = Model\.sanitizeMessage\(message, 600\)/);
   assert.match(panel, /blocked: root\.keysBlocked/);
   assert.match(panel, /readonly property bool keysBlocked: editing \|\| confirmation\.opened \|\| openPopups > 0/);
   assert.match(panel, /ConfirmDialog \{[\s\S]*?selectedIndex: 0/);
@@ -367,8 +386,12 @@ test('ConfirmDialog defaults to Cancel on every open and blocks the key catcher'
   for (const op of ['vocab.remove', 'dict.remove', 'models.delete']) {
     assert.doesNotMatch(stripComments(panel), new RegExp('service\\.run\\(\\{op: "' + op.replace('.', '\\.') + '"'));
   }
-  assert.match(panel, /accept_dangerous: true/);
-  assert.equal((stripComments(panel).match(/accept_dangerous: true/g) || []).length, 1);
+  // accept_dangerous is never a literal: the only writer is askImport, from
+  // the confirmation the user actually read. A hard-coded true would make the
+  // bridge's dangerous-changes refusal dead code in production.
+  assert.doesNotMatch(stripComments(panel), /accept_dangerous: true/);
+  assert.match(stripComments(panel), /accept_dangerous: accept/);
+  assert.equal((stripComments(panel).match(/importAcceptDangerous = confirmation\.accept/g) || []).length, 1);
   assert.match(panel, /function applyConfirmed\(\)[\s\S]{0,200}action === "import\.apply"/);
 });
 
@@ -385,7 +408,7 @@ test('closeForPopoutSwitch is overridden and clears the attach flag so a late ch
   assert.match(panel, /function closeForPopoutSwitch\(\) \{[\s\S]*?popoutSwitchClosing = true;[\s\S]*?attaching = false;[\s\S]*?service\.cancelPick\(\);[\s\S]*?controller\.hide\(\);[\s\S]*?Qt\.callLater\(function\(\) \{ root\.popoutSwitchClosing = false \}\)/);
   assert.match(panel, /function resumeAfterPick\(\) \{[\s\S]*?if \(popoutTakenElsewhere\(\)\) return;[\s\S]*?controller\.show\(\)/);
   assert.match(panel, /bar\.activePopout !== owner/);
-  assert.match(panel, /function beginImport\(\)[\s\S]{0,300}attaching = true;[\s\S]{0,120}controller\.hide\(\);[\s\S]{0,80}service\.pick\(\)/);
+  assert.match(panel, /function beginImport\(\)[\s\S]{0,300}attaching = true;[\s\S]{0,400}controller\.hide\(\);[\s\S]{0,80}service\.pick\(\)/);
   assert.match(panel, /function launchGpu\(enable\)[\s\S]{0,400}controller\.hide\(\);[\s\S]{0,160}service\.launchGpuSetup\(enable\)/);
   assert.match(widget, /function closeForPopoutSwitch\(\) \{ if \(panelLoader\.item\) panelLoader\.item\.closeForPopoutSwitch\(\) \}/);
 });
@@ -411,6 +434,12 @@ test('the panel is built from the shipped kit with no hard-coded colours, fonts 
   assert.doesNotMatch(code, /"#[0-9a-fA-F]{3,8}"/);
   assert.doesNotMatch(code, /font\.family: "/);
   assert.doesNotMatch(code, /font\.pixelSize: \d/);
+  // A colour derived arithmetically is not a theme colour: Qt.darker on a
+  // LIGHT theme makes "muted" text heavier than the primary foreground,
+  // inverting the hierarchy, and it ignores any user override of the token.
+  // Use Color.muted / bar.muted instead.
+  assert.doesNotMatch(code, /Qt\.(darker|lighter|tint)\s*\(/, 'derive muted from the theme token, not arithmetic');
+  assert.match(panel, /readonly property color muted: bar && bar\.muted \? bar\.muted : Color\.muted/);
   for (const kit of ['KeyboardPanel', 'PanelKeyCatcher', 'PanelHero', 'ButtonGroup', 'PanelSectionHeader', 'PanelSeparator', 'Toggle', 'Dropdown', 'TextField', 'NumberField', 'PanelSlider', 'Button', 'PanelActionButton', 'CursorSurface', 'ConfirmDialog', 'Flickable'])
     assert.match(panel, new RegExp('\\b' + kit + ' \\{'), kit);
   assert.match(panel, /bar \? bar\.foreground : Color\.foreground/);
@@ -441,6 +470,65 @@ test('bar button: left toggles, right records (setting), middle restarts when st
   assert.match(panel, /function restartIfStale\(\) \{ if \(stale\) restartDaemon\(\) \}/);
 });
 
+test('every QML import is used, so the Qt6 semantic linter reports only expected noise', () => {
+  // BarWidget names no Quickshell type; the unused import was the only
+  // actionable [unused-imports] line the linter produced for this plugin.
+  assert.doesNotMatch(widget, /^import Quickshell/m);
+  assert.doesNotMatch(widget, /\bQuickshell\./, 'nothing in the widget needs that import');
+  // The files that DO use it keep it.
+  assert.match(service, /^import Quickshell$/m);
+  assert.match(service, /\bQuickshell\.(env|execDetached)\(/);
+
+  // `qs.Commons` / `qs.Ui` are type+singleton modules: they are "used" by
+  // naming an exported type (Color, Style, OpticalGlyph, ...), never by a
+  // module-qualified prefix. Read the real export list out of the shipped
+  // kit's qmldir so this test cannot drift from what the kit provides; if
+  // the kit is not installed there is nothing to check against, so skip.
+  const KIT = '/usr/share/omarchy/shell';
+  const kitTypes = (mod) => {
+    const dir = path.join(KIT, mod.replace(/^qs\./, ''));
+    let text;
+    try {
+      text = fs.readFileSync(path.join(dir, 'qmldir'), 'utf8');
+    } catch {
+      return null;
+    }
+    const names = [];
+    for (const line of text.split('\n')) {
+      const m = line.match(/^(?:singleton\s+)?([A-Z]\w*)\s+[\d.]+\s+\S+\.qml$/);
+      if (m) names.push(m[1]);
+    }
+    return names.length ? names : null;
+  };
+
+  const files = [
+    ['BarWidget.qml', widget],
+    ['Panel.qml', panel],
+    ['Service.qml', service],
+    ['VoxtypeIcon.qml', read('VoxtypeIcon.qml')],
+  ];
+  const builtin = {
+    'Quickshell.Io': /\b(Process|StdioCollector|SplitParser|FileView)\b/,
+    'Quickshell': /\bQuickshell\.(env|execDetached)\(/,
+  };
+  let checked = 0;
+  for (const [name, source] of files) {
+    const body = source.replace(/^import .*$/gm, '');
+    for (const m of source.matchAll(/^import (qs\.\w+|Quickshell(?:\.\w+)?)$/gm)) {
+      const mod = m[1];
+      let probe = builtin[mod];
+      if (!probe) {
+        const types = kitTypes(mod);
+        if (!types) continue; // kit not installed on this machine
+        probe = new RegExp('\\b(' + types.join('|') + ')\\b');
+      }
+      assert.match(body, probe, `${name} imports ${mod} without using it`);
+      checked++;
+    }
+  }
+  assert.ok(checked > 0, 'no imports were actually checked');
+});
+
 test('manifest matches the design', () => {
   const manifest = JSON.parse(read('manifest.json'));
   assert.equal(manifest.id, 'io.github.zeus-deus.voxtype');
@@ -462,4 +550,39 @@ test('manifest matches the design', () => {
 test('no home paths or usernames leak into shipped code', () => {
   for (const f of ['Panel.qml', 'Service.qml', 'BarWidget.qml', 'VoxtypeIcon.qml', 'Model.js', 'manifest.json', 'README.md'])
     assert.doesNotMatch(read(f), /\/home\/[a-z]/, f);
+});
+
+test('the plugin opens no network connection of its own', () => {
+  // The README tells users nothing leaves their machine except a model
+  // download run by the voxtype binary. Keep that claim honest: no QML
+  // or Python file here may construct a network client or name a URL.
+  const shipped = ['Panel.qml', 'Service.qml', 'BarWidget.qml', 'VoxtypeIcon.qml', 'Model.js', 'bridge.py'];
+  const forbidden = [
+    /\bimport\s+(?:urllib|http\.client|socket|requests|httpx|aiohttp)\b/,
+    /\bfrom\s+(?:urllib|http|socket|requests|httpx|aiohttp)\b/,
+    /\bXMLHttpRequest\b/,
+    /\bfetch\s*\(/,
+    /\bnew\s+WebSocket\b/,
+    // A hardcoded destination the plugin would talk to itself. The
+    // remote-Whisper endpoint FIELD is the user's own server and its
+    // placeholder is UI text, so an unresolved "https://…" is allowed;
+    // a real host with a path is not.
+    /\bhttps?:\/\/[a-z0-9.-]+\.[a-z]{2,}(?![^\s"'`]*\u2026)/i,
+  ];
+  for (const f of shipped) {
+    const source = read(f);
+    // Comments may legitimately discuss endpoints; strip the obvious ones.
+    const code = source
+      .replace(/^\s*(?:\/\/|#).*$/gm, '')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/"""[\s\S]*?"""/g, '');
+    for (const re of forbidden) assert.doesNotMatch(code, re, `${f} must not reach the network (${re})`);
+  }
+});
+
+test('README documents removal and the no-egress guarantee', () => {
+  const readme = read('README.md');
+  assert.match(readme, /omarchy plugin remove io\.github\.zeus-deus\.voxtype/);
+  assert.match(readme, /no network connections of its own/i);
+  assert.match(readme, /no telemetry/i);
 });

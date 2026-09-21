@@ -38,12 +38,44 @@ or from a local checkout: `omarchy plugin add "$PWD" --yes --enable`. The widget
 
 Plugins run unsandboxed inside `omarchy-shell`, so:
 
-- Every process is a fixed argv array. Untrusted strings travel over stdin as JSON, never through a shell.
-- The bridge response is capped at 2 MB and parsed strictly; a non-zero exit is never read as success.
-- The remote API key is never read back into QML; the bridge only reports whether one is set. Clearing it is a normal `settings.unset`.
-- Sudo-needing actions (GPU enable/disable) open your terminal. The panel has no password field.
-- Export defaults to no secrets; import refuses dangerous changes until you see them in the confirmation.
+- **This plugin makes no network connections of its own: no telemetry, no
+  analytics, no version check.** The only thing that touches the network is the
+  `voxtype` binary when you ask for a model download; the plugin just spawns it
+  with a fixed argv and relays its progress output. Nothing else leaves your
+  machine.
+- It never touches your audio or your transcripts. It edits configuration,
+  vocabulary and dictionary rules, and reads the daemon's state file.
+- Every process is a fixed argv array. Untrusted strings travel over stdin as
+  JSON, never through a shell. There is no `shell=True`, `eval` or string-built
+  command anywhere in the plugin.
+- The bridge response is capped at 2 MB and parsed strictly; a non-zero exit is
+  never read as success.
+- The remote API key is never read back into QML; the bridge only reports
+  whether one is set. Clearing it is a normal `settings.unset`.
+- Sudo-needing actions (GPU enable/disable) are handed to your own terminal via
+  `omarchy-launch-terminal`, with a fixed argv in which no element is
+  user-influenced. The panel has no password field and the shell never sees a
+  credential.
+- Export defaults to no secrets and can only write inside your home directory,
+  to a `.json` path.
+- Import defaults to **vocabulary and rules only**: settings from a bundle are
+  opt-in behind a checkbox, the preview shows every row that would change, and
+  dangerous changes (anything that runs a command, repoints transcription or
+  moves where audio and text are written) must be accepted explicitly. The
+  plugin keeps its own dangerous-path list as a superset of upstream's, so a
+  gap there cannot silently widen the hole here.
 - Destructive actions confirm with **Cancel** selected by default.
+
+## Uninstall
+
+```bash
+omarchy plugin remove io.github.zeus-deus.voxtype
+```
+
+That removes the plugin and its bar widget. It does not touch Voxtype itself,
+your `config.toml`, your vocabulary or your dictionary rules — the plugin keeps
+no state of its own outside the shell's plugin settings (poll interval,
+right-click-records).
 
 ## Development
 

