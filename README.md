@@ -38,7 +38,7 @@ You need Voxtype itself and the `voxtype-tui` package (AUR: `voxtype-tui`) insta
 
 An installed Omarchy Quattro shell (`qs.Ui` / `qs.Commons`), `voxtype`, `/usr/bin/python3` with the `voxtype-tui` package (AUR: `voxtype-tui`), `zenity` for the import file chooser, `wl-copy` (wl-clipboard) for the copy buttons, and `omarchy-launch-terminal` for the GPU sudo hand-off. The panel says so in place when zenity or the terminal launcher is missing. Git is needed for plugin-manager installation. Node.js and pytest are only needed for the development tests.
 
-No npm/pip packages, root privileges, background service, build step or vendored binaries. Nothing runs at install time.
+No npm/pip packages, background service, build step or vendored binaries. Nothing runs at install time, and the plugin itself never runs as root — the one privileged action (GPU enable/disable) opens a terminal where *you* run `sudo voxtype setup gpu`, so the shell never handles a password.
 
 ## How it works
 
@@ -79,6 +79,28 @@ Plugins run unsandboxed inside `omarchy-shell`, so:
   plugin keeps its own dangerous-path list as a superset of upstream's, so a
   gap there cannot silently widen the hole here.
 - Destructive actions confirm with **Cancel** selected by default.
+
+### What a reviewer will flag
+
+An automated baseline scan will detect two capabilities in this plugin. Both are
+intentional and visible in the source:
+
+- **`privilege`** — one `sudo` reference, at `Service.qml:208`. It is a fixed
+  argv (`omarchy-launch-terminal sudo voxtype setup gpu --enable|--disable`)
+  in which no element comes from user input or a config file. It is detached
+  into your terminal so the credential is typed by you, to `sudo`, outside
+  `omarchy-shell` entirely. There is no sudoers file, no `NOPASSWD` rule, and
+  no password field anywhere in the plugin.
+- **`service-management`** — `systemctl --user start|stop|restart voxtype` and
+  a read-only `systemctl --user show voxtype`. The verb is chosen from a fixed
+  set in `bridge.py`; it is never taken from the request JSON. This is how the
+  panel starts, stops and restarts the voice daemon, which is the plugin's
+  purpose.
+
+There are no bundled binaries, no installer, no package-manager calls, and no
+remote build or download-and-execute path. Everything the plugin runs is either
+`/usr/bin/python3` against the file in this repository or a binary already
+installed on the system.
 
 ## Uninstall
 
