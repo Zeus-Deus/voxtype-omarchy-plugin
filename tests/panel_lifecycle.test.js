@@ -53,6 +53,7 @@ function panelHarness(overrides) {
     snapshot: {vocabulary: [], replacements: [], settings: {}}, options: null, modelRows: [], modelsEngine: '', gpu: null,
     restartNeeded: [], errorText: '', notice: '', tuiMissing: false, loaded: true, previewOutput: '',
     exportPreview: null, importPreview: null, importPath: '', attaching: false, popoutSwitchClosing: false,
+    importAcceptDangerous: false,
     section: 'dictate', cursorKey: '', cursorIndex: -1, cursorActive: false, focusedEditor: null, openPopups: 0,
     confirmAction: '', confirmPayload: null, dictCategory: 'Replacement', exportOpen: false, exportScope: 'sync',
     exportSecrets: false, importLocal: false, hostWidget: {id: 'widget'}, bar: {activePopout: null},
@@ -206,6 +207,80 @@ test('redacted import rows never reach a value formatter, in the card or the con
   assert.equal(h.root.confirmation.confirmText, 'Import anyway');
   assert.match(panel, /text: "󰀦 " \+ Model\.dangerLine\(modelData, 40, 60\)/);
   assert.doesNotMatch(panel, /modelData\.(old|new)\b/);
+});
+
+// ---- F1: accept_dangerous is an acknowledgement, not a constant -----------
+
+test('accept_dangerous is false for a clean diff and true only when the dialog named every dangerous row', () => {
+  const h = panelHarness();
+  h.root.importPath = '/tmp/b.json';
+  // No dangerous rows: the bridge gate must stay live.
+  h.root.importPreview = {format: 'v2', warnings: [], diff: {settings_change: [{path: 'audio.device', old: 'a', new: 'b', dangerous: false}]}};
+  h.root.askImport();
+  assert.equal(h.root.importAcceptDangerous, false);
+  assert.equal(h.root.confirmation.confirmText, 'Import', 'no dangerous rows: plain Import');
+  h.root.applyConfirmed();
+  const clean = h.requests.pop();
+  assert.equal(clean.op, 'import.apply');
+  assert.equal(clean.accept_dangerous, false, 'a clean import never pre-waives the bridge refusal');
+
+  // Dangerous rows the dialog fully enumerates: acknowledged.
+  h.root.importPreview = {format: 'v2', warnings: [], diff: {settings_change: [
+    {path: 'output.pre_recording_command', old: '', new: 'curl evil', dangerous: true},
+    {path: 'engine', old: 'whisper', new: 'parakeet', dangerous: true},
+  ]}};
+  h.root.askImport();
+  assert.equal(h.root.importAcceptDangerous, true);
+  assert.equal(h.root.confirmation.confirmText, 'Import anyway');
+  assert.match(h.root.confirmation.message, /output\.pre_recording_command/);
+  assert.match(h.root.confirmation.message, /engine/);
+  h.root.applyConfirmed();
+  const risky = h.requests.pop();
+  assert.equal(risky.accept_dangerous, true);
+  assert.equal(h.root.importAcceptDangerous, false, 'the acknowledgement is consumed, never sticky');
+});
+
+test('an unreviewable dangerous list is not acknowledged, so the bridge refuses instead of the panel waiving it', () => {
+  const h = panelHarness();
+  const Model = h.root.Model;
+  h.root.importPath = '/tmp/huge.json';
+  const rows = [];
+  for (let i = 0; i < 40; i++) rows.push({path: 'meeting.hook' + i, old: 'a', new: 'b', dangerous: true});
+  h.root.importPreview = {format: 'v2', warnings: [], diff: {settings_change: rows}};
+  h.root.askImport();
+  assert.equal(h.root.importAcceptDangerous, false, 'nothing the user could read = nothing acknowledged');
+  assert.match(h.root.confirmation.message, /40 dangerous changes/);
+  h.root.applyConfirmed();
+  assert.equal(h.requests.pop().accept_dangerous, false);
+  // The mid tier still names every path, so it counts as acknowledged.
+  const mid = [];
+  for (let i = 0; i < 12; i++) mid.push({path: 'meeting.hook' + i, old: 'a', new: 'b', dangerous: true});
+  assert.equal(Model.importConfirmation('x.json', {settings_change: mid}).accept, true);
+  assert.equal(Model.importConfirmation('x.json', {settings_change: rows}).accept, false);
+  assert.equal(Model.importConfirmation('x.json', {settings_change: []}).accept, false);
+});
+
+test('a dangerous-changes refusal from the bridge asks for a fresh preview instead of dumping the protocol error', () => {
+  const h = panelHarness();
+  h.root.importPath = '/tmp/b.json';
+  h.root.importPreview = {format: 'v2', warnings: [], diff: {settings_change: [{path: 'engine', old: 'a', new: 'b', dangerous: true}]}};
+  h.root.importAcceptDangerous = true;
+  h.complete('import.apply', {ok: false, error: 'dangerous-changes', dangerous: ['engine'], diff: {}, warnings: []}, {op: 'import.apply'});
+  assert.doesNotMatch(h.root.errorText, /dangerous-changes/, 'no raw protocol string in the UI');
+  assert.match(h.root.errorText, /[Pp]review it again/);
+  assert.equal(h.root.importPreview, null, 'the stale preview is dropped');
+  assert.equal(h.root.importAcceptDangerous, false, 'the stale acknowledgement is dropped too');
+});
+
+test('cancelling the import confirmation drops the acknowledgement', () => {
+  const h = panelHarness();
+  h.root.importPath = '/tmp/b.json';
+  h.root.importPreview = {format: 'v2', warnings: [], diff: {settings_change: [{path: 'engine', old: 'a', new: 'b', dangerous: true}]}};
+  h.root.askImport();
+  assert.equal(h.root.importAcceptDangerous, true);
+  h.root.closeForPopoutSwitch();
+  assert.equal(h.root.importAcceptDangerous, false);
+  assert.match(panel, /onCanceled: \{[^\n]*root\.importAcceptDangerous = false/, 'Cancel clears it too');
 });
 
 test('a missing zenity reopens the panel with an install hint instead of a silent cancel', () => {

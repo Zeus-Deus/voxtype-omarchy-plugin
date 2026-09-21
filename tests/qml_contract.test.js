@@ -367,8 +367,12 @@ test('ConfirmDialog defaults to Cancel on every open and blocks the key catcher'
   for (const op of ['vocab.remove', 'dict.remove', 'models.delete']) {
     assert.doesNotMatch(stripComments(panel), new RegExp('service\\.run\\(\\{op: "' + op.replace('.', '\\.') + '"'));
   }
-  assert.match(panel, /accept_dangerous: true/);
-  assert.equal((stripComments(panel).match(/accept_dangerous: true/g) || []).length, 1);
+  // accept_dangerous is never a literal: the only writer is askImport, from
+  // the confirmation the user actually read. A hard-coded true would make the
+  // bridge's dangerous-changes refusal dead code in production.
+  assert.doesNotMatch(stripComments(panel), /accept_dangerous: true/);
+  assert.match(stripComments(panel), /accept_dangerous: accept/);
+  assert.equal((stripComments(panel).match(/importAcceptDangerous = confirmation\.accept/g) || []).length, 1);
   assert.match(panel, /function applyConfirmed\(\)[\s\S]{0,200}action === "import\.apply"/);
 });
 

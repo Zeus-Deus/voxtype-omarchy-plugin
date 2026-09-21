@@ -403,6 +403,45 @@ function dangerLine(change, oldMax, newMax) {
     return path + ": " + sanitize(change.old, oldMax || 40) + " → " + sanitize(change.new, newMax || 60);
 }
 
+// The import confirmation, and with it the ONE thing allowed to set
+// `accept_dangerous` on import.apply. The bridge's own refusal is the second
+// half of the gate, so the panel must never claim an acknowledgement the
+// dialog did not actually obtain: `accept` is true only when the message
+// below named every dangerous row.
+//
+// Tiers, because the kit's ConfirmDialog card grows with its message and an
+// unbounded list would push the buttons off the screen:
+//   <= IMPORT_CONFIRM_ROWS  every row with its old -> new values
+//   <= IMPORT_CONFIRM_MAX   every row by path only (values live in the card)
+//   more                    nothing can be acknowledged here; accept stays
+//                           false and the bridge refuses. The escape hatch is
+//                           the include-settings toggle, which is off by
+//                           default and removes settings rows from the diff.
+var IMPORT_CONFIRM_ROWS = 8;
+var IMPORT_CONFIRM_MAX = 24;
+
+function importConfirmation(fileName, diff) {
+    var danger = dangerousChanges(diff);
+    var lines = ["Import " + sanitize(fileName, 60) + "?", diffSummary(diff)];
+    var named = 0;
+    var i;
+    if (danger.length > 0 && danger.length <= IMPORT_CONFIRM_ROWS) {
+        for (i = 0; i < danger.length; i++) { lines.push("⚠ " + dangerLine(danger[i], 30, 40)); named++; }
+    } else if (danger.length > IMPORT_CONFIRM_ROWS && danger.length <= IMPORT_CONFIRM_MAX) {
+        var paths = [];
+        for (i = 0; i < danger.length; i++) { paths.push(sanitize(danger[i].path, 60)); named++; }
+        lines.push("⚠ " + danger.length + " dangerous changes: " + paths.join(", "));
+    } else if (danger.length > IMPORT_CONFIRM_MAX) {
+        lines.push("⚠ " + danger.length + " dangerous changes — too many to review here. Turn off “Include settings”, or import a smaller bundle.");
+    }
+    return {
+        message: lines.join("\n"),
+        confirmText: danger.length ? "Import anyway" : "Import",
+        accept: danger.length > 0 && named === danger.length,
+        dangerous: danger.length
+    };
+}
+
 function diffSummary(diff) {
     if (!diff) return "Nothing to import";
     var d = diff;

@@ -30,6 +30,10 @@ Panel {
     property var importPreview: null
     property string importPath: ""
     property bool attaching: false
+    // Set ONLY by askImport, from the confirmation the user actually saw.
+    // applyConfirmed sends it verbatim as accept_dangerous, so nothing else
+    // may raise it: a stale true would make the bridge's refusal dead code.
+    property bool importAcceptDangerous: false
 
     // Cursor / navigation
     property string section: "dictate"
@@ -190,6 +194,7 @@ Panel {
         popoutSwitchClosing = true;
         confirmation.opened = false;
         confirmAction = "";
+        importAcceptDangerous = false;
         attaching = false;
         openPopups = 0;
         service.cancelPick();
@@ -206,6 +211,7 @@ Panel {
         if (!opened) {
             confirmation.opened = false;
             confirmAction = "";
+            importAcceptDangerous = false;
             focusedEditor = null;
             openPopups = 0;
             testField.text = "";
@@ -329,7 +335,15 @@ Panel {
         var payload = confirmPayload;
         confirmAction = "";
         confirmPayload = null;
-        if (action === "import.apply") { service.run({op: "import.apply", path: importPath, include_local: importLocal, accept_dangerous: true}); return; }
+        if (action === "import.apply") {
+            // accept_dangerous mirrors the confirmation the user just read.
+            // With no dangerous rows it is false, so the bridge's own gate
+            // stays live rather than being pre-waived on every import.
+            var accept = importAcceptDangerous;
+            importAcceptDangerous = false;
+            service.run({op: "import.apply", path: importPath, include_local: importLocal, accept_dangerous: accept});
+            return;
+        }
         if (action === "") return;
         var req = {op: action};
         for (var k in payload) req[k] = payload[k];
@@ -441,10 +455,11 @@ Panel {
     }
     function askImport() {
         if (!importPreview) return;
-        var danger = Model.dangerousChanges(importPreview.diff);
-        var lines = [Model.diffSummary(importPreview.diff)];
-        for (var i = 0; i < danger.length; i++) lines.push("⚠ " + Model.dangerLine(danger[i], 40, 60));
-        ask("import.apply", null, "Import " + Model.sanitize(importPath.split("/").pop(), 60) + "?\n" + lines.join("\n"), danger.length ? "Import anyway" : "Import");
+        var confirmation = Model.importConfirmation(importPath.split("/").pop(), importPreview.diff);
+        // The dialog is the acknowledgement: accept_dangerous is whatever
+        // this message could actually show, never a constant.
+        importAcceptDangerous = confirmation.accept;
+        ask("import.apply", null, confirmation.message, confirmation.confirmText);
     }
     function noteEditor(item, focused) {
         if (focused) focusedEditor = item;
@@ -511,8 +526,17 @@ Panel {
         onCompleted: function(op, result, req) {
             if (Model.isTuiMissing(result)) { root.tuiMissing = true; root.errorText = ""; return; }
             if (!result.ok) {
+                // The bridge refuses an apply whose diff no longer matches
+                // what was acknowledged (the file changed between preview and
+                // apply, or the dangerous set grew). Say what to do instead of
+                // dumping the protocol error.
+                if (op === "import.apply" && result.error === "dangerous-changes") {
+                    root.importPreview = null;
+                    root.importAcceptDangerous = false;
+                    root.errorText = "Import refused: the bundle's dangerous changes no longer match what you reviewed. Preview it again.";
+                    return;
+                }
                 if (op !== "status" || !root.status) root.errorText = Model.sanitize(result.error, 200);
-                if (op === "import.apply" && result.error === "dangerous-changes") root.errorText = "Import refused: review the dangerous changes first.";
                 return;
             }
             root.tuiMissing = false;
@@ -1488,7 +1512,7 @@ Panel {
                 selectedIndex: 0
                 foreground: root.foreground
                 fontFamily: root.fontFamily
-                onCanceled: { opened = false; root.confirmAction = ""; root.confirmPayload = null; keyCatcher.forceActiveFocus() }
+                onCanceled: { opened = false; root.confirmAction = ""; root.confirmPayload = null; root.importAcceptDangerous = false; keyCatcher.forceActiveFocus() }
                 onConfirmed: { opened = false; root.applyConfirmed(); keyCatcher.forceActiveFocus() }
             }
         }
