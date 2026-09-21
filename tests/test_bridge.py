@@ -1992,3 +1992,92 @@ def test_write_ops_set_matches_dispatch_table():
 
     mutating = {op for op in bridge.OPS if op.split(".")[0] in {"vocab", "dict", "settings", "models", "gpu"} or op == "import.apply"}
     assert bridge.WRITE_OPS == mutating - {"models.list", "gpu.status"}
+
+
+# ---------------------------------------------------------------------------
+# F4: the lock probe runs on every write op and every status
+# ---------------------------------------------------------------------------
+
+
+def test_tui_lock_holder_does_not_block_on_fifo(env: Env):
+    """F4 regression: os.open(lock, O_RDONLY) blocks forever on a FIFO.
+
+    This probe fires on every write op and every status poll, so a FIFO
+    at the lock path wedged the panel completely.
+    """
+    lock = env.sidecar.parent / ".lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(lock)
+    paths = bridge._paths()
+    assert paths.lock == lock
+
+    with deadline(10, "tui_lock_holder on a FIFO"):
+        assert bridge.tui_lock_holder(paths) is None
+    # The op layer must stay usable too, not just the helper.
+    with deadline(15, "status with a FIFO lock file"):
+        assert env.ok("status")["tui_open_pid"] is None
+    with deadline(15, "a write op with a FIFO lock file"):
+        assert env.ok("vocab.add", phrase="Omarchy")["ok"] is True
+
+
+def test_tui_lock_holder_refuses_a_symlinked_lock(env: Env):
+    """O_NOFOLLOW: the probe must not be redirected to another file.
+
+    Without O_NOFOLLOW the probe follows the link and reports the holder
+    of whatever file it points at, so a symlink planted at the lock path
+    can make the panel believe the TUI is open and refuse every write.
+    """
+    import fcntl as _fcntl
+
+    target = env.root / "elsewhere"
+    target.write_text(f"{os.getpid()}\n")
+    lock = env.sidecar.parent / ".lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.symlink_to(target)
+
+    fd = os.open(target, os.O_RDWR)
+    try:
+        _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        # Following the link would report os.getpid() here.
+        assert bridge.tui_lock_holder(bridge._paths()) is None
+        assert env.ok("status")["tui_open_pid"] is None
+        # ... and writes stay available rather than being wedged shut.
+        assert env.ok("vocab.add", phrase="Omarchy")["ok"] is True
+    finally:
+        os.close(fd)
+
+
+def test_tui_lock_holder_ignores_a_directory_at_the_lock_path(env: Env):
+    lock = env.sidecar.parent / ".lock"
+    lock.mkdir(parents=True)
+    assert bridge.tui_lock_holder(bridge._paths()) is None
+    assert env.ok("status")["tui_open_pid"] is None
+
+
+def test_tui_lock_holder_reports_holder_and_absence(env: Env):
+    """F9 coverage: the helper had no direct unit test at all."""
+    paths = bridge._paths()
+    # Nothing there yet.
+    assert bridge.tui_lock_holder(paths) is None
+    # Stale file, no flock.
+    paths.lock.parent.mkdir(parents=True, exist_ok=True)
+    paths.lock.write_text("424242\n")
+    assert bridge.tui_lock_holder(paths) is None
+    # Real holder.
+    lock, fd = _hold_tui_lock(env)
+    try:
+        assert bridge.tui_lock_holder(paths) == os.getpid()
+    finally:
+        os.close(fd)
+    assert bridge.tui_lock_holder(paths) is None
+    # Held but the file carries no readable PID -> -1 ("unknown holder").
+    import fcntl as _fcntl
+
+    fd2 = os.open(lock, os.O_RDWR)
+    try:
+        os.truncate(fd2, 0)
+        _fcntl.flock(fd2, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        assert bridge.tui_lock_holder(paths) == -1
+    finally:
+        os.close(fd2)
+

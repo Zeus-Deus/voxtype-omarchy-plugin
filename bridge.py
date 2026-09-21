@@ -136,14 +136,22 @@ def tui_lock_holder(paths: Paths) -> int | None:
     """PID of a running voxtype-tui holding its single-instance lock, or
     None when nobody does. Same file and flock protocol as
     ``voxtype_tui.single_instance`` but read-only: the probe never
-    truncates the file or leaves a lock behind."""
-    if not paths.lock.exists():
-        return None
+    truncates the file or leaves a lock behind.
+
+    This runs on EVERY write op and every ``status``, so it must never
+    block. ``O_NONBLOCK`` keeps a FIFO at the lock path from hanging the
+    open forever, ``O_NOFOLLOW`` refuses a symlink, and the ``fstat`` is
+    done on the opened fd so nothing can be swapped underneath it. There
+    is deliberately no ``exists()`` pre-check: it was both redundant with
+    the OSError path below and a TOCTOU window.
+    """
     try:
-        fd = os.open(paths.lock, os.O_RDONLY)
+        fd = os.open(paths.lock, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
     except OSError:
         return None
     try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
         try:
             fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -153,6 +161,8 @@ def tui_lock_holder(paths: Paths) -> int | None:
             except (OSError, ValueError):
                 return -1
         fcntl.flock(fd, fcntl.LOCK_UN)
+        return None
+    except OSError:
         return None
     finally:
         os.close(fd)
