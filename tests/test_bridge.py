@@ -1295,7 +1295,7 @@ def test_import_preview_diff(env: Env):
     env.ok("vocab.add", phrase="Omarchy")
     p = _bundle(env, settings={"output": {"mode": "clipboard"}, "whisper": {"remote_endpoint": "http://evil:8080"}},
                 local={"hotkey": {"key": "F24"}})
-    res = env.ok("import.preview", path=str(p))
+    res = env.ok("import.preview", path=str(p), include_settings=True)
     assert res["format"] == "voxtype-tui"
     assert res["source"] == "other-box"
     assert res["has_local"] is True and res["include_local"] is False
@@ -1307,13 +1307,13 @@ def test_import_preview_diff(env: Env):
     assert changes["whisper.remote_endpoint"]["dangerous"] is True
     assert res["dangerous"] == ["whisper.remote_endpoint"]
     assert "hotkey.key" not in changes
-    res = env.ok("import.preview", path=str(p), include_local=True)
+    res = env.ok("import.preview", path=str(p), include_local=True, include_settings=True)
     assert {c["path"] for c in res["diff"]["settings_change"]} >= {"hotkey.key"}
 
 
 def test_import_preview_filters_uninstalled_model(env: Env):
     p = _bundle(env, settings={"whisper": {"model": "large-v3"}})
-    res = env.ok("import.preview", path=str(p))
+    res = env.ok("import.preview", path=str(p), include_settings=True)
     assert not any(c["path"] == "whisper.model" for c in res["diff"]["settings_change"])
     assert any("not installed" in w for w in res["warnings"])
 
@@ -1359,11 +1359,11 @@ def test_import_preview_refuses_oversize_file_without_reading_it(env: Env, monke
 def test_import_apply_refuses_dangerous_unless_accepted(env: Env):
     p = _bundle(env, settings={"whisper": {"remote_endpoint": "http://evil:8080"}})
     before = env.read_config()
-    res = env.fail("import.apply", path=str(p))
+    res = env.fail("import.apply", path=str(p), include_settings=True)
     assert res["error"] == "dangerous-changes"
     assert res["dangerous"] == ["whisper.remote_endpoint"]
     assert env.read_config() == before
-    res = env.ok("import.apply", path=str(p), accept_dangerous=True)
+    res = env.ok("import.apply", path=str(p), include_settings=True, accept_dangerous=True)
     assert env.config_dict()["whisper"]["remote_endpoint"] == "http://evil:8080"
     assert "whisper.remote_endpoint" in res["restart_needed"]
 
@@ -1371,7 +1371,7 @@ def test_import_apply_refuses_dangerous_unless_accepted(env: Env):
 def test_import_apply_merges(env: Env):
     env.ok("vocab.add", phrase="Omarchy")
     p = _bundle(env, settings={"output": {"mode": "clipboard"}}, local={"hotkey": {"key": "F24"}})
-    res = env.ok("import.apply", path=str(p))
+    res = env.ok("import.apply", path=str(p), include_settings=True)
     snap = res["snapshot"]
     assert [v["phrase"] for v in snap["vocabulary"]] == ["Omarchy", "Hyprland"]
     assert snap["replacements"] == [{"from": "hyper land", "to": "Hyprland", "category": "Capitalization"}]
@@ -1381,7 +1381,7 @@ def test_import_apply_merges(env: Env):
     cfg = env.config_dict()
     assert cfg["whisper"]["initial_prompt"] == "Omarchy, Hyprland"
     assert cfg["text"]["replacements"] == {"hyper land": "Hyprland"}
-    res = env.ok("import.apply", path=str(p), include_local=True)
+    res = env.ok("import.apply", path=str(p), include_local=True, include_settings=True)
     assert res["snapshot"]["settings"]["hotkey.key"] == "F24"
 
 
@@ -1390,6 +1390,39 @@ def test_import_apply_can_skip_settings(env: Env):
     res = env.ok("import.apply", path=str(p), include_settings=False)
     assert res["snapshot"]["settings"]["output.mode"] == "type"
     assert res["applied"]["settings_change"] == []
+
+
+def test_import_include_settings_defaults_to_false(env: Env):
+    """F1: the bridge must NOT import settings unless asked.
+
+    voxtype_tui's own import screen defaults this OFF and calls that
+    default the contract that protects users from silent overwrites; the
+    bridge used to invert it, so a caller that omitted the flag silently
+    took every setting from an untrusted bundle.
+    """
+    p = _bundle(env, settings={"output": {"mode": "clipboard"}})
+    before = env.read_config()
+
+    # Default (flag absent): preview shows no settings rows at all.
+    pv = env.ok("import.preview", path=str(p))
+    assert pv["diff"]["settings_change"] == []
+
+    # Default (flag absent): apply writes no settings.
+    res = env.ok("import.apply", path=str(p))
+    assert res["applied"]["settings_change"] == []
+    assert res["snapshot"]["settings"]["output.mode"] == "type"
+    assert 'mode = "type"' in env.read_config()
+    assert 'mode = "clipboard"' not in env.read_config()
+
+    # Explicit false behaves the same.
+    assert env.ok("import.preview", path=str(p), include_settings=False)["diff"]["settings_change"] == []
+
+    # Explicit true is the only way settings move.
+    env.write_config(before)
+    pv = env.ok("import.preview", path=str(p), include_settings=True)
+    assert [c["path"] for c in pv["diff"]["settings_change"]] == ["output.mode"]
+    res = env.ok("import.apply", path=str(p), include_settings=True)
+    assert res["snapshot"]["settings"]["output.mode"] == "clipboard"
 
 
 def test_redacted_import_paths_match_tui():

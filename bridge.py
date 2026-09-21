@@ -1011,7 +1011,11 @@ def _import_load(args: dict, paths: Paths):
 
     raw_path = _require_str(args, "path")
     include_local = bool(args.get("include_local", False))
-    include_settings = bool(args.get("include_settings", True))
+    # Default OFF, matching voxtype_tui's own import screen: settings from
+    # an untrusted bundle are opt-in, so a caller that forgets the flag
+    # imports vocabulary/replacements only and never silently overwrites
+    # the user's configuration. The panel always sends it explicitly.
+    include_settings = bool(args.get("include_settings", False))
     path = Path(raw_path).expanduser()
     # Size gate BEFORE any read: a multi-GB "bundle" must never be pulled
     # into memory just to be rejected by load_bundle_file's own cap.
