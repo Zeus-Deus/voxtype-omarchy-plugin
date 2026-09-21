@@ -41,6 +41,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -629,16 +630,52 @@ def _state_file(paths: Paths, cfg: dict[str, Any] | None) -> Path | None:
     return paths.runtime_state
 
 
+# The daemon writes one word here: idle / recording / transcribing.
+# 64 bytes is far more than any of them needs; the cap exists so a
+# config-controlled path cannot stream unbounded data into the panel.
+MAX_STATE_WORD_BYTES = 64
+
+
 def _read_state_word(path: Path | None) -> str | None:
+    """Read the daemon's state word, never blocking on the file.
+
+    ``state_file`` is config-controlled, so this path is attacker-
+    influenceable and ``status`` polls it every 2 s while the panel is
+    open. A plain ``read_text()`` on a FIFO blocks forever, and hung
+    bridges then accumulate inside omarchy-shell. Guards:
+
+    * ``O_NONBLOCK`` — opening a FIFO with no writer returns immediately
+      (EOF) instead of waiting for one.
+    * ``O_NOFOLLOW`` — a symlink at the path is refused outright.
+    * ``fstat`` on the opened fd (not the path: no TOCTOU) — anything
+      that is not a regular file is ignored.
+    * a byte cap, so even a regular file cannot be huge.
+    """
     if path is None:
         return None
     try:
-        return path.read_text().strip() or None
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
     except OSError:
         return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        data = os.read(fd, MAX_STATE_WORD_BYTES)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    return data.decode("utf-8", errors="replace").strip() or None
 
 
 def _wait_for_daemon_ready(path: Path | None, timeout: float, poll: float = 0.15) -> bool:
+    """Poll the state file until the daemon reports ready, or time out.
+
+    Every poll goes through ``_read_state_word``, so the non-blocking /
+    regular-file guards apply here too: at 0.15 s for up to 60 s this is
+    the hottest caller, and a FIFO at ``state_file`` would otherwise hang
+    the whole restart op on the first iteration.
+    """
     if path is None:
         return False
     deadline = time.monotonic() + timeout

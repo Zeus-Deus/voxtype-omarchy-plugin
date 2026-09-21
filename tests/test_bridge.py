@@ -10,6 +10,7 @@ Run:  /usr/bin/python3 -m pytest -q tests/test_bridge.py
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -778,6 +779,101 @@ def test_status_reports_helper_availability(env: Env):
     assert res["terminal_launcher_available"] is True
     assert res["picker_available"] is True
     assert env.voxtype_calls() == []  # availability is a PATH lookup, never a run
+
+
+# ---------------------------------------------------------------------------
+# F3: the state file is config-controlled and polled every 2 s
+# ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def deadline(seconds: float, what: str):
+    """Hard wall-clock limit for a block that must never block.
+
+    Uses SIGALRM rather than pytest-timeout so the suite keeps running on
+    a bare `pytest` install: a regression fails loudly instead of hanging
+    CI forever, which is the whole point of the FIFO tests below.
+    """
+    def fire(_signum, _frame):
+        raise AssertionError(f"{what} did not return within {seconds}s")
+
+    previous = signal.signal(signal.SIGALRM, fire)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def test_read_state_word_does_not_block_on_fifo(tmp_path: Path):
+    """F3 regression: a FIFO at state_file used to hang the bridge forever.
+
+    `status` polls this every 2 s while the panel is open, so each hung
+    read leaked a process inside omarchy-shell. The timeout makes a
+    regression fail loudly instead of hanging CI.
+    """
+    fifo = tmp_path / "state"
+    os.mkfifo(fifo)
+    with deadline(10, "_read_state_word on a FIFO"):
+        assert bridge._read_state_word(fifo) is None
+
+
+def test_status_does_not_block_on_fifo_state_file(env: Env):
+    """The same guard through the real `status` op, with the FIFO named
+    by config exactly as an attacker-supplied bundle would name it."""
+    fifo = env.root / "fifo-state"
+    os.mkfifo(fifo)
+    env.write_config(BASE_CONFIG.replace('state_file = "auto"', f'state_file = "{fifo}"'))
+    env.daemon(active=True)
+    with deadline(15, "status with a FIFO state_file"):
+        res = env.ok("status")
+    assert res["state_file_path"] == str(fifo)
+    assert res["daemon"]["ready"] is False
+    assert res["daemon"]["state"] == "idle"
+
+
+def test_wait_for_daemon_ready_does_not_block_on_fifo(env: Env):
+    """The 0.15 s poll loop calls the same helper up to 400 times."""
+    fifo = env.root / "fifo-state"
+    os.mkfifo(fifo)
+    started = time.monotonic()
+    with deadline(15, "_wait_for_daemon_ready on a FIFO"):
+        assert bridge._wait_for_daemon_ready(fifo, timeout=0.5) is False
+    elapsed = time.monotonic() - started
+    # It really polled for the whole timeout rather than erroring out.
+    assert 0.4 < elapsed < 5.0, elapsed
+
+
+def test_read_state_word_rejects_non_regular_files(tmp_path: Path):
+    """Directories, symlinks and devices are not the daemon's state file."""
+    d = tmp_path / "adir"
+    d.mkdir()
+    assert bridge._read_state_word(d) is None
+
+    real = tmp_path / "real"
+    real.write_text("recording\n")
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    # O_NOFOLLOW: a symlink at the configured path is refused outright.
+    assert bridge._read_state_word(link) is None
+    assert bridge._read_state_word(real) == "recording"
+
+    assert bridge._read_state_word(tmp_path / "missing") is None
+
+    dev = Path("/dev/zero")
+    if dev.exists():
+        assert bridge._read_state_word(dev) is None
+
+
+def test_read_state_word_is_size_capped(tmp_path: Path):
+    """A regular file is still only read up to the cap."""
+    big = tmp_path / "state"
+    big.write_bytes(b"x" * (5 * 1024 * 1024))
+    word = bridge._read_state_word(big)
+    assert word is not None
+    assert len(word) <= bridge.MAX_STATE_WORD_BYTES
+    assert bridge.MAX_STATE_WORD_BYTES <= 256
 
 
 # ---------------------------------------------------------------------------
