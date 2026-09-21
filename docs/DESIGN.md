@@ -69,7 +69,7 @@ Environment overrides for tests (never set in production): `VOXTYPE_CONFIG`
 | `gpu.status` | — | `{ok, text, backend, gpus:[{vendor,label}], device: "auto"|"nvidia"|"amd"|"intel", dropin_path, error?}` from `voxtype setup gpu --status` + `gpu.read_gpu_device`; on failure `ok:false` with `error` but `device`/`dropin_path` still filled. |
 | `dictionary.preview` | `{text}` | `{ok, input, output, rules:int}` — runs `voxtype_tui.dictionary_engine` over current rules; lets the user test a phrase. |
 | `export.preview` | `{scope:"sync"|"sync+local", include_secrets:bool}` (defaults `"sync"`, `false`) | `{ok, default_path, scope, include_secrets, counts:{vocabulary, replacements, settings, local, secrets, secrets_available}}` — `secrets` is 0 unless `include_secrets`; `secrets_available` is how many secret fields exist on disk. |
-| `import.preview` | `{path, include_local, include_settings}` (defaults `false`, `true`) | `{ok, format, source, has_local, include_local, warnings:[...], dangerous:[paths], diff:{vocab_add:[], vocab_remove:[] (always empty — import merges, never removes), vocab_unchanged:[], replacements_add:[{from,to}], replacements_change:[{from,old,new}], settings_change:[row]}}`. A `settings_change` row is `{path, old, new, dangerous}` **except** for the secret paths `whisper.remote_api_key`, `output.post_process.command`, `output.pre_output_command`, `output.post_output_command`, which are emitted **redacted** as `{path, dangerous:true, redacted:true, old_set:bool, new_set:bool}` with no `old`/`new` (the panel shows "API key: set → set", never the value). Files larger than `sync.MAX_BUNDLE_BYTES` (1 MB) are refused by `stat()` before any byte is read (`ok:false, error:"file is N bytes; limit …"`). |
+| `import.preview` | `{path, include_local, include_settings}` (both default `false`) | `{ok, format, source, has_local, include_local, warnings:[...], dangerous:[paths], diff:{vocab_add:[], vocab_remove:[] (always empty — import merges, never removes), vocab_unchanged:[], replacements_add:[{from,to}], replacements_change:[{from,old,new}], settings_change:[row]}}`. A `settings_change` row is `{path, old, new, dangerous}` **except** for the secret paths `whisper.remote_api_key`, `output.post_process.command`, `output.pre_output_command`, `output.post_output_command`, which are emitted **redacted** as `{path, dangerous:true, redacted:true, old_set:bool, new_set:bool}` with no `old`/`new` (the panel shows "API key: set → set", never the value). Files larger than `sync.MAX_BUNDLE_BYTES` (1 MB) are refused by `stat()` before any byte is read (`ok:false, error:"file is N bytes; limit …"`); non-regular files (FIFO, character device, directory) are refused outright. `dangerous` is the union of `voxtype_tui.sync.DANGEROUS_PATHS` and the bridge's own `BRIDGE_DANGEROUS_PATHS` (see Security rules) — the plugin owns its list so an upstream gap cannot silently widen the hole. |
 
 ### Write ops
 
@@ -94,14 +94,14 @@ config once at start), so the panel lights the "Restart to apply" pill on
 | `models.set_active` | `{engine, name}` — refuses a model that is not downloaded. | `engine, name` |
 | `models.delete` | `{engine, name}` — refuses the active model (`ok:false, error`). | `engine, name, freed_bytes` |
 | `gpu.set_device` | `{vendor: "auto"|"nvidia"|"amd"|"intel"}` → writes drop-in via `gpu.write_gpu_device`, runs `daemon_reload`; always `restart_needed:["gpu.device"]`, `daemon_stale:true`. | `device, dropin_path, daemon_reload:{ok, message}` |
-| `export.write` | `{path?, scope:"sync"|"sync+local", include_secrets:bool}` (default path = `export.preview.default_path`) | `path, bytes, scope, include_secrets` |
-| `import.apply` | `{path, include_local, include_settings, accept_dangerous}` — refuses (`ok:false, error:"dangerous-changes", dangerous:[paths], diff, warnings`) when the diff has dangerous changes and `accept_dangerous` is false. `include_settings:false` imports vocabulary/replacements only. | `format, applied:<diff, same shape and redaction as import.preview>, warnings` |
+| `export.write` | `{path?, scope:"sync"|"sync+local", include_secrets:bool}` (default path = `export.preview.default_path`) | `path, bytes, scope, include_secrets`. The destination is resolved and must sit **inside `$HOME`** and end in `.json` (`ok:false, error:"export path must be inside your home directory"` / `"… must end in .json"`), so a typed path cannot drop a file anywhere else on the filesystem. Containment is judged on the resolved *parent* directory, because the underlying write is `mkstemp` + `os.replace`: a symlink at the destination is replaced, never followed. |
+| `import.apply` | `{path, include_local, include_settings, accept_dangerous}` (all default `false`) — refuses (`ok:false, error:"dangerous-changes", dangerous:[paths], diff, warnings`) when the diff has dangerous changes and `accept_dangerous` is false, **writing nothing**. `include_settings` defaults to **false**: settings from an untrusted bundle are opt-in (same contract as voxtype-tui's own import screen), so a caller that omits the flag imports vocabulary/replacements only. | `format, applied:<diff, same shape and redaction as import.preview>, warnings` |
 
 ### Daemon ops
 
 | op | args | result |
 |---|---|---|
-| `daemon.restart` | `{timeout?}` — seconds for the post-restart ready wait, default **18**, clamped to 0–60 | uses `voxtype_cli.restart_daemon` (itself capped at 15 s) then `wait_for_daemon_ready` (≤ `timeout`) → `{ok, main_pid_before, main_pid_after, changed:bool, ready:bool, ready_timeout, active:bool, message}`; `ok` only if PID or start-timestamp actually changed (`changed`); `ready` is whether the state file reported idle/recording/transcribing before the timeout. **QML sends `timeout: 18` and kills the process at a 30 s deadline**; if the deadline fires the panel treats it as "restart issued, readiness unknown" and re-polls `status`. |
+| `daemon.restart` | `{timeout?}` — seconds for the post-restart ready wait, default **18**, clamped to 0–60 | uses `voxtype_cli.restart_daemon` (itself capped at 15 s) then `wait_for_daemon_ready` (≤ `timeout`) → `{ok, main_pid_before, main_pid_after, changed:bool, ready:bool, ready_timeout, active:bool, message}`; `ok` only if PID or start-timestamp actually changed (`changed`); `ready` is whether the state file reported idle/recording/transcribing before the timeout. **QML sends `timeout: 18` and kills the process at a 40 s deadline** (`SYSTEMCTL_RESTART_TIMEOUT` 15 s + `DAEMON_RESTART_READY_TIMEOUT` 18 s is the op's worst case, and the deadline must stay above that sum or a restart that actually succeeded gets SIGKILLed and reported as a timeout; the bridge asserts this in `test_daemon_restart_worst_case_fits_the_qml_deadline`); if the deadline fires the panel treats it as "restart issued, readiness unknown" and re-polls `status`. |
 | `daemon.start` / `daemon.stop` | — | `systemctl --user start|stop voxtype` → `{ok, message, daemon:{active, active_state, main_pid, started_at, start_monotonic_us}, error?}` (`error` only when `ok:false`). |
 | `record.toggle` | — | `voxtype record toggle` → `{ok, message}`; on failure `{ok:false, error}` where `error` is the CLI's stderr (ANSI stripped), suffixed with "(daemon is not running)" when the unit is inactive, or `"voxtype record toggle exited N"` when the CLI was silent. Kept for the panel's Record button; the bar button may use it too. |
 
@@ -111,6 +111,18 @@ config once at start), so the panel lights the "Restart to apply" pill on
 --model <name>` and prints one line per progress unit: `PROGRESS <pct>`,
 `LOG <text>`, and finally `DONE` or `FAILED <reason>`; exit 0/1. SIGTERM
 cancels and removes the partial file (mirrors `voxtype_tui.models`).
+
+`<name>` must match `^[A-Za-z0-9][A-Za-z0-9._-]*$` and `<engine>` must be in
+`MODEL_CATALOG`; both are checked before anything is spawned. `engine` is
+deliberately **not** part of argv — `voxtype setup --download` infers it from
+the model name — but it is still validated, because the cancel path uses it to
+locate the partial artifact.
+
+`LOG` text is the child's own stdout, so it is treated as untrusted on the way
+out: the invisible-formatter class (C0/C1 controls, `U+200E/200F`, the bidi
+overrides, `U+2028/2029`) is stripped and each line is capped at
+`MAX_DOWNLOAD_LOG_CHARS` (200) before it reaches the panel's log tail. The QML
+side sanitizes again on the way in; neither half is load-bearing alone.
 
 ## UI
 
@@ -175,10 +187,31 @@ while the panel is open; the bar button polls the state file
   `remote_api_key_set`. Clearing is `settings.unset`.
 - Sudo-needing actions (GPU enable/disable) are handed to the user's
   terminal; the plugin never prompts for a password.
-- Export defaults `include_secrets=false`; import refuses dangerous changes
-  unless explicitly accepted after the preview. Secret rows in the preview
-  (API key, shell-command hooks) are redacted to `old_set`/`new_set` — the
-  bridge never emits their values in any response.
+- Export defaults `include_secrets=false`; import defaults
+  `include_settings=false` and refuses dangerous changes unless explicitly
+  accepted after the preview (`accept_dangerous`, default false; the
+  refusal writes nothing).
+- The dangerous-path set is `voxtype_tui.sync.DANGEROUS_PATHS` **unioned
+  with** the bridge's own `BRIDGE_DANGEROUS_PATHS`, which the plugin owns
+  so an upstream gap cannot silently widen the hole. Beyond upstream's
+  four secret paths + `whisper.remote_endpoint` it covers: the
+  `output.pre_recording_command` hook (RCE, same class as the hooks
+  upstream flags), `engine` and `whisper.mode` (repoint transcription /
+  ship audio off-box), `soniox.api_key`, `cohere.api_key` and
+  `meeting.summary.ollama_url` (remote credentials and destinations),
+  `state_file` (the path the panel reads), `output.file_path` /
+  `output.file_mode` (where every transcription is written, and whether
+  it truncates), and `meeting.enabled` / `meeting.retain_audio` /
+  `meeting.storage_path` (arming long-form capture and keeping the audio).
+- Only `whisper.remote_api_key` is **never** emitted in any response: the
+  snapshot reports `whisper.remote_api_key_set: bool` and nothing else,
+  and `settings.set` refuses to write it. The other three
+  `REDACTED_IMPORT_PATHS` — `output.post_process.command`,
+  `output.pre_output_command`, `output.post_output_command` — are
+  redacted to `old_set`/`new_set` **in import diff rows specifically**,
+  because there the value comes from an untrusted bundle; the user's own
+  values for those settings remain visible in their own `load`/`status`
+  snapshot and stay editable in the Settings section.
 - Destructive actions (delete rule/word/model, import apply) go through
   `ConfirmDialog` defaulting to Cancel.
 - Response bytes from the bridge are capped (2 MB) and parsed strictly.

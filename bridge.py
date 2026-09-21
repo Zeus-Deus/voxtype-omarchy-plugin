@@ -41,6 +41,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -54,6 +55,16 @@ MAX_REQUEST_BYTES = 1_000_000
 # The panel refuses to parse anything larger; emit a small error instead
 # of a response it would drop on the floor.
 MAX_RESPONSE_BYTES = 2_000_000
+
+# Cap for a single relayed `LOG` line from the download child. The panel
+# keeps only the last few lines of the tail, so anything longer than this
+# is UI noise at best; the control-character class is stripped alongside
+# because that text goes straight into a rendered row.
+MAX_DOWNLOAD_LOG_CHARS = 200
+_LOG_CONTROL_RE = re.compile(
+    r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u200e\u200f\u202a-\u202e\u2066-\u2069"
+    r"\u2028\u2029]"
+)
 
 # ---------------------------------------------------------------------------
 # voxtype_tui import guard
@@ -135,14 +146,22 @@ def tui_lock_holder(paths: Paths) -> int | None:
     """PID of a running voxtype-tui holding its single-instance lock, or
     None when nobody does. Same file and flock protocol as
     ``voxtype_tui.single_instance`` but read-only: the probe never
-    truncates the file or leaves a lock behind."""
-    if not paths.lock.exists():
-        return None
+    truncates the file or leaves a lock behind.
+
+    This runs on EVERY write op and every ``status``, so it must never
+    block. ``O_NONBLOCK`` keeps a FIFO at the lock path from hanging the
+    open forever, ``O_NOFOLLOW`` refuses a symlink, and the ``fstat`` is
+    done on the opened fd so nothing can be swapped underneath it. There
+    is deliberately no ``exists()`` pre-check: it was both redundant with
+    the OSError path below and a TOCTOU window.
+    """
     try:
-        fd = os.open(paths.lock, os.O_RDONLY)
+        fd = os.open(paths.lock, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
     except OSError:
         return None
     try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
         try:
             fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -152,6 +171,8 @@ def tui_lock_holder(paths: Paths) -> int | None:
             except (OSError, ValueError):
                 return -1
         fcntl.flock(fd, fcntl.LOCK_UN)
+        return None
+    except OSError:
         return None
     finally:
         os.close(fd)
@@ -629,16 +650,52 @@ def _state_file(paths: Paths, cfg: dict[str, Any] | None) -> Path | None:
     return paths.runtime_state
 
 
+# The daemon writes one word here: idle / recording / transcribing.
+# 64 bytes is far more than any of them needs; the cap exists so a
+# config-controlled path cannot stream unbounded data into the panel.
+MAX_STATE_WORD_BYTES = 64
+
+
 def _read_state_word(path: Path | None) -> str | None:
+    """Read the daemon's state word, never blocking on the file.
+
+    ``state_file`` is config-controlled, so this path is attacker-
+    influenceable and ``status`` polls it every 2 s while the panel is
+    open. A plain ``read_text()`` on a FIFO blocks forever, and hung
+    bridges then accumulate inside omarchy-shell. Guards:
+
+    * ``O_NONBLOCK`` — opening a FIFO with no writer returns immediately
+      (EOF) instead of waiting for one.
+    * ``O_NOFOLLOW`` — a symlink at the path is refused outright.
+    * ``fstat`` on the opened fd (not the path: no TOCTOU) — anything
+      that is not a regular file is ignored.
+    * a byte cap, so even a regular file cannot be huge.
+    """
     if path is None:
         return None
     try:
-        return path.read_text().strip() or None
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
     except OSError:
         return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        data = os.read(fd, MAX_STATE_WORD_BYTES)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    return data.decode("utf-8", errors="replace").strip() or None
 
 
 def _wait_for_daemon_ready(path: Path | None, timeout: float, poll: float = 0.15) -> bool:
+    """Poll the state file until the daemon reports ready, or time out.
+
+    Every poll goes through ``_read_state_word``, so the non-blocking /
+    regular-file guards apply here too: at 0.15 s for up to 60 s this is
+    the hottest caller, and a FIFO at ``state_file`` would otherwise hang
+    the whole restart op on the first iteration.
+    """
     if path is None:
         return False
     deadline = time.monotonic() + timeout
@@ -973,7 +1030,71 @@ REDACTED_IMPORT_PATHS = frozenset({
 })
 
 
-def _setting_change_row(change) -> dict[str, Any]:
+# Settings this plugin refuses to import silently, over and above
+# ``voxtype_tui.sync.DANGEROUS_PATHS``. The two sets are UNIONed at every
+# use, so upstream can only ever widen what we flag, never narrow it — a
+# gap added to the dependency cannot silently reopen a hole here.
+#
+# Upstream currently flags only the four SECRET_PATHS plus
+# ``whisper.remote_endpoint``, which leaves these unguarded:
+#
+#   * output.pre_recording_command — arbitrary shell command run by the
+#     daemon when recording starts. Same RCE class as the three hooks
+#     upstream does flag; it simply predates them. Straight code
+#     execution on the next dictation.
+#   * engine, whisper.mode — repoint transcription at a different engine
+#     or at ``remote``, which ships raw audio off the machine.
+#   * whisper.remote_endpoint, soniox.api_key, cohere.api_key,
+#     whisper.remote_api_key — every credential/destination pair for a
+#     remote transcription provider. Only the whisper one is upstream.
+#   * meeting.summary.ollama_url — the URL whole meeting transcripts are
+#     POSTed to for summarisation. Same exfiltration class as
+#     remote_endpoint.
+#   * state_file — the bar button and ``status`` read this path; pointing
+#     it at an attacker-chosen file makes the panel read that file.
+#   * output.file_path / output.file_mode — ``file`` output mode writes
+#     every transcription to this path, and ``overwrite`` truncates it.
+#   * meeting.enabled / meeting.retain_audio / meeting.storage_path —
+#     arm long-form recording and keep the raw audio, in a chosen
+#     directory.
+#
+# Pinned by tests/test_bridge.py::test_bridge_dangerous_paths_superset_of_tui.
+BRIDGE_DANGEROUS_PATHS = frozenset({
+    # Shell commands executed by the daemon (RCE).
+    "output.pre_recording_command",
+    "output.pre_output_command",
+    "output.post_output_command",
+    "output.post_process.command",
+    # Where audio/text goes and who transcribes it (exfiltration).
+    "engine",
+    "whisper.mode",
+    "whisper.remote_endpoint",
+    "whisper.remote_api_key",
+    "soniox.api_key",
+    "cohere.api_key",
+    "meeting.summary.ollama_url",
+    # Files the daemon or the panel reads/writes on the user's behalf.
+    "state_file",
+    "output.file_path",
+    "output.file_mode",
+    "meeting.enabled",
+    "meeting.retain_audio",
+    "meeting.storage_path",
+})
+
+
+def _dangerous_setting_paths() -> frozenset[str]:
+    """Union of upstream's dangerous paths and this plugin's superset.
+
+    Imported lazily so ``status`` never pays for the ``sync`` import.
+    """
+    from voxtype_tui import sync
+
+    return BRIDGE_DANGEROUS_PATHS | {".".join(p) for p in sync.DANGEROUS_PATHS}
+
+
+def _setting_change_row(change, dangerous_paths: frozenset[str]) -> dict[str, Any]:
+    dangerous = bool(change.dangerous) or change.path in dangerous_paths
     if change.path in REDACTED_IMPORT_PATHS:
         return {
             "path": change.path,
@@ -986,11 +1107,12 @@ def _setting_change_row(change) -> dict[str, Any]:
         "path": change.path,
         "old": _plain(change.old),
         "new": _plain(change.new),
-        "dangerous": change.dangerous,
+        "dangerous": dangerous,
     }
 
 
 def _diff_to_json(preview) -> dict[str, Any]:
+    dangerous_paths = _dangerous_setting_paths()
     return {
         "vocab_add": list(preview.vocab.added),
         # Import merges; it never removes local vocabulary.
@@ -1000,8 +1122,15 @@ def _diff_to_json(preview) -> dict[str, Any]:
         "replacements_change": [
             {"from": f, "old": o, "new": n} for f, o, n in preview.replacements.updated
         ],
-        "settings_change": [_setting_change_row(c) for c in preview.settings],
+        "settings_change": [
+            _setting_change_row(c, dangerous_paths) for c in preview.settings
+        ],
     }
+
+
+def _dangerous_from_diff(diff: dict[str, Any]) -> list[str]:
+    """The dangerous paths a rendered diff carries, in row order."""
+    return [c["path"] for c in diff["settings_change"] if c["dangerous"]]
 
 
 def _import_load(args: dict, paths: Paths):
@@ -1011,21 +1140,44 @@ def _import_load(args: dict, paths: Paths):
 
     raw_path = _require_str(args, "path")
     include_local = bool(args.get("include_local", False))
-    include_settings = bool(args.get("include_settings", True))
+    # Default OFF, matching voxtype_tui's own import screen: settings from
+    # an untrusted bundle are opt-in, so a caller that forgets the flag
+    # imports vocabulary/replacements only and never silently overwrites
+    # the user's configuration. The panel always sends it explicitly.
+    include_settings = bool(args.get("include_settings", False))
     path = Path(raw_path).expanduser()
-    # Size gate BEFORE any read: a multi-GB "bundle" must never be pulled
-    # into memory just to be rejected by load_bundle_file's own cap.
+    # Type gate BEFORE the size gate: st_size is 0 for character devices
+    # and procfs entries, so a size-only check happily waves through
+    # /dev/zero and /dev/urandom, and read_bytes() then allocates until
+    # MemoryError. Only a regular file can be a bundle.
     try:
-        size = path.stat().st_size
+        st = path.stat()
     except OSError as e:
         raise BridgeError(f"could not read file: {e}") from e
-    if size > sync.MAX_BUNDLE_BYTES:
+    if not stat.S_ISREG(st.st_mode):
+        raise BridgeError("not a regular file")
+    # Size gate BEFORE any read: a multi-GB "bundle" must never be pulled
+    # into memory just to be rejected by load_bundle_file's own cap.
+    if st.st_size > sync.MAX_BUNDLE_BYTES:
         raise BridgeError(
-            f"file is {size} bytes; limit {sync.MAX_BUNDLE_BYTES}"
+            f"file is {st.st_size} bytes; limit {sync.MAX_BUNDLE_BYTES}"
+        )
+    # Bounded read even so: st_size is a snapshot, and the file can grow
+    # between the stat and the read. Reading the cap + 1 byte is the only
+    # way to know the content is genuinely within the limit.
+    try:
+        with path.open("rb") as fh:
+            raw = fh.read(sync.MAX_BUNDLE_BYTES + 1)
+    except OSError as e:
+        raise BridgeError(f"could not read file: {e}") from e
+    if len(raw) > sync.MAX_BUNDLE_BYTES:
+        raise BridgeError(
+            f"file is over {sync.MAX_BUNDLE_BYTES} bytes; limit "
+            f"{sync.MAX_BUNDLE_BYTES}"
         )
     try:
-        parsed = json.loads(path.read_bytes())
-    except (OSError, ValueError):
+        parsed = json.loads(raw)
+    except ValueError:
         parsed = None
     fmt = sync.detect_format(parsed) if parsed is not None else sync.UNKNOWN_FORMAT
     try:
@@ -1059,7 +1211,9 @@ def op_import_preview(args: dict, paths: Paths) -> dict[str, Any]:
         "has_local": bool(bundle.local),
         "include_local": include_local,
         "warnings": warnings,
-        "dangerous": [c["path"] for c in diff["settings_change"] if c["dangerous"]],
+        # Upstream's DANGEROUS_PATHS UNION BRIDGE_DANGEROUS_PATHS — see
+        # _dangerous_setting_paths / _setting_change_row.
+        "dangerous": _dangerous_from_diff(diff),
         "diff": diff,
     }
 
@@ -1275,6 +1429,38 @@ def op_gpu_set_device(args: dict, paths: Paths) -> dict[str, Any]:
     }
 
 
+def _export_target(raw_path: str) -> Path:
+    """Resolve and contain the user-typed export destination.
+
+    The panel sends whatever the user typed into the export field, so
+    this is the one op that takes a filesystem path and writes to it.
+    Unconstrained it will happily write anywhere the user can, including
+    over a dotfile via a `../..` traversal. Containing it under $HOME
+    keeps a bar widget from writing outside the user's own tree, and the
+    .json suffix stops a typo from clobbering an unrelated file.
+
+    Containment is judged on the resolved PARENT directory, not on the
+    resolved file: voxtype_tui writes with mkstemp + os.replace, which
+    replaces a symlink sitting at the destination rather than following
+    it, so the bytes land in the parent directory regardless of where a
+    link points. Resolving the file instead would both mis-locate the
+    write and read the suffix off the link's target.
+    """
+    target = Path(raw_path).expanduser()
+    if target.name == "":
+        raise BridgeError("export path must name a file")
+    try:
+        parent = target.parent.resolve()
+        home = Path.home().resolve()
+    except OSError as e:
+        raise BridgeError(f"could not resolve export path: {e}") from e
+    if parent != home and home not in parent.parents:
+        raise BridgeError("export path must be inside your home directory")
+    if not target.name.lower().endswith(".json"):
+        raise BridgeError("export path must end in .json")
+    return parent / target.name
+
+
 def op_export_write(args: dict, paths: Paths) -> dict[str, Any]:
     from voxtype_tui import sync
 
@@ -1282,12 +1468,13 @@ def op_export_write(args: dict, paths: Paths) -> dict[str, Any]:
     raw_path = args.get("path") or str(sync.default_export_path())
     if not isinstance(raw_path, str) or not raw_path.strip():
         raise BridgeError("'path' must be a non-empty string")
+    target = _export_target(raw_path)
     st = _load_state(paths)
     try:
         bundle = sync.build_export_bundle(
             st.doc, st.sc, scope=scope, redact_secrets=not include_secrets,
         )
-        written = sync.write_export_bundle(bundle, Path(raw_path))
+        written = sync.write_export_bundle(bundle, target)
     except (OSError, sync.BundleError, ValueError) as e:
         raise BridgeError(str(e)) from e
     return {
@@ -1308,8 +1495,11 @@ def op_import_apply(args: dict, paths: Paths) -> dict[str, Any]:
     accept_dangerous = bool(args.get("accept_dangerous", False))
     st, bundle, warnings, fmt, include_local, preview = _import_load(args, paths)
     diff = _diff_to_json(preview)
-    dangerous = [c["path"] for c in diff["settings_change"] if c["dangerous"]]
+    # Same union as import.preview, so what the user confirmed in the
+    # preview is exactly what is gated here.
+    dangerous = _dangerous_from_diff(diff)
     if dangerous and not accept_dangerous:
+        # Refuse BEFORE apply_bundle_to_state: nothing is written.
         return {
             "ok": False,
             "error": "dangerous-changes",
@@ -1346,14 +1536,27 @@ def _config_dict(paths: Paths) -> dict[str, Any]:
 DAEMON_RESTART_READY_TIMEOUT = 18.0
 DAEMON_RESTART_READY_TIMEOUT_MAX = 60.0
 
+# What `voxtype_cli.restart_daemon()` can itself burn before the ready
+# wait even starts: it shells out to `systemctl --user restart voxtype`
+# with timeout=15 (voxtype_tui/voxtype_cli.py). Named here so the panel's
+# deadline can be checked against the real worst case instead of two
+# magic numbers drifting apart in separate files.
+SYSTEMCTL_RESTART_TIMEOUT = 15.0
+
+# The panel arms this for daemon.restart (Service.qml). It must exceed
+# SYSTEMCTL_RESTART_TIMEOUT + DAEMON_RESTART_READY_TIMEOUT, or QML kills
+# a bridge that was about to report success; pinned by a test below.
+QML_DAEMON_RESTART_DEADLINE = 40.0
+
 
 def _ready_timeout(args: dict) -> float:
     """``timeout`` arg (seconds) for the post-restart ready wait.
 
-    ``voxtype_cli.restart_daemon`` itself blocks for up to 15 s, so the
-    default keeps the worst case (15 + 18 s) inside a 30 s QML deadline
-    only when the restart returns quickly; QML sends ``timeout: 18`` and
-    treats a deadline as "restarted, readiness unknown".
+    ``voxtype_cli.restart_daemon`` blocks for up to
+    ``SYSTEMCTL_RESTART_TIMEOUT`` before this wait begins, so the true
+    worst case for the op is that plus this value. The panel's deadline
+    (``QML_DAEMON_RESTART_DEADLINE``) is sized to cover the sum; see
+    ``test_daemon_restart_worst_case_fits_the_qml_deadline``.
     """
     val = args.get("timeout", DAEMON_RESTART_READY_TIMEOUT)
     if isinstance(val, bool) or not isinstance(val, (int, float)):
@@ -1503,6 +1706,20 @@ def run_download(engine: str, name: str, out=None) -> int:
     """
     out = out or sys.stdout
 
+    # Every LOG line here is the CHILD's stdout, i.e. output from a
+    # binary this plugin does not control, relayed into a panel that
+    # renders it. Cap the length and drop control characters before it
+    # leaves this process so a future (or tampered-with) voxtype build
+    # cannot push escape sequences or a wall of text into the UI. The
+    # QML side sanitizes again on the way in; this is the other half.
+    def emit_log(text: str) -> None:
+        clean = _LOG_CONTROL_RE.sub("", text).strip()
+        if not clean:
+            return
+        if len(clean) > MAX_DOWNLOAD_LOG_CHARS:
+            clean = clean[: MAX_DOWNLOAD_LOG_CHARS - 1] + "…"
+        emit("LOG " + clean)
+
     def emit(line: str) -> None:
         out.write(line + "\n")
         out.flush()
@@ -1523,6 +1740,11 @@ def run_download(engine: str, name: str, out=None) -> int:
         emit("FAILED voxtype binary not found")
         return 1
 
+    # `engine` is validated against MODEL_CATALOG above but is deliberately
+    # NOT part of argv: `voxtype setup --download` infers the engine from
+    # the model name itself. The check stays because it rejects a bogus
+    # engine before we spawn anything, and because the cancel path below
+    # needs it to locate the partial artifact.
     argv = ["voxtype", "setup", "--download", "--model", name]
     emit("LOG $ " + " ".join(argv))
     try:
@@ -1564,14 +1786,14 @@ def run_download(engine: str, name: str, out=None) -> int:
                 last_pct = pct
                 emit(f"PROGRESS {pct:g}")
             if is_newline and text.strip():
-                emit(f"LOG {text.strip()}")
+                emit_log(text)
     if buffer:
         text = models.strip_ansi(buffer.decode(errors="replace"))
         pct = models.parse_percent(text)
         if pct is not None and pct != last_pct:
             emit(f"PROGRESS {pct:g}")
         if text.strip():
-            emit(f"LOG {text.strip()}")
+            emit_log(text)
 
     try:
         code = proc.wait(timeout=3.0)
