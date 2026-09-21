@@ -81,7 +81,11 @@ Panel {
     readonly property string tooltip: "Voxtype · " + Model.heroMeta(status, tuiMissing ? Model.ERROR_TUI_MISSING : "")
     readonly property color foreground: bar ? bar.foreground : Color.foreground
     readonly property color urgent: bar ? bar.urgent : Color.urgent
-    readonly property color muted: Qt.darker(foreground, 1.5)
+    // Commons/Color.qml ships `muted` from the theme (and a per-bar override
+    // wins when a bar supplies one). Qt.darker(foreground) was wrong on a
+    // light theme — it made "muted" text HEAVIER than the primary
+    // foreground, inverting the hierarchy — and it ignored user overrides.
+    readonly property color muted: bar && bar.muted ? bar.muted : Color.muted
     readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
     readonly property int pollIntervalMs: Math.max(1, Math.min(10, setting("pollIntervalSec", 2))) * 1000
     readonly property bool editing: focusedEditor !== null
@@ -1595,7 +1599,10 @@ Panel {
             id: labelText
             anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
             textFormat: Text.PlainText; text: labelRow.label
-            color: labelRow.isSet ? Qt.darker(root.foreground, 1.4) : root.muted
+            // A set key reads at full strength, a default one is muted. Both
+            // are theme tokens: Qt.darker() here inverted the hierarchy on a
+            // light theme and ignored the theme's own muted colour.
+            color: labelRow.isSet ? root.foreground : root.muted
             font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true
         }
         Text {

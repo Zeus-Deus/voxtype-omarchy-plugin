@@ -434,6 +434,12 @@ test('the panel is built from the shipped kit with no hard-coded colours, fonts 
   assert.doesNotMatch(code, /"#[0-9a-fA-F]{3,8}"/);
   assert.doesNotMatch(code, /font\.family: "/);
   assert.doesNotMatch(code, /font\.pixelSize: \d/);
+  // A colour derived arithmetically is not a theme colour: Qt.darker on a
+  // LIGHT theme makes "muted" text heavier than the primary foreground,
+  // inverting the hierarchy, and it ignores any user override of the token.
+  // Use Color.muted / bar.muted instead.
+  assert.doesNotMatch(code, /Qt\.(darker|lighter|tint)\s*\(/, 'derive muted from the theme token, not arithmetic');
+  assert.match(panel, /readonly property color muted: bar && bar\.muted \? bar\.muted : Color\.muted/);
   for (const kit of ['KeyboardPanel', 'PanelKeyCatcher', 'PanelHero', 'ButtonGroup', 'PanelSectionHeader', 'PanelSeparator', 'Toggle', 'Dropdown', 'TextField', 'NumberField', 'PanelSlider', 'Button', 'PanelActionButton', 'CursorSurface', 'ConfirmDialog', 'Flickable'])
     assert.match(panel, new RegExp('\\b' + kit + ' \\{'), kit);
   assert.match(panel, /bar \? bar\.foreground : Color\.foreground/);
