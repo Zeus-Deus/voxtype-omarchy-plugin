@@ -71,7 +71,13 @@ Item {
         busy = true;
         timedOut = false;
         workerGeneration++;
-        deadline.interval = payload.op === "daemon.restart" ? 30000 : 15000;
+        // The bridge's own worst case for daemon.restart is systemctl's
+        // blocking restart (SYSTEMCTL_RESTART_TIMEOUT 15 s) plus the
+        // readiness wait (DAEMON_RESTART_READY_TIMEOUT 18 s) = 33 s. A 30 s
+        // deadline SIGKILLed a bridge that had succeeded and reported a
+        // timeout after a restart that worked. bridge.py asserts the sum
+        // stays under this number; tests/qml_contract.test.js pins it here.
+        deadline.interval = payload.op === "daemon.restart" ? 40000 : 15000;
         worker.running = true;
         deadline.restart();
         return true;

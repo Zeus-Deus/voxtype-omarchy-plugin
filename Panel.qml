@@ -248,8 +248,10 @@ Panel {
     function restartDaemon() {
         if (locked || service.restarting) return;
         notice = "Restarting daemon…";
-        // The bridge waits up to `timeout` s for readiness; the Service kills
-        // the call at its own 30 s deadline.
+        // The bridge waits up to `timeout` s for readiness on top of
+        // systemctl's own 15 s blocking restart; the Service deadline (40 s)
+        // must stay above that sum. See Service.qml run() and bridge.py's
+        // SYSTEMCTL_RESTART_TIMEOUT / DAEMON_RESTART_READY_TIMEOUT.
         service.run({op: "daemon.restart", timeout: 18});
     }
     function restartIfStale() { if (stale) restartDaemon() }

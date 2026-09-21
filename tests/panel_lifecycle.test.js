@@ -620,7 +620,16 @@ test('the panel forgets options and gpu status when appropriate, and asks the br
   h.root.options = {engines: ['whisper']};
   h.root.gpu = {ok: true};
   h.root.restartDaemon();
-  assert.deepEqual(JSON.parse(JSON.stringify(h.requests.pop())), {op: 'daemon.restart', timeout: 18});
+  const restart = JSON.parse(JSON.stringify(h.requests.pop()));
+  assert.deepEqual(restart, {op: 'daemon.restart', timeout: 18});
+  // The readiness wait the panel asks for, plus systemctl's own blocking
+  // restart inside the bridge, must fit under the Service deadline — else the
+  // panel kills a bridge that succeeded. bridge.py owns the other half.
+  const service = fs.readFileSync(path.join(__dirname, '..', 'Service.qml'), 'utf8');
+  const deadlineMs = Number(service.match(/payload\.op === "daemon\.restart" \? (\d+)/)[1]);
+  assert.equal(deadlineMs, 40000);
+  assert.ok(restart.timeout * 1000 + 15000 < deadlineMs,
+    'timeout ' + restart.timeout + ' s + systemctl 15 s must stay under the ' + deadlineMs + ' ms deadline');
   h.root.launchGpu(true);
   assert.equal(h.root.gpu, null, 'gpu status is stale once the terminal runs setup');
   assert.match(panel, /onOpenedChanged: \{[\s\S]*?options = null;/, 'options invalidated on close');

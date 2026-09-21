@@ -122,10 +122,26 @@ test('mutating excludes the status poll so row actions do not flicker every 2 s'
   for (const g of gates) assert.doesNotMatch(g, /service\.busy/, g);
 });
 
-test('daemon.restart gets the long deadline', () => {
+// The other half of this contract lives in bridge.py, which exports
+// SYSTEMCTL_RESTART_TIMEOUT (15.0) and DAEMON_RESTART_READY_TIMEOUT (18.0)
+// and asserts python-side that their sum stays below this deadline. A QML
+// deadline shorter than the child's own worst case SIGKILLs a bridge that
+// succeeded and reports a timeout after a restart that actually worked.
+const SYSTEMCTL_RESTART_TIMEOUT_MS = 15000;   // bridge.py SYSTEMCTL_RESTART_TIMEOUT
+const DAEMON_RESTART_READY_TIMEOUT_MS = 18000; // bridge.py DAEMON_RESTART_READY_TIMEOUT
+
+test('daemon.restart gets a deadline above the bridge worst case (systemctl 15 s + readiness 18 s)', () => {
   const h = serviceHarness();
   h.root.run({op: 'daemon.restart'});
-  assert.equal(h.root.deadline.interval, 30000);
+  assert.equal(h.root.deadline.interval, 40000, 'the deadline the bridge asserts against');
+  assert.ok(h.root.deadline.interval > SYSTEMCTL_RESTART_TIMEOUT_MS + DAEMON_RESTART_READY_TIMEOUT_MS,
+    'deadline(daemon.restart) must exceed 15000 + 18000 = 33000, or a successful restart is killed and reported as a timeout');
+  // The literal is in Service.qml, not only in the harness.
+  assert.match(stripComments(service), /payload\.op === "daemon\.restart" \? 40000 : 15000/);
+  // Every other op keeps the short deadline.
+  h.fire('worker', 'onExited', 0);
+  h.root.run({op: 'load'});
+  assert.equal(h.root.deadline.interval, 15000);
 });
 
 test('FailedToStart (runningChanged without exited) still completes, after a normal exit would have won', () => {
