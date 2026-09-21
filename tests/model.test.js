@@ -247,6 +247,45 @@ test('sanitize strips control and bidi characters and caps length', () => {
   assert.equal(Model.sanitize(null), '');
 });
 
+// ---- F4: line breaks are an injection vector, not just controls/bidi -----
+//
+// ConfirmDialog renders `message` with wrapMode WordWrap, so PlainText stops
+// HTML but NOT a line break: an imported phrase containing newlines can push
+// the real question off the top of the card and render its own question
+// directly above the Cancel/Remove buttons.
+
+test('sanitize flattens every layout-injection codepoint, one case per codepoint', () => {
+  const cases = [
+    ['LF', '\u000a'], ['CR', '\u000d'], ['CRLF', '\u000d\u000a'], ['TAB', '\u0009'],
+    ['U+2028 LINE SEPARATOR', '\u2028'], ['U+2029 PARAGRAPH SEPARATOR', '\u2029'],
+    ['U+200B ZERO WIDTH SPACE', '\u200b'], ['U+00AD SOFT HYPHEN', '\u00ad'],
+    ['U+FEFF BOM', '\ufeff'], ['U+202E RLO', '\u202e'], ['U+200E LRM', '\u200e'],
+    ['U+2066 LRI', '\u2066'], ['U+0007 BEL', '\u0007'], ['U+007F DEL', '\u007f'],
+  ];
+  for (const [name, ch] of cases) {
+    const out = Model.sanitize('a' + ch + 'b');
+    assert.doesNotMatch(out, /[\r\n\u2028\u2029\u200b\u00ad\ufeff\u202a-\u202e\u200e\u200f\u2066-\u2069\u0000-\u001f\u007f]/, name + ' survives sanitize');
+    assert.ok(out === 'ab' || out === 'a b', name + ' became ' + JSON.stringify(out));
+  }
+  // The actual attack shape: a fake question after a wall of breaks.
+  const attack = 'coffee\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\nDelete your whole config?';
+  const clean = Model.sanitize(attack, 200);
+  assert.doesNotMatch(clean, /[\r\n]/, 'no line break survives');
+  assert.equal(clean, 'coffee Delete your whole config?', 'whitespace runs collapse to one space');
+  assert.equal(Model.sanitize('a \t\r\n  b'), 'a b');
+  assert.equal(Model.sanitize('  padded  '), ' padded ', 'only runs collapse; no surprise trimming');
+});
+
+test('sanitizeMessage keeps the panel\'s own literal newline while stripping injected controls', () => {
+  // Panel.qml's model-delete copy uses a deliberate \n in its static text.
+  const staticCopy = 'Delete base from disk?\nIt can be downloaded again later.';
+  assert.equal(Model.sanitizeMessage(staticCopy, 600), staticCopy, 'an intentional \\n keeps working');
+  assert.doesNotMatch(Model.sanitizeMessage('a\u202eb\u0007c\u2028d'), /[\u202e\u0007\u2028]/);
+  assert.equal(Model.sanitizeMessage('a\tb\rc'), 'a b c', 'tab and CR are still flattened');
+  assert.equal(Model.sanitizeMessage('x'.repeat(900)).length, 600);
+  assert.equal(Model.sanitizeMessage(null), '');
+});
+
 test('Model.js never touches Qt', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'Model.js'), 'utf8');
   assert.doesNotMatch(src, /\bQt\./);

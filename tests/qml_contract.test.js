@@ -359,7 +359,10 @@ test('the state poll follows status.state_file_path, falls back to the runtime d
 });
 
 test('ConfirmDialog defaults to Cancel on every open and blocks the key catcher', () => {
-  assert.match(panel, /function ask\([\s\S]{0,400}confirmation\.selectedIndex = 0;[\s\S]{0,60}confirmation\.opened = true/);
+  assert.match(panel, /function ask\([\s\S]{0,600}confirmation\.selectedIndex = 0;[\s\S]{0,60}confirmation\.opened = true/);
+  // The assembled message keeps the panel's own literal \n; only the
+  // untrusted fragments the caller passed in were flattened by Model.sanitize.
+  assert.match(panel, /confirmation\.message = Model\.sanitizeMessage\(message, 600\)/);
   assert.match(panel, /blocked: root\.keysBlocked/);
   assert.match(panel, /readonly property bool keysBlocked: editing \|\| confirmation\.opened \|\| openPopups > 0/);
   assert.match(panel, /ConfirmDialog \{[\s\S]*?selectedIndex: 0/);

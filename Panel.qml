@@ -313,7 +313,9 @@ Panel {
         if (locked) return;
         confirmAction = action;
         confirmPayload = payload;
-        confirmation.message = Model.sanitize(message, 600);
+        // The untrusted fragments were sanitized by the caller; this only
+        // caps the assembled copy and keeps the panel's own literal "\n".
+        confirmation.message = Model.sanitizeMessage(message, 600);
         confirmation.confirmText = confirmLabel;
         confirmation.selectedIndex = 0;
         confirmation.opened = true;

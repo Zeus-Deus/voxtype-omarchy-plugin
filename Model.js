@@ -477,9 +477,37 @@ function diffSummary(diff) {
     return parts.length ? parts.join(" · ") : "No changes";
 }
 
+// Characters that must never reach a Text element: C0 controls, DEL, the
+// bidi overrides/isolates, and the invisible formatters that let an imported
+// value fake its own layout. U+2028/U+2029 are line/paragraph separators and
+// U+200B/U+00AD/U+FEFF are zero-width — all of them survive
+// `textFormat: PlainText`.
+var UNSAFE_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u00ad\u200b\u200e\u200f\u202a-\u202e\u2028\u2029\u2066-\u2069\ufeff]/g;
+
+// Untrusted fragments (phrases, rules, model names, bundle paths, bridge
+// errors). ConfirmDialog renders its message with wrapMode WordWrap, so a
+// value containing LF/CR/TAB becomes real lines and can push the genuine
+// question off the top of the card, putting its own question directly above
+// the Cancel/Confirm buttons. PlainText stops HTML, not line breaks — so
+// flatten them here, in the fragment, and assemble the static copy after.
 function sanitize(text, max) {
-    var s = String(text === null || text === undefined ? "" : text).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "");
+    var s = String(text === null || text === undefined ? "" : text)
+        .replace(UNSAFE_CHARS, "")
+        .replace(/[\r\n\t]+/g, " ")
+        .replace(/\s{2,}/g, " ");
     var lim = max || 200;
+    return s.length > lim ? s.slice(0, lim - 1) + "…" : s;
+}
+
+// Defence in depth for an ALREADY-assembled dialog message: strip the same
+// unsafe characters and cap, but keep "\n" because the panel's own static
+// copy uses it deliberately. Every untrusted fragment inside the message has
+// been through sanitize() first, so no injected break can reach this.
+function sanitizeMessage(text, max) {
+    var s = String(text === null || text === undefined ? "" : text)
+        .replace(UNSAFE_CHARS, "")
+        .replace(/[\r\t]+/g, " ");
+    var lim = max || 600;
     return s.length > lim ? s.slice(0, lim - 1) + "…" : s;
 }
 

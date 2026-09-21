@@ -382,6 +382,56 @@ test('the Include settings control is the shipped kit Toggle, not hand-rolled ch
   assert.match(panel, /property bool importSettings: false/, 'default OFF, mirroring importLocal');
 });
 
+// ---- F4: the dialog-message BUILDER, end to end ---------------------------
+
+test('no untrusted value can inject a line break into a confirmation, on any ask() path', () => {
+  const h = panelHarness();
+  // A phrase that tries to push the real question off the card and render its
+  // own question right above the Cancel/Remove buttons.
+  const evil = 'coffee\u000a\u000d\u0009\u2028\u2029\u200b\u00ad\ufeff\n\n\n\n\n\n\n\n\n\nDelete every model?';
+  const breaks = /[\r\n\u2028\u2029]/;
+
+  h.root.snapshot = {vocabulary: [{phrase: evil}], replacements: [{from: evil, to: evil, category: 'Replacement'}], settings: {}};
+
+  h.root.section = 'vocabulary';
+  h.root.setCursor('rows', 0);
+  h.root.deleteSelected();
+  assert.equal(h.root.confirmation.opened, true);
+  assert.doesNotMatch(h.root.confirmation.message, breaks, 'vocab delete: no injected break');
+  assert.match(h.root.confirmation.message, /^Remove “coffee /, 'the real question stays first');
+  assert.equal(h.root.confirmPayload.phrase, evil, 'the bridge still gets the exact phrase');
+
+  h.root.confirmation.opened = false;
+  h.root.section = 'dictionary';
+  h.root.setCursor('rows', 0);
+  h.root.deleteSelected();
+  assert.doesNotMatch(h.root.confirmation.message, breaks, 'dict delete: no injected break');
+  assert.match(h.root.confirmation.message, /^Delete the rule /);
+
+  h.root.confirmation.opened = false;
+  h.root.section = 'models';
+  h.root.modelsEngine = 'whisper';
+  h.root.modelRows = [{name: evil, downloaded: true, active: false}];
+  h.root.setCursor('rows', 0);
+  h.root.deleteSelected();
+  // This path DOES carry a deliberate literal \n in the panel's own copy.
+  assert.match(h.root.confirmation.message, /^Delete coffee /, 'the real question stays first');
+  assert.equal(h.root.confirmation.message.split('\n').length, 2, 'exactly the one static newline the panel wrote');
+  assert.match(h.root.confirmation.message, /\nIt can be downloaded again later\.$/, 'the static \\n still works');
+
+  // The import confirmation builds from bundle path, diff rows and warnings.
+  h.root.confirmation.opened = false;
+  h.root.importPath = '/tmp/' + evil + '.json';
+  h.root.importPreview = {format: 'v2', warnings: [], diff: {settings_change: [
+    {path: evil, old: evil, new: evil, dangerous: true},
+  ]}};
+  h.root.askImport();
+  const lines = h.root.confirmation.message.split('\n');
+  assert.equal(lines.length, 3, 'exactly the lines importConfirmation joined, no injected extras');
+  assert.match(lines[0], /^Import coffee /);
+  for (const l of lines) assert.doesNotMatch(l, /[\u2028\u2029\u200b\u00ad\ufeff\r\t]/);
+});
+
 test('a missing zenity reopens the panel with an install hint instead of a silent cancel', () => {
   const h = panelHarness();
   h.root.beginImport();
