@@ -551,3 +551,38 @@ test('no home paths or usernames leak into shipped code', () => {
   for (const f of ['Panel.qml', 'Service.qml', 'BarWidget.qml', 'VoxtypeIcon.qml', 'Model.js', 'manifest.json', 'README.md'])
     assert.doesNotMatch(read(f), /\/home\/[a-z]/, f);
 });
+
+test('the plugin opens no network connection of its own', () => {
+  // The README tells users nothing leaves their machine except a model
+  // download run by the voxtype binary. Keep that claim honest: no QML
+  // or Python file here may construct a network client or name a URL.
+  const shipped = ['Panel.qml', 'Service.qml', 'BarWidget.qml', 'VoxtypeIcon.qml', 'Model.js', 'bridge.py'];
+  const forbidden = [
+    /\bimport\s+(?:urllib|http\.client|socket|requests|httpx|aiohttp)\b/,
+    /\bfrom\s+(?:urllib|http|socket|requests|httpx|aiohttp)\b/,
+    /\bXMLHttpRequest\b/,
+    /\bfetch\s*\(/,
+    /\bnew\s+WebSocket\b/,
+    // A hardcoded destination the plugin would talk to itself. The
+    // remote-Whisper endpoint FIELD is the user's own server and its
+    // placeholder is UI text, so an unresolved "https://…" is allowed;
+    // a real host with a path is not.
+    /\bhttps?:\/\/[a-z0-9.-]+\.[a-z]{2,}(?![^\s"'`]*\u2026)/i,
+  ];
+  for (const f of shipped) {
+    const source = read(f);
+    // Comments may legitimately discuss endpoints; strip the obvious ones.
+    const code = source
+      .replace(/^\s*(?:\/\/|#).*$/gm, '')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/"""[\s\S]*?"""/g, '');
+    for (const re of forbidden) assert.doesNotMatch(code, re, `${f} must not reach the network (${re})`);
+  }
+});
+
+test('README documents removal and the no-egress guarantee', () => {
+  const readme = read('README.md');
+  assert.match(readme, /omarchy plugin remove io\.github\.zeus-deus\.voxtype/);
+  assert.match(readme, /no network connections of its own/i);
+  assert.match(readme, /no telemetry/i);
+});
