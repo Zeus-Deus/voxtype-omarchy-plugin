@@ -2134,6 +2134,88 @@ def test_log_control_filter_drops_the_whole_class():
     assert bridge._LOG_CONTROL_RE.sub("", "plain text") == "plain text"
 
 
+# ---------------------------------------------------------------------------
+# helpers that the op-level tests only reached indirectly
+# ---------------------------------------------------------------------------
+
+
+def test_parse_systemd_timestamp():
+    ts = bridge._parse_systemd_timestamp("Thu 2026-09-10 16:40:12 CEST")
+    assert ts is not None
+    assert time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts)) == "2026-09-10 16:40:12"
+    # systemd prints this for a unit that has never run.
+    assert bridge._parse_systemd_timestamp("n/a") is None
+    assert bridge._parse_systemd_timestamp("") is None
+    assert bridge._parse_systemd_timestamp("Thu not-a-date 16:40:12 CEST") is None
+    assert bridge._parse_systemd_timestamp("Thu 2026-02-30 16:40:12 CEST") is None
+
+
+def test_count_leaves():
+    assert bridge._count_leaves({}) == 0
+    assert bridge._count_leaves({"a": 1}) == 1
+    assert bridge._count_leaves({"a": {"b": 1, "c": 2}, "d": 3}) == 3
+    # A list is one leaf, not its length: settings values are scalars or
+    # arrays, and an array is edited as a unit.
+    assert bridge._count_leaves({"a": [1, 2, 3]}) == 1
+    assert bridge._count_leaves({"a": {"b": {"c": {"d": 1}}}}) == 1
+
+
+def test_strip_ansi():
+    assert bridge._strip_ansi("\x1b[31mError:\x1b[0m failed") == "Error: failed"
+    assert bridge._strip_ansi("plain") == "plain"
+    assert bridge._strip_ansi("") == ""
+    assert bridge._strip_ansi("\x1b[1;32mbold green\x1b[0m") == "bold green"
+
+
+def test_model_present(tmp_path: Path):
+    missing = tmp_path / "nope.bin"
+    assert bridge._model_present(missing) is False
+
+    empty = tmp_path / "empty.bin"
+    empty.touch()
+    assert bridge._model_present(empty) is False
+
+    real = tmp_path / "model.bin"
+    real.write_bytes(b"x" * 16)
+    assert bridge._model_present(real) is True
+
+    empty_dir = tmp_path / "emptydir"
+    empty_dir.mkdir()
+    assert bridge._model_present(empty_dir) is False
+
+    nested = tmp_path / "dirmodel"
+    (nested / "inner").mkdir(parents=True)
+    (nested / "inner" / "weights").write_bytes(b"x")
+    assert bridge._model_present(nested) is True
+
+
+def test_encode_response_rejects_unserialisable_values():
+    """The too-large branch was covered; the TypeError branch was not."""
+    out = bridge.encode_response({"ok": True, "value": {1, 2, 3}})
+    decoded = json.loads(out)
+    assert decoded["ok"] is False
+    assert "unserialisable response" in decoded["error"]
+
+    class Boom:
+        def __repr__(self):  # pragma: no cover - exercised via json.dumps
+            return "<boom>"
+
+    decoded = json.loads(bridge.encode_response({"ok": True, "v": Boom()}))
+    assert decoded["ok"] is False and "unserialisable" in decoded["error"]
+
+    # A normal response still round-trips untouched.
+    assert json.loads(bridge.encode_response({"ok": True, "n": 1})) == {"ok": True, "n": 1}
+
+
+def test_encode_response_too_large_names_the_op():
+    big = {"ok": True, "op": "models.list", "blob": "x" * (bridge.MAX_RESPONSE_BYTES + 10)}
+    decoded = json.loads(bridge.encode_response(big))
+    assert decoded["ok"] is False
+    assert decoded["error"] == "response too large"
+    assert decoded["op"] == "models.list"
+    assert decoded["limit_bytes"] == bridge.MAX_RESPONSE_BYTES
+
+
 def test_download_without_binary(env: Env):
     env.remove_fake("voxtype")
     r = env.run_cli(None, "--download", "whisper", "tiny")
