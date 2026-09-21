@@ -470,6 +470,65 @@ test('bar button: left toggles, right records (setting), middle restarts when st
   assert.match(panel, /function restartIfStale\(\) \{ if \(stale\) restartDaemon\(\) \}/);
 });
 
+test('every QML import is used, so the Qt6 semantic linter reports only expected noise', () => {
+  // BarWidget names no Quickshell type; the unused import was the only
+  // actionable [unused-imports] line the linter produced for this plugin.
+  assert.doesNotMatch(widget, /^import Quickshell/m);
+  assert.doesNotMatch(widget, /\bQuickshell\./, 'nothing in the widget needs that import');
+  // The files that DO use it keep it.
+  assert.match(service, /^import Quickshell$/m);
+  assert.match(service, /\bQuickshell\.(env|execDetached)\(/);
+
+  // `qs.Commons` / `qs.Ui` are type+singleton modules: they are "used" by
+  // naming an exported type (Color, Style, OpticalGlyph, ...), never by a
+  // module-qualified prefix. Read the real export list out of the shipped
+  // kit's qmldir so this test cannot drift from what the kit provides; if
+  // the kit is not installed there is nothing to check against, so skip.
+  const KIT = '/usr/share/omarchy/shell';
+  const kitTypes = (mod) => {
+    const dir = path.join(KIT, mod.replace(/^qs\./, ''));
+    let text;
+    try {
+      text = fs.readFileSync(path.join(dir, 'qmldir'), 'utf8');
+    } catch {
+      return null;
+    }
+    const names = [];
+    for (const line of text.split('\n')) {
+      const m = line.match(/^(?:singleton\s+)?([A-Z]\w*)\s+[\d.]+\s+\S+\.qml$/);
+      if (m) names.push(m[1]);
+    }
+    return names.length ? names : null;
+  };
+
+  const files = [
+    ['BarWidget.qml', widget],
+    ['Panel.qml', panel],
+    ['Service.qml', service],
+    ['VoxtypeIcon.qml', read('VoxtypeIcon.qml')],
+  ];
+  const builtin = {
+    'Quickshell.Io': /\b(Process|StdioCollector|SplitParser|FileView)\b/,
+    'Quickshell': /\bQuickshell\.(env|execDetached)\(/,
+  };
+  let checked = 0;
+  for (const [name, source] of files) {
+    const body = source.replace(/^import .*$/gm, '');
+    for (const m of source.matchAll(/^import (qs\.\w+|Quickshell(?:\.\w+)?)$/gm)) {
+      const mod = m[1];
+      let probe = builtin[mod];
+      if (!probe) {
+        const types = kitTypes(mod);
+        if (!types) continue; // kit not installed on this machine
+        probe = new RegExp('\\b(' + types.join('|') + ')\\b');
+      }
+      assert.match(body, probe, `${name} imports ${mod} without using it`);
+      checked++;
+    }
+  }
+  assert.ok(checked > 0, 'no imports were actually checked');
+});
+
 test('manifest matches the design', () => {
   const manifest = JSON.parse(read('manifest.json'));
   assert.equal(manifest.id, 'io.github.zeus-deus.voxtype');
