@@ -241,6 +241,46 @@ test('importConfirmation tiers the dialog and only claims an acknowledgement it 
   assert.doesNotMatch(secret.message, /undefined/);
 });
 
+test('settingsTargets is the on-screen cursor order: hidden controls are not cursor stops', () => {
+  const targets = (cfg, eng) => Model.settingsTargets(cfg, eng, (eng || 'whisper') + '.model');
+  const base = targets({}, 'whisper');
+  assert.equal(base[0], 'engine');
+  assert.equal(base[1], 'whisper.model', 'the model path is the caller\'s, not hard-coded');
+  assert.equal(targets({}, 'parakeet')[1], 'parakeet.model');
+  for (const k of ['gpu.device', 'gpu.enable', 'gpu.disable']) assert.ok(base.indexOf(k) >= 0, k);
+
+  // engine !== whisper drops the language field and the whole remote block.
+  const other = targets({'whisper.remote_api_key_set': true}, 'parakeet');
+  for (const k of ['whisper.language', 'whisper.remote_endpoint', 'whisper.remote_model', 'whisper.remote_timeout_secs', 'remote.clear'])
+    assert.ok(other.indexOf(k) < 0, k + ' is whisper-only');
+
+  // audio.feedback.enabled gates its Row; the fallback is true.
+  assert.ok(base.indexOf('audio.feedback.theme') >= 0 && base.indexOf('audio.feedback.volume') >= 0);
+  const noFeedback = targets({'audio.feedback.enabled': false}, 'whisper');
+  assert.ok(noFeedback.indexOf('audio.feedback.theme') < 0 && noFeedback.indexOf('audio.feedback.volume') < 0);
+  assert.ok(noFeedback.indexOf('audio.feedback.enabled') >= 0, 'the toggle itself is always reachable');
+
+  // vad.enabled gates its Row; the fallback is false.
+  assert.ok(base.indexOf('vad.threshold') < 0 && base.indexOf('vad.model') < 0);
+  const vad = targets({'vad.enabled': true}, 'whisper');
+  assert.ok(vad.indexOf('vad.threshold') >= 0 && vad.indexOf('vad.model') >= 0);
+
+  // remote.clear needs whisper AND a stored key.
+  assert.ok(base.indexOf('remote.clear') < 0);
+  assert.ok(targets({'whisper.remote_api_key_set': true}, 'whisper').indexOf('remote.clear') >= 0);
+
+  // Order is stable and free of duplicates whatever is hidden.
+  for (const cfg of [{}, {'vad.enabled': true}, {'audio.feedback.enabled': false}, {'vad.enabled': true, 'whisper.remote_api_key_set': true}]) {
+    for (const eng of ['whisper', 'parakeet']) {
+      const list = targets(cfg, eng);
+      assert.equal(new Set(list).size, list.length, 'no duplicates');
+      assert.equal(list.indexOf('engine'), 0);
+      assert.equal(list[list.length - 1], 'gpu.disable');
+    }
+  }
+  assert.equal(Model.settingsTargets(null, null, null)[1], 'whisper.model', 'defaults do not throw');
+});
+
 test('sanitize strips control and bidi characters and caps length', () => {
   assert.equal(Model.sanitize('a\u202eb\u0000c'), 'abc');
   assert.equal(Model.sanitize('x'.repeat(300)).length, 200);

@@ -654,3 +654,69 @@ test('every Settings cursor target is reachable and visible: Clear key is skippe
   const cursorTargets = new Set([...panel.matchAll(/setCursor\("([\w.]+)", -1\)/g)].map(m => m[1]));
   for (const key of ['export', 'import', 'engine', 'gpu.device', 'gpu.enable', 'gpu.disable', 'remote.clear', 'record', 'restart', 'download', 'test', 'search']) assert.ok(cursorTargets.has(key), key);
 });
+
+// ---- F6: conditionally-hidden Settings controls leave the cursor order ----
+//
+// Eight controls sit inside Rows with a `visible:` predicate. A static cursor
+// list walked j/k onto them while off screen, and Enter then called
+// forceActiveFocus() on an invisible TextField or open() on an invisible
+// Dropdown. Only the live shell shows that; here the predicate is pinned
+// against the very `visible:` bindings it mirrors.
+
+test('Settings cursor targets drop every conditionally-hidden control (engine, feedback, VAD, API key)', () => {
+  const h = panelHarness();
+  h.root.section = 'settings';
+  const targets = () => h.root.targetsFor('settings');
+  const has = key => targets().indexOf(key) >= 0;
+
+  const whisperOnly = ['whisper.language', 'whisper.remote_endpoint', 'whisper.remote_model', 'whisper.remote_timeout_secs'];
+  const feedbackOnly = ['audio.feedback.theme', 'audio.feedback.volume'];
+  const vadOnly = ['vad.threshold', 'vad.model'];
+
+  // Defaults: whisper engine, feedback on (fallback true), VAD off (fallback false), no API key.
+  h.root.snapshot = {settings: {}};
+  for (const k of whisperOnly) assert.ok(has(k), 'whisper engine shows ' + k);
+  for (const k of feedbackOnly) assert.ok(has(k), 'feedback defaults on: ' + k);
+  for (const k of vadOnly) assert.ok(!has(k), 'VAD defaults off: ' + k + ' must not be a cursor stop');
+  assert.ok(!has('remote.clear'), 'no stored key: Clear is hidden');
+
+  // A non-whisper engine hides the language field and the whole remote block.
+  h.root.snapshot = {settings: {engine: 'parakeet', 'whisper.remote_api_key_set': true}};
+  assert.equal(h.root.engine, 'parakeet');
+  for (const k of whisperOnly) assert.ok(!has(k), 'engine !== whisper must drop ' + k);
+  assert.ok(!has('remote.clear'), 'the Clear button is inside the whisper-only block');
+  assert.ok(has('engine') && has('gpu.enable'), 'unconditional controls stay');
+
+  // Feedback off hides its theme and volume Row.
+  h.root.snapshot = {settings: {'audio.feedback.enabled': false}};
+  for (const k of feedbackOnly) assert.ok(!has(k), 'feedback off must drop ' + k);
+  assert.ok(has('audio.feedback.enabled'), 'the toggle itself stays reachable');
+
+  // VAD on reveals its Row.
+  h.root.snapshot = {settings: {'vad.enabled': true}};
+  for (const k of vadOnly) assert.ok(has(k), 'VAD on shows ' + k);
+
+  // Everything hidden at once: j/k must never land on an invisible control.
+  h.root.snapshot = {settings: {engine: 'parakeet', 'audio.feedback.enabled': false, 'vad.enabled': false}};
+  for (const k of whisperOnly.concat(feedbackOnly, vadOnly, ['remote.clear'])) assert.ok(!has(k), k);
+  const list = JSON.parse(JSON.stringify(targets()));
+  assert.equal(new Set(list).size, list.length, 'no duplicate cursor stops');
+  h.root.cursorActive = false;
+  for (let i = 0; i < list.length + 3; i++) {
+    h.root.moveCursor(1);
+    assert.ok(list.indexOf(h.root.cursorKey) >= 0, 'j landed on ' + h.root.cursorKey + ', which is not on screen');
+  }
+});
+
+test('the cursor predicates mirror the visible: bindings that actually drive those Rows', () => {
+  // If a Row's condition is edited, this fails rather than drifting silently.
+  assert.match(panel, /visible: Model\.settingValue\(root\.config, "audio\.feedback\.enabled", true\) === true/);
+  assert.match(panel, /visible: Model\.settingValue\(root\.config, "vad\.enabled", false\) === true/);
+  assert.match(panel, /settingKey: "whisper\.language";[^\n]*visible: root\.engine === "whisper"/);
+  assert.match(panel, /settingKey: "whisper\.remote_endpoint";[^\n]*visible: root\.engine === "whisper"/);
+  assert.equal((panel.match(/visible: root\.engine === "whisper"/g) || []).length, 6, 'both separators, header, language, endpoint and the two whisper Rows');
+  assert.match(panel, /visible: Model\.settingValue\(root\.config, "whisper\.remote_api_key_set", false\) === true/);
+  // The predicate is Node-testable, not inlined in the QML.
+  assert.match(panel, /readonly property var settingsTargets: Model\.settingsTargets\(config, engine, modelPath\)/);
+  assert.match(panel, /if \(sectionName === "settings"\) return settingsTargets;/);
+});

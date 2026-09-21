@@ -387,6 +387,41 @@ function restartNeededSummary(paths) {
     return paths.length === 1 ? "Restart to apply " + paths[0] : "Restart to apply " + paths.length + " changes";
 }
 
+// The Settings section's keyboard cursor order. Eight controls in Panel.qml
+// live inside Rows that are conditionally visible, so a static list walks the
+// highlight onto things that are not on screen and Enter then calls
+// forceActiveFocus() on an invisible TextField or open() on an invisible
+// Dropdown. These predicates MIRROR the `visible:` bindings that drive those
+// Rows — keep them in step:
+//   whisper.language                       Panel.qml  engine === "whisper"
+//   audio.feedback.theme / .volume         Row        audio.feedback.enabled
+//   vad.threshold / vad.model              Row        vad.enabled
+//   whisper.remote_endpoint                Panel.qml  engine === "whisper"
+//   whisper.remote_model / _timeout_secs   Row        engine === "whisper"
+//   remote.clear                           Button     engine === "whisper"
+//                                                     && remote_api_key_set
+function settingsTargets(config, engine, modelPath) {
+    var eng = String(engine || "whisper");
+    var whisper = eng === "whisper";
+    var feedback = settingValue(config, "audio.feedback.enabled", true) === true;
+    var vad = settingValue(config, "vad.enabled", false) === true;
+    var keySet = settingValue(config, "whisper.remote_api_key_set", false) === true;
+    var out = ["engine", String(modelPath || (eng + ".model"))];
+    if (whisper) out.push("whisper.language");
+    out = out.concat(["hotkey.key", "hotkey.mod.LEFTCTRL", "hotkey.mod.LEFTALT", "hotkey.mod.LEFTSHIFT", "hotkey.mod.LEFTMETA", "hotkey.mode", "hotkey.enabled",
+                      "audio.device", "audio.max_duration_secs", "audio.feedback.enabled"]);
+    if (feedback) out = out.concat(["audio.feedback.theme", "audio.feedback.volume"]);
+    out = out.concat(["output.mode", "output.fallback_to_clipboard", "output.auto_submit", "text.smart_auto_submit", "text.spoken_punctuation", "output.type_delay_ms",
+                      "vad.enabled"]);
+    if (vad) out = out.concat(["vad.threshold", "vad.model"]);
+    out = out.concat(["output.post_process.command", "output.post_process.timeout_ms"]);
+    if (whisper) {
+        out = out.concat(["whisper.remote_endpoint", "whisper.remote_model", "whisper.remote_timeout_secs"]);
+        if (keySet) out.push("remote.clear");
+    }
+    return out.concat(["gpu.device", "gpu.enable", "gpu.disable"]);
+}
+
 function dangerousChanges(diff) {
     var out = [];
     var changes = diff && diff.settings_change ? diff.settings_change : [];

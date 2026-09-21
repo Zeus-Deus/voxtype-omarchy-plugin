@@ -90,16 +90,10 @@ Panel {
         {value: "dictate", label: "Dictate"}, {value: "vocabulary", label: "Vocabulary"},
         {value: "dictionary", label: "Dictionary"}, {value: "settings", label: "Settings"}, {value: "models", label: "Models"}
     ]
-    readonly property var settingsTargets: [
-        "engine", modelPath, "whisper.language",
-        "hotkey.key", "hotkey.mod.LEFTCTRL", "hotkey.mod.LEFTALT", "hotkey.mod.LEFTSHIFT", "hotkey.mod.LEFTMETA", "hotkey.mode", "hotkey.enabled",
-        "audio.device", "audio.max_duration_secs", "audio.feedback.enabled", "audio.feedback.theme", "audio.feedback.volume",
-        "output.mode", "output.fallback_to_clipboard", "output.auto_submit", "text.smart_auto_submit", "text.spoken_punctuation", "output.type_delay_ms",
-        "vad.enabled", "vad.threshold", "vad.model",
-        "output.post_process.command", "output.post_process.timeout_ms",
-        "whisper.remote_endpoint", "whisper.remote_model", "whisper.remote_timeout_secs", "remote.clear",
-        "gpu.device", "gpu.enable", "gpu.disable"
-    ]
+    // Only the controls that are actually on screen: the predicates live in
+    // Model.settingsTargets so Node can pin them against the `visible:`
+    // bindings below.
+    readonly property var settingsTargets: Model.settingsTargets(config, engine, modelPath)
 
     function targetsFor(sectionName) {
         if (sectionName === "dictate") {
@@ -110,7 +104,7 @@ Panel {
         }
         if (sectionName === "vocabulary") return ["search", "rows"];
         if (sectionName === "dictionary") return ["search", "rows"];
-        if (sectionName === "settings") return settingsTargets.filter(function(k) { return k !== "remote.clear" || Model.settingValue(config, "whisper.remote_api_key_set", false) === true; });
+        if (sectionName === "settings") return settingsTargets;
         if (sectionName === "models") return ["engine", "rows", "export", "import"];
         return [];
     }
