@@ -2,13 +2,23 @@
 
 A bar widget for **Omarchy Quattro** that manages [Voxtype](https://github.com/peteonrails/voxtype), Omarchy's bundled voice-to-text daemon: record, restart, vocabulary, dictionary rules, every setting, model downloads and backups — without opening `config.toml`.
 
-It is a native shell plugin built against the official Quattro plugin contract. It does not start another Quickshell instance and is not a first-party Omarchy product or an approved marketplace listing.
-
-The panel is a thin QML front end over the installed **voxtype-tui** Python package. Every write goes through `voxtype_tui` (validated, atomic, comment-preserving saves; sidecar reconcile; sync bundle), so the panel and the TUI never disagree.
-
-| Dictate | Models | Settings |
+| Dictate | Vocabulary | Dictionary |
 |---|---|---|
-| ![Dictate section](docs/images/panel-dictate.png) | ![Models section](docs/images/panel-models.png) | ![Settings section](docs/images/panel-settings.png) |
+| ![Dictate section](docs/images/panel-dictate.png) | ![Vocabulary section](docs/images/panel-vocabulary.png) | ![Dictionary section](docs/images/panel-dictionary.png) |
+
+| Settings | Models |
+|---|---|
+| ![Settings section](docs/images/panel-settings.png) | ![Models section](docs/images/panel-models.png) |
+
+## Install
+
+```bash
+omarchy plugin add https://github.com/Zeus-Deus/voxtype-omarchy-plugin.git --enable --yes
+```
+
+The widget lands in the right bar section; move it with `omarchy bar move`. Plugin settings (poll interval, right-click records) live under Setup › Plugins.
+
+You need Voxtype itself and the `voxtype-tui` package (AUR: `voxtype-tui`) installed — see [Dependencies](#dependencies). Nothing is downloaded or built at install time.
 
 ## What the panel does
 
@@ -30,13 +40,13 @@ An installed Omarchy Quattro shell (`qs.Ui` / `qs.Commons`), `voxtype`, `/usr/bi
 
 No npm/pip packages, root privileges, background service, build step or vendored binaries. Nothing runs at install time.
 
-## Install
+## How it works
 
-```bash
-omarchy plugin add https://github.com/Zeus-Deus/voxtype-omarchy-plugin.git --enable --yes
-```
+It is a native shell plugin built against the official Quattro plugin contract. It does not start another Quickshell instance and is not a first-party Omarchy product or an approved marketplace listing.
 
-or from a local checkout: `omarchy plugin add "$PWD" --yes --enable`. The widget lands in the right bar section; move it with `omarchy bar move`. Settings (poll interval, right-click records) live under Setup › Plugins.
+The panel is a thin QML front end over the installed **voxtype-tui** Python package. Every write goes through `voxtype_tui` (validated, atomic, comment-preserving saves; sidecar reconcile; sync bundle), so the panel and the TUI never disagree.
+
+Installing from a local checkout instead: `omarchy plugin add "$PWD" --yes --enable`.
 
 ## Security
 
