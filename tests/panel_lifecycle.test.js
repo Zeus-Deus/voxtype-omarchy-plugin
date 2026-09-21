@@ -101,7 +101,7 @@ function panelHarness(overrides) {
     picked(p) { root.service.picking = false; on('onPicked')(p); },
     pickCanceled() { root.service.picking = false; on('onPickCanceled')(); },
     pickFailed() { root.service.picking = false; on('onPickFailed')(); },
-    setInside(code) { vm.runInContext(code, context); },
+    setInside(code) { return vm.runInContext(code, context); },
     flush() { while (deferred.length) deferred.shift()(); },
   };
 }
@@ -205,8 +205,45 @@ test('redacted import rows never reach a value formatter, in the card or the con
   assert.match(h.root.confirmation.message, /output\.post_process\.command: a → rm -rf/);
   assert.doesNotMatch(h.root.confirmation.message, /undefined/);
   assert.equal(h.root.confirmation.confirmText, 'Import anyway');
-  assert.match(panel, /text: "󰀦 " \+ Model\.dangerLine\(modelData, 40, 60\)/);
+  assert.match(panel, /text: \(modelData\.dangerous \? "󰀦 " : \(modelData\.overflow \? "" : "· "\)\) \+ modelData\.text/);
   assert.doesNotMatch(panel, /modelData\.(old|new)\b/);
+});
+
+// ---- F3: the card renders every settings row, not only the dangerous ones -
+
+test('the import card renders every settings_change row, dangerous ones distinguished, inside the scrolling Flickable', () => {
+  const h = panelHarness();
+  const Model = h.root.Model;
+  // The Repeater model expression, taken from the QML rather than re-implemented.
+  const expr = panel.match(/model: root\.importPreview \? (Model\.settingsRows\([^\n]*?)\s*:\s*\[\]/)[1];
+  h.root.importPath = '/tmp/b.json';
+  h.root.importPreview = {format: 'v2', warnings: [], diff: {settings_change: [
+    {path: 'audio.device', old: 'default', new: 'yeti', dangerous: false},
+    {path: 'engine', old: 'whisper', new: 'parakeet', dangerous: true},
+    {path: 'whisper.remote_api_key', dangerous: true, redacted: true, old_set: true, new_set: true},
+  ]}};
+  const rows = JSON.parse(JSON.stringify(h.setInside('(' + expr + ')')));
+  assert.equal(rows.length, 3, 'the non-dangerous row is rendered too, not collapsed into "N settings"');
+  assert.ok(rows.some(r => r.text === 'audio.device: default → yeti'), 'old → new is visible');
+  assert.equal(rows.filter(r => r.dangerous).length, 2);
+  assert.ok(rows.some(r => r.text === 'whisper.remote_api_key will be replaced'));
+  for (const r of rows) assert.doesNotMatch(r.text, /undefined/);
+
+  // No cap-free rendering: a long bridge list ends in one overflow line.
+  const many = [];
+  for (let i = 0; i < 40; i++) many.push({path: 'meeting.hook' + i, old: 'a', new: 'b', dangerous: false});
+  h.root.importPreview = {format: 'v2', warnings: [], diff: {settings_change: many}};
+  const capped = JSON.parse(JSON.stringify(h.setInside('(' + expr + ')')));
+  assert.ok(capped.length <= Model.IMPORT_CARD_ROWS + 1, 'capped at ' + Model.IMPORT_CARD_ROWS + ' rows + overflow');
+  assert.equal(capped[capped.length - 1].overflow, true);
+  assert.match(capped[capped.length - 1].text, /and \d+ more changes/);
+
+  // The card lives inside the panel body Flickable, so a long list scrolls.
+  const bodyStart = panel.indexOf('Flickable {\n                        id: body');
+  assert.notEqual(bodyStart, -1);
+  const cardStart = panel.indexOf('id: importCard');
+  assert.ok(cardStart > bodyStart, 'importCard is nested inside the body Flickable');
+  assert.match(panel, /id: importCard[\s\S]{0,400}implicitHeight: importColumn\.implicitHeight/, 'the card grows with its content');
 });
 
 // ---- F1: accept_dangerous is an acknowledgement, not a constant -----------

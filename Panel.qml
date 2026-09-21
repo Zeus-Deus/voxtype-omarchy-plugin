@@ -1473,13 +1473,20 @@ Panel {
                                         spacing: Style.space(6)
                                         Text { width: parent.width; textFormat: Text.PlainText; elide: Text.ElideMiddle; text: root.importPath.split("/").pop() + (root.importPreview ? "  ·  " + String(root.importPreview.format || "") : ""); color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
                                         Text { width: parent.width; textFormat: Text.PlainText; wrapMode: Text.WordWrap; text: root.importPreview ? Model.diffSummary(root.importPreview.diff) : ""; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+                                        // Every settings row, not just the
+                                        // dangerous ones: the panel must not
+                                        // show less than the TUI it fronts.
+                                        // Dangerous rows keep the warning
+                                        // glyph and the urgent colour.
                                         Repeater {
-                                            model: root.importPreview ? Model.dangerousChanges(root.importPreview.diff) : []
+                                            model: root.importPreview ? Model.settingsRows(root.importPreview.diff, Model.IMPORT_CARD_ROWS) : []
                                             delegate: Text {
                                                 required property var modelData
                                                 width: importColumn.width; textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere
-                                                text: "󰀦 " + Model.dangerLine(modelData, 40, 60)
-                                                color: root.urgent; font.family: root.fontFamily; font.pixelSize: Style.font.caption
+                                                text: (modelData.dangerous ? "󰀦 " : (modelData.overflow ? "" : "· ")) + modelData.text
+                                                color: modelData.dangerous ? root.urgent : root.muted
+                                                font.family: root.fontFamily; font.pixelSize: Style.font.caption
+                                                font.italic: modelData.overflow
                                             }
                                         }
                                         Repeater {

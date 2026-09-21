@@ -403,6 +403,29 @@ function dangerLine(change, oldMax, newMax) {
     return path + ": " + sanitize(change.old, oldMax || 40) + " → " + sanitize(change.new, newMax || 60);
 }
 
+// Every settings row the import would write, in the order the user should
+// read them: dangerous first (so nothing dangerous can fall below the cut),
+// then the rest. Formatting goes through dangerLine, which is the
+// redaction-aware path, so a secret value is never rendered. The list is a
+// bridge response of arbitrary length, so it is capped and the remainder is
+// reported as one overflow line rather than overflowing the card.
+var IMPORT_CARD_ROWS = 12;
+
+function settingsRows(diff, max) {
+    var changes = (diff && diff.settings_change) ? diff.settings_change : [];
+    var lim = max || IMPORT_CARD_ROWS;
+    var ordered = [];
+    var i;
+    for (i = 0; i < changes.length; i++) if (changes[i] && changes[i].dangerous) ordered.push(changes[i]);
+    for (i = 0; i < changes.length; i++) if (changes[i] && !changes[i].dangerous) ordered.push(changes[i]);
+    var out = [];
+    for (i = 0; i < ordered.length && i < lim; i++)
+        out.push({text: dangerLine(ordered[i], 40, 60), dangerous: ordered[i].dangerous === true, overflow: false});
+    var rest = ordered.length - lim;
+    if (rest > 0) out.push({text: "and " + rest + " more change" + (rest === 1 ? "" : "s"), dangerous: false, overflow: true});
+    return out;
+}
+
 // The import confirmation, and with it the ONE thing allowed to set
 // `accept_dangerous` on import.apply. The bridge's own refusal is the second
 // half of the gate, so the panel must never claim an acknowledgement the
