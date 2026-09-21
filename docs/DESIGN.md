@@ -69,7 +69,7 @@ Environment overrides for tests (never set in production): `VOXTYPE_CONFIG`
 | `gpu.status` | — | `{ok, text, backend, gpus:[{vendor,label}], device: "auto"|"nvidia"|"amd"|"intel", dropin_path, error?}` from `voxtype setup gpu --status` + `gpu.read_gpu_device`; on failure `ok:false` with `error` but `device`/`dropin_path` still filled. |
 | `dictionary.preview` | `{text}` | `{ok, input, output, rules:int}` — runs `voxtype_tui.dictionary_engine` over current rules; lets the user test a phrase. |
 | `export.preview` | `{scope:"sync"|"sync+local", include_secrets:bool}` (defaults `"sync"`, `false`) | `{ok, default_path, scope, include_secrets, counts:{vocabulary, replacements, settings, local, secrets, secrets_available}}` — `secrets` is 0 unless `include_secrets`; `secrets_available` is how many secret fields exist on disk. |
-| `import.preview` | `{path, include_local, include_settings}` (both default `false`) | `{ok, format, source, has_local, include_local, warnings:[...], dangerous:[paths], diff:{vocab_add:[], vocab_remove:[] (always empty — import merges, never removes), vocab_unchanged:[], replacements_add:[{from,to}], replacements_change:[{from,old,new}], settings_change:[row]}}`. A `settings_change` row is `{path, old, new, dangerous}` **except** for the secret paths `whisper.remote_api_key`, `output.post_process.command`, `output.pre_output_command`, `output.post_output_command`, which are emitted **redacted** as `{path, dangerous:true, redacted:true, old_set:bool, new_set:bool}` with no `old`/`new` (the panel shows "API key: set → set", never the value). Files larger than `sync.MAX_BUNDLE_BYTES` (1 MB) are refused by `stat()` before any byte is read (`ok:false, error:"file is N bytes; limit …"`). |
+| `import.preview` | `{path, include_local, include_settings}` (both default `false`) | `{ok, format, source, has_local, include_local, warnings:[...], dangerous:[paths], diff:{vocab_add:[], vocab_remove:[] (always empty — import merges, never removes), vocab_unchanged:[], replacements_add:[{from,to}], replacements_change:[{from,old,new}], settings_change:[row]}}`. A `settings_change` row is `{path, old, new, dangerous}` **except** for the secret paths `whisper.remote_api_key`, `output.post_process.command`, `output.pre_output_command`, `output.post_output_command`, which are emitted **redacted** as `{path, dangerous:true, redacted:true, old_set:bool, new_set:bool}` with no `old`/`new` (the panel shows "API key: set → set", never the value). Files larger than `sync.MAX_BUNDLE_BYTES` (1 MB) are refused by `stat()` before any byte is read (`ok:false, error:"file is N bytes; limit …"`); non-regular files (FIFO, character device, directory) are refused outright. `dangerous` is the union of `voxtype_tui.sync.DANGEROUS_PATHS` and the bridge's own `BRIDGE_DANGEROUS_PATHS` (see Security rules) — the plugin owns its list so an upstream gap cannot silently widen the hole. |
 
 ### Write ops
 
@@ -175,10 +175,31 @@ while the panel is open; the bar button polls the state file
   `remote_api_key_set`. Clearing is `settings.unset`.
 - Sudo-needing actions (GPU enable/disable) are handed to the user's
   terminal; the plugin never prompts for a password.
-- Export defaults `include_secrets=false`; import refuses dangerous changes
-  unless explicitly accepted after the preview. Secret rows in the preview
-  (API key, shell-command hooks) are redacted to `old_set`/`new_set` — the
-  bridge never emits their values in any response.
+- Export defaults `include_secrets=false`; import defaults
+  `include_settings=false` and refuses dangerous changes unless explicitly
+  accepted after the preview (`accept_dangerous`, default false; the
+  refusal writes nothing).
+- The dangerous-path set is `voxtype_tui.sync.DANGEROUS_PATHS` **unioned
+  with** the bridge's own `BRIDGE_DANGEROUS_PATHS`, which the plugin owns
+  so an upstream gap cannot silently widen the hole. Beyond upstream's
+  four secret paths + `whisper.remote_endpoint` it covers: the
+  `output.pre_recording_command` hook (RCE, same class as the hooks
+  upstream flags), `engine` and `whisper.mode` (repoint transcription /
+  ship audio off-box), `soniox.api_key`, `cohere.api_key` and
+  `meeting.summary.ollama_url` (remote credentials and destinations),
+  `state_file` (the path the panel reads), `output.file_path` /
+  `output.file_mode` (where every transcription is written, and whether
+  it truncates), and `meeting.enabled` / `meeting.retain_audio` /
+  `meeting.storage_path` (arming long-form capture and keeping the audio).
+- Only `whisper.remote_api_key` is **never** emitted in any response: the
+  snapshot reports `whisper.remote_api_key_set: bool` and nothing else,
+  and `settings.set` refuses to write it. The other three
+  `REDACTED_IMPORT_PATHS` — `output.post_process.command`,
+  `output.pre_output_command`, `output.post_output_command` — are
+  redacted to `old_set`/`new_set` **in import diff rows specifically**,
+  because there the value comes from an untrusted bundle; the user's own
+  values for those settings remain visible in their own `load`/`status`
+  snapshot and stay editable in the Settings section.
 - Destructive actions (delete rule/word/model, import apply) go through
   `ConfirmDialog` defaulting to Cancel.
 - Response bytes from the bridge are capped (2 MB) and parsed strictly.

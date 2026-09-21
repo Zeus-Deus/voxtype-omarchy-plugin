@@ -973,7 +973,71 @@ REDACTED_IMPORT_PATHS = frozenset({
 })
 
 
-def _setting_change_row(change) -> dict[str, Any]:
+# Settings this plugin refuses to import silently, over and above
+# ``voxtype_tui.sync.DANGEROUS_PATHS``. The two sets are UNIONed at every
+# use, so upstream can only ever widen what we flag, never narrow it — a
+# gap added to the dependency cannot silently reopen a hole here.
+#
+# Upstream currently flags only the four SECRET_PATHS plus
+# ``whisper.remote_endpoint``, which leaves these unguarded:
+#
+#   * output.pre_recording_command — arbitrary shell command run by the
+#     daemon when recording starts. Same RCE class as the three hooks
+#     upstream does flag; it simply predates them. Straight code
+#     execution on the next dictation.
+#   * engine, whisper.mode — repoint transcription at a different engine
+#     or at ``remote``, which ships raw audio off the machine.
+#   * whisper.remote_endpoint, soniox.api_key, cohere.api_key,
+#     whisper.remote_api_key — every credential/destination pair for a
+#     remote transcription provider. Only the whisper one is upstream.
+#   * meeting.summary.ollama_url — the URL whole meeting transcripts are
+#     POSTed to for summarisation. Same exfiltration class as
+#     remote_endpoint.
+#   * state_file — the bar button and ``status`` read this path; pointing
+#     it at an attacker-chosen file makes the panel read that file.
+#   * output.file_path / output.file_mode — ``file`` output mode writes
+#     every transcription to this path, and ``overwrite`` truncates it.
+#   * meeting.enabled / meeting.retain_audio / meeting.storage_path —
+#     arm long-form recording and keep the raw audio, in a chosen
+#     directory.
+#
+# Pinned by tests/test_bridge.py::test_bridge_dangerous_paths_superset_of_tui.
+BRIDGE_DANGEROUS_PATHS = frozenset({
+    # Shell commands executed by the daemon (RCE).
+    "output.pre_recording_command",
+    "output.pre_output_command",
+    "output.post_output_command",
+    "output.post_process.command",
+    # Where audio/text goes and who transcribes it (exfiltration).
+    "engine",
+    "whisper.mode",
+    "whisper.remote_endpoint",
+    "whisper.remote_api_key",
+    "soniox.api_key",
+    "cohere.api_key",
+    "meeting.summary.ollama_url",
+    # Files the daemon or the panel reads/writes on the user's behalf.
+    "state_file",
+    "output.file_path",
+    "output.file_mode",
+    "meeting.enabled",
+    "meeting.retain_audio",
+    "meeting.storage_path",
+})
+
+
+def _dangerous_setting_paths() -> frozenset[str]:
+    """Union of upstream's dangerous paths and this plugin's superset.
+
+    Imported lazily so ``status`` never pays for the ``sync`` import.
+    """
+    from voxtype_tui import sync
+
+    return BRIDGE_DANGEROUS_PATHS | {".".join(p) for p in sync.DANGEROUS_PATHS}
+
+
+def _setting_change_row(change, dangerous_paths: frozenset[str]) -> dict[str, Any]:
+    dangerous = bool(change.dangerous) or change.path in dangerous_paths
     if change.path in REDACTED_IMPORT_PATHS:
         return {
             "path": change.path,
@@ -986,11 +1050,12 @@ def _setting_change_row(change) -> dict[str, Any]:
         "path": change.path,
         "old": _plain(change.old),
         "new": _plain(change.new),
-        "dangerous": change.dangerous,
+        "dangerous": dangerous,
     }
 
 
 def _diff_to_json(preview) -> dict[str, Any]:
+    dangerous_paths = _dangerous_setting_paths()
     return {
         "vocab_add": list(preview.vocab.added),
         # Import merges; it never removes local vocabulary.
@@ -1000,8 +1065,15 @@ def _diff_to_json(preview) -> dict[str, Any]:
         "replacements_change": [
             {"from": f, "old": o, "new": n} for f, o, n in preview.replacements.updated
         ],
-        "settings_change": [_setting_change_row(c) for c in preview.settings],
+        "settings_change": [
+            _setting_change_row(c, dangerous_paths) for c in preview.settings
+        ],
     }
+
+
+def _dangerous_from_diff(diff: dict[str, Any]) -> list[str]:
+    """The dangerous paths a rendered diff carries, in row order."""
+    return [c["path"] for c in diff["settings_change"] if c["dangerous"]]
 
 
 def _import_load(args: dict, paths: Paths):
@@ -1063,7 +1135,9 @@ def op_import_preview(args: dict, paths: Paths) -> dict[str, Any]:
         "has_local": bool(bundle.local),
         "include_local": include_local,
         "warnings": warnings,
-        "dangerous": [c["path"] for c in diff["settings_change"] if c["dangerous"]],
+        # Upstream's DANGEROUS_PATHS UNION BRIDGE_DANGEROUS_PATHS — see
+        # _dangerous_setting_paths / _setting_change_row.
+        "dangerous": _dangerous_from_diff(diff),
         "diff": diff,
     }
 
@@ -1312,8 +1386,11 @@ def op_import_apply(args: dict, paths: Paths) -> dict[str, Any]:
     accept_dangerous = bool(args.get("accept_dangerous", False))
     st, bundle, warnings, fmt, include_local, preview = _import_load(args, paths)
     diff = _diff_to_json(preview)
-    dangerous = [c["path"] for c in diff["settings_change"] if c["dangerous"]]
+    # Same union as import.preview, so what the user confirmed in the
+    # preview is exactly what is gated here.
+    dangerous = _dangerous_from_diff(diff)
     if dangerous and not accept_dangerous:
+        # Refuse BEFORE apply_bundle_to_state: nothing is written.
         return {
             "ok": False,
             "error": "dangerous-changes",

