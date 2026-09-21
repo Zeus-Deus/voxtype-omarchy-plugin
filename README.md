@@ -6,6 +6,10 @@ It is a native shell plugin built against the official Quattro plugin contract. 
 
 The panel is a thin QML front end over the installed **voxtype-tui** Python package. Every write goes through `voxtype_tui` (validated, atomic, comment-preserving saves; sidecar reconcile; sync bundle), so the panel and the TUI never disagree.
 
+| Dictate | Models | Settings |
+|---|---|---|
+| ![Dictate section](docs/images/panel-dictate.png) | ![Models section](docs/images/panel-models.png) | ![Settings section](docs/images/panel-settings.png) |
+
 ## What the panel does
 
 - **Bar button** with the live daemon state: idle, recording (accent), transcribing, stopped. Left-click opens the panel, right-click toggles recording, middle-click restarts a stale daemon. The tooltip is the hero line.
