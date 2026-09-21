@@ -14,6 +14,7 @@ import contextlib
 import json
 import os
 import re
+import resource
 import signal
 import subprocess
 import sys
@@ -787,6 +788,37 @@ def test_status_reports_helper_availability(env: Env):
 
 
 @contextlib.contextmanager
+def memory_ceiling(mib: int, what: str):
+    """Hard address-space limit for a block that must never allocate much.
+
+    The bugs these tests pin are *memory bombs*: unbounded reads of
+    /dev/zero, /dev/urandom or a growing file. `deadline` below only
+    catches a block that never returns — an unbounded read returns just
+    fine, after eating every byte of RAM. Running the suite against
+    unfixed code once drove pytest to 39 GiB RSS and got the whole
+    session OOM-killed, so the ceiling is part of the test, not a
+    convenience: a regression must fail this process, not the machine.
+
+    RLIMIT_AS makes the runaway allocation raise MemoryError inside the
+    bridge instead, which `fail()` reports as an ordinary error. The
+    limit is restored on exit so later tests keep the full heap.
+    """
+    soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+    ceiling = mib * 1024 * 1024
+    if hard != resource.RLIM_INFINITY and hard < ceiling:
+        ceiling = hard
+    resource.setrlimit(resource.RLIMIT_AS, (ceiling, hard))
+    try:
+        yield
+    except MemoryError as e:  # pragma: no cover - only on a regression
+        raise AssertionError(
+            f"{what} allocated past {mib} MiB; the read is not bounded"
+        ) from e
+    finally:
+        resource.setrlimit(resource.RLIMIT_AS, (soft, hard))
+
+
+@contextlib.contextmanager
 def deadline(seconds: float, what: str):
     """Hard wall-clock limit for a block that must never block.
 
@@ -863,7 +895,11 @@ def test_read_state_word_rejects_non_regular_files(tmp_path: Path):
 
     dev = Path("/dev/zero")
     if dev.exists():
-        assert bridge._read_state_word(dev) is None
+        # Unfixed, this read is unbounded: cap the heap so a regression
+        # fails the test instead of OOM-killing the session.
+        with memory_ceiling(512, "_read_state_word on /dev/zero"):
+            with deadline(20, "_read_state_word on /dev/zero"):
+                assert bridge._read_state_word(dev) is None
 
 
 def test_read_state_word_is_size_capped(tmp_path: Path):
@@ -1450,6 +1486,80 @@ def test_import_preview_refuses_oversize_file_without_reading_it(env: Env, monke
     assert "limit" in res["error"] and str(sync.MAX_BUNDLE_BYTES) in res["error"]
     res = env.fail("import.apply", path=str(big), accept_dangerous=True)
     assert "limit" in res["error"]
+
+
+def test_import_refuses_non_regular_files(env: Env):
+    """F5 regression: st_size is 0 for character devices and procfs, so
+    the size gate waved them through and read_bytes() then allocated
+    until MemoryError. The audit confirmed /dev/zero and /dev/urandom.
+    """
+    for candidate in ("/dev/zero", "/dev/urandom"):
+        dev = Path(candidate)
+        if not dev.exists():
+            continue
+        assert dev.stat().st_size == 0  # why the size gate alone was useless
+        with memory_ceiling(512, f"import.preview on {candidate}"):
+            with deadline(20, f"import.preview on {candidate}"):
+                res = env.fail("import.preview", path=candidate)
+        assert "regular file" in res["error"]
+        with memory_ceiling(512, f"import.apply on {candidate}"):
+            with deadline(20, f"import.apply on {candidate}"):
+                res = env.fail("import.apply", path=candidate, accept_dangerous=True)
+        assert "regular file" in res["error"]
+
+
+def test_import_refuses_a_fifo_without_hanging(env: Env):
+    """A FIFO also stats at size 0, and reading it blocks forever."""
+    fifo = env.root / "bundle.fifo"
+    os.mkfifo(fifo)
+    with deadline(20, "import.preview on a FIFO"):
+        res = env.fail("import.preview", path=str(fifo))
+    assert "regular file" in res["error"]
+    with deadline(20, "import.apply on a FIFO"):
+        res = env.fail("import.apply", path=str(fifo), accept_dangerous=True)
+    assert "regular file" in res["error"]
+
+
+def test_import_refuses_a_directory(env: Env):
+    d = env.root / "adir"
+    d.mkdir()
+    assert env.fail("import.preview", path=str(d))["error"]
+
+
+def test_import_read_is_bounded_not_just_stat_gated(env: Env, monkeypatch):
+    """The read itself is capped, not just the pre-read stat.
+
+    st_size is only a hint — it is 0 for devices and stale for a file
+    that grows after the stat. Here stat reports a small size for a file
+    that is actually 3 MB: the old code trusted it and pulled the whole
+    thing in with read_bytes(), the fixed code reads at most the cap + 1
+    byte and refuses.
+    """
+    from voxtype_tui import sync
+
+    p = env.root / "liar.json"
+    p.write_bytes(b"{" + b" " * (3 * sync.MAX_BUNDLE_BYTES))
+
+    real_stat = Path.stat
+
+    class _SmallStat:
+        def __init__(self, st):
+            self.st_mode = st.st_mode
+            self.st_size = 10
+
+    def lying_stat(self, *a, **k):
+        st = real_stat(self, *a, **k)
+        return _SmallStat(st) if self == p else st
+
+    def no_read_bytes(self, *a, **k):
+        raise AssertionError(f"unbounded read_bytes() on {self}")
+
+    monkeypatch.setattr(Path, "stat", lying_stat)
+    monkeypatch.setattr(Path, "read_bytes", no_read_bytes)
+
+    with memory_ceiling(512, "import.preview on a file that lies about its size"):
+        res = env.fail("import.preview", path=str(p))
+    assert str(sync.MAX_BUNDLE_BYTES) in res["error"]
 
 
 def test_import_apply_refuses_dangerous_unless_accepted(env: Env):

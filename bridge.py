@@ -1136,19 +1136,38 @@ def _import_load(args: dict, paths: Paths):
     # the user's configuration. The panel always sends it explicitly.
     include_settings = bool(args.get("include_settings", False))
     path = Path(raw_path).expanduser()
-    # Size gate BEFORE any read: a multi-GB "bundle" must never be pulled
-    # into memory just to be rejected by load_bundle_file's own cap.
+    # Type gate BEFORE the size gate: st_size is 0 for character devices
+    # and procfs entries, so a size-only check happily waves through
+    # /dev/zero and /dev/urandom, and read_bytes() then allocates until
+    # MemoryError. Only a regular file can be a bundle.
     try:
-        size = path.stat().st_size
+        st = path.stat()
     except OSError as e:
         raise BridgeError(f"could not read file: {e}") from e
-    if size > sync.MAX_BUNDLE_BYTES:
+    if not stat.S_ISREG(st.st_mode):
+        raise BridgeError("not a regular file")
+    # Size gate BEFORE any read: a multi-GB "bundle" must never be pulled
+    # into memory just to be rejected by load_bundle_file's own cap.
+    if st.st_size > sync.MAX_BUNDLE_BYTES:
         raise BridgeError(
-            f"file is {size} bytes; limit {sync.MAX_BUNDLE_BYTES}"
+            f"file is {st.st_size} bytes; limit {sync.MAX_BUNDLE_BYTES}"
+        )
+    # Bounded read even so: st_size is a snapshot, and the file can grow
+    # between the stat and the read. Reading the cap + 1 byte is the only
+    # way to know the content is genuinely within the limit.
+    try:
+        with path.open("rb") as fh:
+            raw = fh.read(sync.MAX_BUNDLE_BYTES + 1)
+    except OSError as e:
+        raise BridgeError(f"could not read file: {e}") from e
+    if len(raw) > sync.MAX_BUNDLE_BYTES:
+        raise BridgeError(
+            f"file is over {sync.MAX_BUNDLE_BYTES} bytes; limit "
+            f"{sync.MAX_BUNDLE_BYTES}"
         )
     try:
-        parsed = json.loads(path.read_bytes())
-    except (OSError, ValueError):
+        parsed = json.loads(raw)
+    except ValueError:
         parsed = None
     fmt = sync.detect_format(parsed) if parsed is not None else sync.UNKNOWN_FORMAT
     try:
