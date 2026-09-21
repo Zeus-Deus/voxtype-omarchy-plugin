@@ -1419,6 +1419,38 @@ def op_gpu_set_device(args: dict, paths: Paths) -> dict[str, Any]:
     }
 
 
+def _export_target(raw_path: str) -> Path:
+    """Resolve and contain the user-typed export destination.
+
+    The panel sends whatever the user typed into the export field, so
+    this is the one op that takes a filesystem path and writes to it.
+    Unconstrained it will happily write anywhere the user can, including
+    over a dotfile via a `../..` traversal. Containing it under $HOME
+    keeps a bar widget from writing outside the user's own tree, and the
+    .json suffix stops a typo from clobbering an unrelated file.
+
+    Containment is judged on the resolved PARENT directory, not on the
+    resolved file: voxtype_tui writes with mkstemp + os.replace, which
+    replaces a symlink sitting at the destination rather than following
+    it, so the bytes land in the parent directory regardless of where a
+    link points. Resolving the file instead would both mis-locate the
+    write and read the suffix off the link's target.
+    """
+    target = Path(raw_path).expanduser()
+    if target.name == "":
+        raise BridgeError("export path must name a file")
+    try:
+        parent = target.parent.resolve()
+        home = Path.home().resolve()
+    except OSError as e:
+        raise BridgeError(f"could not resolve export path: {e}") from e
+    if parent != home and home not in parent.parents:
+        raise BridgeError("export path must be inside your home directory")
+    if not target.name.lower().endswith(".json"):
+        raise BridgeError("export path must end in .json")
+    return parent / target.name
+
+
 def op_export_write(args: dict, paths: Paths) -> dict[str, Any]:
     from voxtype_tui import sync
 
@@ -1426,12 +1458,13 @@ def op_export_write(args: dict, paths: Paths) -> dict[str, Any]:
     raw_path = args.get("path") or str(sync.default_export_path())
     if not isinstance(raw_path, str) or not raw_path.strip():
         raise BridgeError("'path' must be a non-empty string")
+    target = _export_target(raw_path)
     st = _load_state(paths)
     try:
         bundle = sync.build_export_bundle(
             st.doc, st.sc, scope=scope, redact_secrets=not include_secrets,
         )
-        written = sync.write_export_bundle(bundle, Path(raw_path))
+        written = sync.write_export_bundle(bundle, target)
     except (OSError, sync.BundleError, ValueError) as e:
         raise BridgeError(str(e)) from e
     return {

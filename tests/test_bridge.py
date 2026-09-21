@@ -1380,8 +1380,8 @@ def test_export_preview(env: Env):
 
 def test_export_write_redacts_secrets_by_default(env: Env):
     _seed(env)
-    target = env.root / "out" / "bundle.json"
-    target.parent.mkdir()
+    target = env.home / "out" / "bundle.json"
+    target.parent.mkdir(parents=True)
     res = env.ok("export.write", path=str(target), scope="sync")
     assert res["path"] == str(target) and res["bytes"] == target.stat().st_size
     bundle = json.loads(target.read_text())
@@ -1393,7 +1393,7 @@ def test_export_write_redacts_secrets_by_default(env: Env):
 
 def test_export_write_with_secrets_and_local(env: Env):
     _seed(env)
-    target = env.root / "full.json"
+    target = env.home / "full.json"
     env.ok("export.write", path=str(target), scope="sync+local", include_secrets=True)
     bundle = json.loads(target.read_text())
     assert bundle["secrets"]["whisper"]["remote_api_key"] == "sk-SECRET"
@@ -1404,7 +1404,48 @@ def test_export_write_default_path_and_bad_parent(env: Env):
     res = env.ok("export.write")
     assert res["path"].startswith(str(env.home / "Downloads"))
     assert Path(res["path"]).exists()
-    env.fail("export.write", path=str(env.root / "no" / "such" / "dir" / "x.json"))
+    env.fail("export.write", path=str(env.home / "no" / "such" / "dir" / "x.json"))
+
+
+def test_export_write_refuses_outside_home(env: Env):
+    """F6 regression: the panel sends a user-typed path straight through.
+
+    Unconstrained, a bar widget could write a JSON file anywhere the
+    user can — including over a dotfile via a traversal string.
+    """
+    _seed(env)
+    outside = env.root / "escaped.json"
+    res = env.fail("export.write", path=str(outside))
+    assert "home directory" in res["error"]
+    assert not outside.exists()
+
+    traversal = env.home / ".." / "traversed.json"
+    res = env.fail("export.write", path=str(traversal))
+    assert "home directory" in res["error"]
+    assert not (env.root / "traversed.json").exists()
+
+
+def test_export_write_requires_a_json_suffix(env: Env):
+    _seed(env)
+    target = env.home / "bundle.txt"
+    res = env.fail("export.write", path=str(target))
+    assert ".json" in res["error"]
+    assert not target.exists()
+
+
+def test_export_write_replaces_a_symlink_instead_of_following_it(env: Env):
+    """The atomic mkstemp+os.replace write must not write THROUGH a link."""
+    _seed(env)
+    secret = env.home / "unrelated.txt"
+    secret.write_text("do not touch")
+    link = env.home / "bundle.json"
+    link.symlink_to(secret)
+
+    env.ok("export.write", path=str(link), scope="sync")
+
+    assert secret.read_text() == "do not touch"
+    assert not link.is_symlink()
+    assert json.loads(link.read_text())["sync"]["vocabulary"][0]["phrase"] == "Omarchy"
 
 
 def _bundle(env: Env, *, settings: dict | None = None, local: dict | None = None,
