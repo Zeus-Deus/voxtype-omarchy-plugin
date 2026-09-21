@@ -2394,3 +2394,20 @@ def test_tui_lock_holder_reports_holder_and_absence(env: Env):
     finally:
         os.close(fd2)
 
+
+
+def test_qml_deadline_constant_matches_service_qml():
+    """The two halves of the deadline contract must not drift apart.
+
+    QML_DAEMON_RESTART_DEADLINE only means anything if it is what
+    Service.qml actually arms, so read it back out of the QML instead of
+    trusting the comment next to it. The bridge and the panel are
+    developed in separate files and a green suite on either side alone
+    would not catch a mismatch.
+    """
+    service = (REPO / "Service.qml").read_text()
+    m = re.search(r'payload\.op === "daemon\.restart" \? (\d+) : (\d+)', service)
+    assert m, "could not find the daemon.restart deadline in Service.qml"
+    restart_ms, default_ms = int(m.group(1)), int(m.group(2))
+    assert restart_ms == bridge.QML_DAEMON_RESTART_DEADLINE * 1000
+    assert restart_ms > default_ms
