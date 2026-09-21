@@ -49,6 +49,11 @@ Panel {
     property string exportScope: "sync"
     property bool exportSecrets: false
     property bool importLocal: false
+    // voxtype-tui's own import screen ships this OFF: importing an old bundle
+    // to restore vocabulary must not silently overwrite whisper.model and the
+    // rest of the settings block. The bridge defaults it to false too; the
+    // panel still sends it explicitly on both ops.
+    property bool importSettings: false
 
     readonly property var vocabulary: snapshot.vocabulary || []
     readonly property var replacements: snapshot.replacements || []
@@ -341,7 +346,7 @@ Panel {
             // stays live rather than being pre-waived on every import.
             var accept = importAcceptDangerous;
             importAcceptDangerous = false;
-            service.run({op: "import.apply", path: importPath, include_local: importLocal, accept_dangerous: accept});
+            service.run({op: "import.apply", path: importPath, include_local: importLocal, include_settings: importSettings, accept_dangerous: accept});
             return;
         }
         if (action === "") return;
@@ -432,6 +437,22 @@ Panel {
         body.contentY = Math.min(maxY, Math.max(0, top - Style.space(12)));
     }
     function refreshExportPreview() { if (exportOpen) service.run({op: "export.preview", scope: exportScope, include_secrets: exportSecrets}) }
+    // Both import ops carry include_local / include_settings explicitly, so a
+    // permissive bridge default can never widen an import behind the user's
+    // back, and the diff on screen is the diff that will be applied.
+    function requestImportPreview() {
+        if (importPath === "" || locked) return;
+        service.cancelQueued("import.preview");
+        service.run({op: "import.preview", path: importPath, include_local: importLocal, include_settings: importSettings});
+    }
+    // A toggle changes what the bundle would write, so the reviewed diff and
+    // any acknowledgement built from it are both invalidated.
+    function setImportSettings(value) {
+        if (importSettings === value) return;
+        importSettings = value;
+        importAcceptDangerous = false;
+        requestImportPreview();
+    }
     function writeExport() {
         var path = exportPath.text.trim();
         if (path === "" || locked) return;
@@ -441,6 +462,10 @@ Panel {
         if (locked || service.picking || !pickerAvailable) return;
         attaching = true;
         exportOpen = false;
+        // Every import starts from the safe default; a toggle left on from a
+        // previous bundle must not carry into the next one.
+        importSettings = false;
+        importAcceptDangerous = false;
         controller.hide();
         if (!service.pick()) { attaching = false; controller.show(); }
     }
@@ -588,7 +613,7 @@ Panel {
         onPicked: function(path) {
             root.resumeAfterPick();
             root.importPath = path;
-            service.run({op: "import.preview", path: path, include_local: root.importLocal});
+            root.requestImportPreview();
         }
         onPickCanceled: root.resumeAfterPick()
         onCopyFinished: function(ok) { if (!ok) { root.notice = ""; root.errorText = "Could not copy: is wl-copy installed?" } }
@@ -1465,6 +1490,17 @@ Panel {
                                                 text: "• " + Model.sanitize(modelData, 120)
                                                 color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption
                                             }
+                                        }
+                                        Toggle {
+                                            id: includeSettingsToggle
+                                            width: parent.width
+                                            label: "Include settings"
+                                            description: "Off by default: the bundle's vocabulary and rules are imported without overwriting your engine, model and other settings."
+                                            checked: root.importSettings
+                                            foreground: root.foreground; fontFamily: root.fontFamily
+                                            titleSize: Style.font.body
+                                            enabled: !service.mutating
+                                            onClicked: root.setImportSettings(!root.importSettings)
                                         }
                                         Row {
                                             spacing: Style.space(8)

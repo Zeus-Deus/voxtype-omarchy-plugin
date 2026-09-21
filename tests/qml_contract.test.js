@@ -389,7 +389,7 @@ test('closeForPopoutSwitch is overridden and clears the attach flag so a late ch
   assert.match(panel, /function closeForPopoutSwitch\(\) \{[\s\S]*?popoutSwitchClosing = true;[\s\S]*?attaching = false;[\s\S]*?service\.cancelPick\(\);[\s\S]*?controller\.hide\(\);[\s\S]*?Qt\.callLater\(function\(\) \{ root\.popoutSwitchClosing = false \}\)/);
   assert.match(panel, /function resumeAfterPick\(\) \{[\s\S]*?if \(popoutTakenElsewhere\(\)\) return;[\s\S]*?controller\.show\(\)/);
   assert.match(panel, /bar\.activePopout !== owner/);
-  assert.match(panel, /function beginImport\(\)[\s\S]{0,300}attaching = true;[\s\S]{0,120}controller\.hide\(\);[\s\S]{0,80}service\.pick\(\)/);
+  assert.match(panel, /function beginImport\(\)[\s\S]{0,300}attaching = true;[\s\S]{0,400}controller\.hide\(\);[\s\S]{0,80}service\.pick\(\)/);
   assert.match(panel, /function launchGpu\(enable\)[\s\S]{0,400}controller\.hide\(\);[\s\S]{0,160}service\.launchGpuSetup\(enable\)/);
   assert.match(widget, /function closeForPopoutSwitch\(\) \{ if \(panelLoader\.item\) panelLoader\.item\.closeForPopoutSwitch\(\) \}/);
 });

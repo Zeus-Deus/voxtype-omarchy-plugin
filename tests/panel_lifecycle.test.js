@@ -56,7 +56,7 @@ function panelHarness(overrides) {
     importAcceptDangerous: false,
     section: 'dictate', cursorKey: '', cursorIndex: -1, cursorActive: false, focusedEditor: null, openPopups: 0,
     confirmAction: '', confirmPayload: null, dictCategory: 'Replacement', exportOpen: false, exportScope: 'sync',
-    exportSecrets: false, importLocal: false, hostWidget: {id: 'widget'}, bar: {activePopout: null},
+    exportSecrets: false, importLocal: false, importSettings: false, hostWidget: {id: 'widget'}, bar: {activePopout: null},
     anchorItem: null,
     controller: {open: true, show() { this.open = true; }, hide() { this.open = false; }},
     keyCatcher: field(), testField: field(), vocabSearch: field(), dictSearch: field(), dictFrom: field(), dictTo: field(), exportPath: field(),
@@ -281,6 +281,68 @@ test('cancelling the import confirmation drops the acknowledgement', () => {
   h.root.closeForPopoutSwitch();
   assert.equal(h.root.importAcceptDangerous, false);
   assert.match(panel, /onCanceled: \{[^\n]*root\.importAcceptDangerous = false/, 'Cancel clears it too');
+});
+
+// ---- F2: include_settings is explicit on both ops and defaults OFF -------
+
+test('both import ops send include_settings explicitly, defaulting OFF like voxtype-tui', () => {
+  const h = panelHarness();
+  h.root.section = 'models';
+  h.root.beginImport();
+  h.picked('/tmp/bundle.json');
+  h.flush();
+  const preview = h.requests.find(r => r.op === 'import.preview');
+  assert.ok(preview, 'preview requested');
+  assert.equal('include_settings' in preview, true, 'never left to the bridge default');
+  assert.equal(preview.include_settings, false, 'voxtype-tui ships this OFF');
+  assert.equal(preview.include_local, false);
+
+  h.root.importPreview = {format: 'v2', warnings: [], diff: {settings_change: []}};
+  h.root.askImport();
+  h.root.applyConfirmed();
+  const apply = h.requests.pop();
+  assert.equal(apply.op, 'import.apply');
+  assert.equal('include_settings' in apply, true);
+  assert.equal(apply.include_settings, false);
+});
+
+test('toggling Include settings re-previews with the new flag so the reviewed diff is the applied diff', () => {
+  const h = panelHarness();
+  h.root.importPath = '/tmp/bundle.json';
+  h.root.importPreview = {format: 'v2', warnings: [], diff: {settings_change: [{path: 'engine', old: 'a', new: 'b', dangerous: true}]}};
+  h.root.askImport();
+  assert.equal(h.root.importAcceptDangerous, true);
+  h.requests.length = 0;
+
+  h.root.setImportSettings(true);
+  assert.equal(h.root.importSettings, true);
+  assert.equal(h.root.importAcceptDangerous, false, 'the old acknowledgement no longer describes the diff');
+  const again = h.requests.pop();
+  assert.equal(again.op, 'import.preview');
+  assert.equal(again.include_settings, true, 'the preview follows the toggle');
+  assert.equal(again.path, '/tmp/bundle.json');
+
+  h.root.setImportSettings(true);
+  assert.equal(h.requests.length, 0, 'no redundant preview when the value did not change');
+  h.root.setImportSettings(false);
+  assert.equal(h.requests.pop().include_settings, false);
+});
+
+test('a fresh import always starts with settings excluded, whatever the last bundle used', () => {
+  const h = panelHarness();
+  h.root.section = 'models';
+  h.root.importSettings = true;
+  h.root.importAcceptDangerous = true;
+  h.root.beginImport();
+  assert.equal(h.root.importSettings, false, 'the safe default is re-armed per bundle');
+  assert.equal(h.root.importAcceptDangerous, false);
+});
+
+test('the Include settings control is the shipped kit Toggle, not hand-rolled chrome', () => {
+  assert.match(panel, /Toggle \{\n\s*id: includeSettingsToggle[\s\S]{0,400}label: "Include settings"/);
+  assert.match(panel, /checked: root\.importSettings/);
+  assert.match(panel, /onClicked: root\.setImportSettings\(!root\.importSettings\)/);
+  assert.match(panel, /property bool importSettings: false/, 'default OFF, mirroring importLocal');
 });
 
 test('a missing zenity reopens the panel with an install hint instead of a silent cancel', () => {
