@@ -1933,6 +1933,46 @@ def test_design_documents_restart_timeout():
     assert "timeout:18" in design or "timeout: 18" in design
 
 
+def test_daemon_restart_worst_case_fits_the_qml_deadline():
+    """F7 regression: the op's worst case must stay inside QML's deadline.
+
+    daemon.restart runs `systemctl --user restart voxtype` (blocking, up
+    to SYSTEMCTL_RESTART_TIMEOUT) and only THEN waits for readiness, so
+    the worst case is the sum. Service.qml arms one deadline for the
+    whole round trip and SIGKILLs the bridge when it expires — with the
+    old 30 s deadline against a 15 + 18 s worst case, a restart that had
+    actually succeeded was reported to the user as a timeout.
+
+    This is the bridge half of a contract whose other half is in
+    Service.qml; the QML suite pins the same numbers from that side.
+    """
+    worst_case = bridge.SYSTEMCTL_RESTART_TIMEOUT + bridge.DAEMON_RESTART_READY_TIMEOUT
+    assert worst_case < bridge.QML_DAEMON_RESTART_DEADLINE, (
+        f"daemon.restart can take {worst_case}s but QML gives up after "
+        f"{bridge.QML_DAEMON_RESTART_DEADLINE}s"
+    )
+
+
+def test_systemctl_restart_timeout_matches_upstream():
+    """SYSTEMCTL_RESTART_TIMEOUT mirrors a number owned by voxtype_tui.
+
+    If upstream raises its subprocess timeout, our worst-case arithmetic
+    silently understates the real budget, so read it back from the
+    installed package rather than hard-coding a guess.
+    """
+    from voxtype_tui import voxtype_cli
+
+    source = Path(voxtype_cli.__file__).read_text()
+    m = re.search(
+        r'"restart",\s*"voxtype"\s*\][^)]*?timeout=(\d+(?:\.\d+)?)',
+        source,
+        re.S,
+    )
+    if m is None:
+        pytest.skip("upstream restart_daemon no longer matches the known shape")
+    assert float(m.group(1)) <= bridge.SYSTEMCTL_RESTART_TIMEOUT
+
+
 def test_daemon_restart_without_systemctl(env: Env):
     env.remove_fake("systemctl")
     res = env.call("daemon.restart")

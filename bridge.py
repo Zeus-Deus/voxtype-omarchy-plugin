@@ -1526,14 +1526,27 @@ def _config_dict(paths: Paths) -> dict[str, Any]:
 DAEMON_RESTART_READY_TIMEOUT = 18.0
 DAEMON_RESTART_READY_TIMEOUT_MAX = 60.0
 
+# What `voxtype_cli.restart_daemon()` can itself burn before the ready
+# wait even starts: it shells out to `systemctl --user restart voxtype`
+# with timeout=15 (voxtype_tui/voxtype_cli.py). Named here so the panel's
+# deadline can be checked against the real worst case instead of two
+# magic numbers drifting apart in separate files.
+SYSTEMCTL_RESTART_TIMEOUT = 15.0
+
+# The panel arms this for daemon.restart (Service.qml). It must exceed
+# SYSTEMCTL_RESTART_TIMEOUT + DAEMON_RESTART_READY_TIMEOUT, or QML kills
+# a bridge that was about to report success; pinned by a test below.
+QML_DAEMON_RESTART_DEADLINE = 40.0
+
 
 def _ready_timeout(args: dict) -> float:
     """``timeout`` arg (seconds) for the post-restart ready wait.
 
-    ``voxtype_cli.restart_daemon`` itself blocks for up to 15 s, so the
-    default keeps the worst case (15 + 18 s) inside a 30 s QML deadline
-    only when the restart returns quickly; QML sends ``timeout: 18`` and
-    treats a deadline as "restarted, readiness unknown".
+    ``voxtype_cli.restart_daemon`` blocks for up to
+    ``SYSTEMCTL_RESTART_TIMEOUT`` before this wait begins, so the true
+    worst case for the op is that plus this value. The panel's deadline
+    (``QML_DAEMON_RESTART_DEADLINE``) is sized to cover the sum; see
+    ``test_daemon_restart_worst_case_fits_the_qml_deadline``.
     """
     val = args.get("timeout", DAEMON_RESTART_READY_TIMEOUT)
     if isinstance(val, bool) or not isinstance(val, (int, float)):
