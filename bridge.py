@@ -56,6 +56,16 @@ MAX_REQUEST_BYTES = 1_000_000
 # of a response it would drop on the floor.
 MAX_RESPONSE_BYTES = 2_000_000
 
+# Cap for a single relayed `LOG` line from the download child. The panel
+# keeps only the last few lines of the tail, so anything longer than this
+# is UI noise at best; the control-character class is stripped alongside
+# because that text goes straight into a rendered row.
+MAX_DOWNLOAD_LOG_CHARS = 200
+_LOG_CONTROL_RE = re.compile(
+    r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u200e\u200f\u202a-\u202e\u2066-\u2069"
+    r"\u2028\u2029]"
+)
+
 # ---------------------------------------------------------------------------
 # voxtype_tui import guard
 # ---------------------------------------------------------------------------
@@ -1696,6 +1706,20 @@ def run_download(engine: str, name: str, out=None) -> int:
     """
     out = out or sys.stdout
 
+    # Every LOG line here is the CHILD's stdout, i.e. output from a
+    # binary this plugin does not control, relayed into a panel that
+    # renders it. Cap the length and drop control characters before it
+    # leaves this process so a future (or tampered-with) voxtype build
+    # cannot push escape sequences or a wall of text into the UI. The
+    # QML side sanitizes again on the way in; this is the other half.
+    def emit_log(text: str) -> None:
+        clean = _LOG_CONTROL_RE.sub("", text).strip()
+        if not clean:
+            return
+        if len(clean) > MAX_DOWNLOAD_LOG_CHARS:
+            clean = clean[: MAX_DOWNLOAD_LOG_CHARS - 1] + "…"
+        emit("LOG " + clean)
+
     def emit(line: str) -> None:
         out.write(line + "\n")
         out.flush()
@@ -1716,6 +1740,11 @@ def run_download(engine: str, name: str, out=None) -> int:
         emit("FAILED voxtype binary not found")
         return 1
 
+    # `engine` is validated against MODEL_CATALOG above but is deliberately
+    # NOT part of argv: `voxtype setup --download` infers the engine from
+    # the model name itself. The check stays because it rejects a bogus
+    # engine before we spawn anything, and because the cancel path below
+    # needs it to locate the partial artifact.
     argv = ["voxtype", "setup", "--download", "--model", name]
     emit("LOG $ " + " ".join(argv))
     try:
@@ -1757,14 +1786,14 @@ def run_download(engine: str, name: str, out=None) -> int:
                 last_pct = pct
                 emit(f"PROGRESS {pct:g}")
             if is_newline and text.strip():
-                emit(f"LOG {text.strip()}")
+                emit_log(text)
     if buffer:
         text = models.strip_ansi(buffer.decode(errors="replace"))
         pct = models.parse_percent(text)
         if pct is not None and pct != last_pct:
             emit(f"PROGRESS {pct:g}")
         if text.strip():
-            emit(f"LOG {text.strip()}")
+            emit_log(text)
 
     try:
         code = proc.wait(timeout=3.0)

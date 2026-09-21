@@ -123,6 +123,14 @@ if a[:1] == ["setup"]:
             sys.stdout.write("curl: (22) The requested URL returned error: 404\n")
             sys.stdout.flush()
             sys.exit(1)
+        if name == "hostile":
+            # A child that tries to push control characters, a bidi
+            # override and a wall of text into the panel's log tail.
+            sys.stdout.write(
+                "start\u202egnidaolnwod\u0007 " + ("A" * 4000) + "\n"
+            )
+            sys.stdout.flush()
+            sys.exit(1)
         for pct in ("12.5", "50.0", "87.5"):
             sys.stdout.write(f"\r  {pct}%   1.2M/s")
             sys.stdout.flush()
@@ -2092,6 +2100,38 @@ def test_download_rejects_bad_arguments(env: Env):
     r = env.run_cli(None, "--download", "whisper")
     assert r.returncode == 1 and r.stdout.startswith("FAILED usage")
     assert env.voxtype_calls() == []
+
+
+def test_download_log_lines_are_capped_and_stripped(env: Env):
+    """F8 regression: LOG relays the child's stdout into a rendered row.
+
+    voxtype is a separate binary; whatever it prints during a download
+    reaches the panel's log tail. A verbose or tampered-with build must
+    not be able to push control characters, a bidi override or a wall of
+    text through that channel.
+    """
+    r = env.run_cli(None, "--download", "whisper", "hostile")
+    assert r.returncode == 1
+    logs = [l[len("LOG "):] for l in r.stdout.splitlines() if l.startswith("LOG ")]
+    assert logs, r.stdout
+    for body in logs:
+        assert len(body) <= bridge.MAX_DOWNLOAD_LOG_CHARS, len(body)
+        assert "\u202e" not in body
+        assert "\u0007" not in body
+    # The line survived, it was just bounded and cleaned.
+    assert any(body.startswith("start") for body in logs), logs
+
+
+def test_log_control_filter_drops_the_whole_class():
+    """The stripped set matches the QML sanitizer's, minus line breaks.
+
+    A LOG line is one row, so \\n and \\r are flattened by the .strip()
+    and the split; the invisible formatters are what must never survive.
+    """
+    for ch in ("\u0000", "\u0007", "\u001b", "\u007f", "\u200e", "\u202e",
+               "\u2066", "\u2069", "\u2028", "\u2029"):
+        assert bridge._LOG_CONTROL_RE.sub("", f"a{ch}b") == "ab", repr(ch)
+    assert bridge._LOG_CONTROL_RE.sub("", "plain text") == "plain text"
 
 
 def test_download_without_binary(env: Env):
