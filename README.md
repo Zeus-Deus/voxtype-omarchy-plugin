@@ -123,7 +123,7 @@ omarchy plugin validate .
 omarchy-restart-shell && qs log -p /usr/share/omarchy/shell --tail 60
 ```
 
-`docs/DESIGN.md` is the specification, including the bridge protocol. `AGENTS.md` records the conventions and traps.
+`docs/DESIGN.md` is the specification, including the bridge protocol. `docs/DEVELOPMENT.md` records the conventions and traps.
 
 ## License
 

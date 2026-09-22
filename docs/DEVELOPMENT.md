@@ -1,4 +1,8 @@
-# Voxtype for Omarchy — Agent Guide
+# Voxtype for Omarchy — Development Notes
+
+Conventions, invariants and traps for anyone working on this plugin's source.
+This is reference documentation for contributors; it is not a runtime component
+and nothing here is executed by the plugin.
 
 ## Architecture
 

@@ -24,7 +24,7 @@ VoxtypeIcon.qml      glyph drawn natively
 Model.js             pure helpers, no Qt imports (Node-testable)
 bridge.py            stdin JSON request -> stdout JSON response; imports voxtype_tui
 tests/               node --test tests/*.test.js ; python -m pytest tests/
-AGENTS.md README.md LICENSE
+docs/DEVELOPMENT.md README.md LICENSE
 ```
 
 ## Dependency / states the UI must design for
