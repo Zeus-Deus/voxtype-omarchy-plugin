@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.zeus-deus.voxtype",
   "name": "Voxtype",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": "Zeus-Deus",
   "license": "MIT",
   "description": "Manage Voxtype voice-to-text from the bar: record, restart, vocabulary, dictionary rules, settings, models and backups, all through voxtype-tui.",

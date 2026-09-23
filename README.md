@@ -18,7 +18,7 @@ omarchy plugin add https://github.com/Zeus-Deus/voxtype-omarchy-plugin.git --ena
 
 The widget lands in the right bar section; move it with `omarchy bar move`. Plugin settings (poll interval, right-click records) live under Setup › Plugins.
 
-You need Voxtype itself and the `voxtype-tui` package (AUR: `voxtype-tui`) installed — see [Dependencies](#dependencies). Nothing is downloaded or built at install time.
+You need Voxtype itself and the `voxtype-tui` package (AUR: `voxtype-tui`) installed — see [Dependencies](#dependencies). If either is missing, the panel says so and offers an **Install** button that opens Omarchy's terminal and asks before installing anything. Nothing is downloaded or built when the plugin itself is installed.
 
 ## What the panel does
 
@@ -36,9 +36,9 @@ You need Voxtype itself and the `voxtype-tui` package (AUR: `voxtype-tui`) insta
 
 ## Dependencies
 
-An installed Omarchy Quattro shell (`qs.Ui` / `qs.Commons`), `voxtype`, `/usr/bin/python3` with the `voxtype-tui` package (AUR: `voxtype-tui`), `zenity` for the import file chooser, `wl-copy` (wl-clipboard) for the copy buttons, and `omarchy-launch-terminal` for the GPU sudo hand-off. The panel says so in place when zenity or the terminal launcher is missing. Git is needed for plugin-manager installation. Node.js and pytest are only needed for the development tests.
+An installed Omarchy Quattro shell (`qs.Ui` / `qs.Commons`), `voxtype`, `/usr/bin/python3` with the `voxtype-tui` package (AUR: `voxtype-tui`), `zenity` for the import file chooser, `wl-copy` (wl-clipboard) for the copy buttons, and `omarchy-launch-terminal` for the GPU sudo hand-off. The locked-state Install buttons use Omarchy's `omarchy-launch-floating-terminal-with-presentation`; without it they fall back to a copyable command. The panel says so in place when zenity or the terminal launcher is missing. Git is needed for plugin-manager installation. Node.js and pytest are only needed for the development tests.
 
-No npm/pip packages, background service, build step or vendored binaries. Nothing runs at install time, and the plugin itself never runs as root — the one privileged action (GPU enable/disable) opens a terminal where *you* run `sudo voxtype setup gpu`, so the shell never handles a password.
+No npm/pip packages, background service, build step or vendored binaries. Nothing runs at install time, and the plugin itself never runs as root — the privileged actions (GPU enable/disable, and installing a missing Voxtype or voxtype-tui) open a terminal where *you* confirm and type any password, so the shell never handles one.
 
 ## How it works
 
@@ -97,10 +97,23 @@ intentional and visible in the source:
   panel starts, stops and restarts the voice daemon, which is the plugin's
   purpose.
 
-There are no bundled binaries, no installer, no package-manager calls, and no
-remote build or download-and-execute path. Everything the plugin runs is either
+There are no bundled binaries, no installer script, and no remote build or
+download-and-execute path. Everything the plugin runs is either
 `/usr/bin/python3` against the file in this repository or a binary already
 installed on the system.
+
+**Missing-dependency install button.** When Voxtype or `voxtype-tui` is not
+installed, the locked panel offers an Install button (`Service.qml:219`). It
+opens Omarchy's own floating terminal
+(`omarchy-launch-floating-terminal-with-presentation`, the launcher Omarchy's
+first-run "Install Dictation" notification uses) with one of two fixed scripts
+from `Model.js` `INSTALL_SCRIPTS`: `omarchy voxtype install`, or
+`omarchy pkg aur add voxtype-tui` behind a `gum confirm` prompt. The panel
+chooses between them by locked-state kind and launches nothing for any other
+value; nothing in either script comes from the bridge, the config or user
+input. You answer the prompt and type any password in that terminal, and
+nothing is installed if you say no. The same command is shown as a copy button
+for anyone who prefers to run it themselves.
 
 ## Uninstall
 
