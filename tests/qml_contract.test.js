@@ -586,3 +586,18 @@ test('README documents removal and the no-egress guarantee', () => {
   assert.match(readme, /no network connections of its own/i);
   assert.match(readme, /no telemetry/i);
 });
+
+test('install hand-off: only the two fixed scripts reach the floating terminal', () => {
+  const h = serviceHarness();
+  assert.equal(h.root.launchInstall('tui'), true);
+  assert.equal(h.root.launchInstall('voxtype'), true);
+  for (const bad of ['setup', '', 'constructor', '__proto__', 'tui; rm -rf ~', null, undefined])
+    assert.equal(h.root.launchInstall(bad), false, `kind ${String(bad)} launches nothing`);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.root.Quickshell.detached)), [
+    ['omarchy-launch-floating-terminal-with-presentation', 'if gum confirm "Install voxtype-tui from the AUR?"; then omarchy pkg aur add voxtype-tui; fi'],
+    ['omarchy-launch-floating-terminal-with-presentation', 'omarchy voxtype install'],
+  ], 'fixed argv; the AUR install asks before yay --noconfirm runs');
+  // The launcher is the only new execDetached, and its script comes from Model.
+  assert.match(stripComments(service), /execDetached\(\["omarchy-launch-floating-terminal-with-presentation", script\]\)/);
+  assert.match(stripComments(service), /var script = Model\.installScript\(kind\);\s*if \(script === ""\) return false;/);
+});

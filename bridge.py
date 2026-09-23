@@ -833,6 +833,7 @@ def op_status(args: dict, paths: Paths) -> dict[str, Any]:
         "state_file_path": str(state_path) if state_path is not None else None,
         # Helpers the panel shells out to for sudo actions / file picking.
         "terminal_launcher_available": shutil.which("omarchy-launch-terminal") is not None,
+        "install_terminal_available": shutil.which("omarchy-launch-floating-terminal-with-presentation") is not None,
         "picker_available": shutil.which("zenity") is not None,
         "tui_open_pid": tui_lock_holder(paths),
     }
@@ -1620,7 +1621,7 @@ def op_record_toggle(args: dict, paths: Paths) -> dict[str, Any]:
     drive the hotkey directly: the panel's Record button uses it.
     Failures always carry a non-empty, ANSI-free ``error``."""
     if shutil.which("voxtype") is None:
-        raise BridgeError("voxtype binary not found — run `omarchy install voxtype`")
+        raise BridgeError("voxtype binary not found — run `omarchy voxtype install`")
     code, out, err = _run(["voxtype", "record", "toggle"], timeout=5)
     message = _strip_ansi((err.strip() or out.strip()))
     message = " ".join(message.split()) if message else ""

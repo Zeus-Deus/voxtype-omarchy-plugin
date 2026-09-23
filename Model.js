@@ -65,11 +65,32 @@ function daemonState(status) {
     return status.daemon.state || "idle";
 }
 
-// Locked states, in precedence order. The hint command is shown and copied,
-// never executed by the panel.
+// Install commands for the locked states. Both are Omarchy's own entry points
+// (`omarchy commands --all`); tests/model.test.js pins the exact strings.
+var INSTALL_TUI_COMMAND = "omarchy pkg aur add voxtype-tui";
+var INSTALL_VOXTYPE_COMMAND = "omarchy voxtype install";
+
+// What the Install button runs, keyed by locked-state kind. Each script is a
+// fixed literal handed to Omarchy's floating terminal
+// (omarchy-launch-floating-terminal-with-presentation), which shows the
+// Omarchy header and a Done/Failed screen. Nothing in them comes from the
+// bridge, the config or the user. `omarchy voxtype install` asks its own
+// confirmation; the AUR install is prefixed with one so no package is added
+// without a yes in the terminal (omarchy pkg aur add runs yay --noconfirm).
+var INSTALL_SCRIPTS = {
+    tui: "if gum confirm \"Install voxtype-tui from the AUR?\"; then " + INSTALL_TUI_COMMAND + "; fi",
+    voxtype: INSTALL_VOXTYPE_COMMAND
+};
+function installScript(kind) {
+    return Object.prototype.hasOwnProperty.call(INSTALL_SCRIPTS, kind) ? INSTALL_SCRIPTS[kind] : "";
+}
+
+// Locked states, in precedence order. `command` is shown and copied, never
+// executed by the panel; `install` labels the button that hands the matching
+// INSTALL_SCRIPTS entry to a terminal the user watches.
 function lockedState(status, error) {
-    if (error === ERROR_TUI_MISSING) return {kind: "tui", title: "Install voxtype-tui (AUR) to manage Voxtype here", hint: "The panel is a front end over the voxtype-tui Python package.\nInstall it from the AUR, then reopen this panel.", command: ""};
-    if (status && status.voxtype_installed === false) return {kind: "voxtype", title: "Voxtype is not installed", hint: "Run this in a terminal, then reopen the panel:", command: "omarchy install voxtype"};
+    if (error === ERROR_TUI_MISSING) return {kind: "tui", title: "Install voxtype-tui to manage Voxtype here", hint: "The panel runs on the voxtype-tui package from the AUR.\nInstall it in a terminal, then reopen the panel:", command: INSTALL_TUI_COMMAND, install: "Install voxtype-tui"};
+    if (status && status.voxtype_installed === false) return {kind: "voxtype", title: "Voxtype is not installed", hint: "Install it in a terminal, then reopen the panel:", command: INSTALL_VOXTYPE_COMMAND, install: "Install Voxtype"};
     if (status && status.config_exists === false) return {kind: "setup", title: "Voxtype is installed but not set up", hint: "Run the setup wizard in a terminal, then reopen the panel:", command: "voxtype setup"};
     return null;
 }

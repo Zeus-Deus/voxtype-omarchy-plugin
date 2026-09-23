@@ -460,7 +460,7 @@ def test_design_result_tables_match_response_shapes(env: Env):
 
     env.daemon(active=True)
     status = env.ok("status")
-    for key in ("config_exists", "state_file_path", "terminal_launcher_available", "picker_available"):
+    for key in ("config_exists", "state_file_path", "terminal_launcher_available", "install_terminal_available", "picker_available"):
         assert key in row("status") and key in status
     for key in ("ready", "systemctl_available", "stale", "active_state", "start_monotonic_us"):
         assert key in row("status") and key in status["daemon"]
@@ -781,11 +781,14 @@ def test_status_reports_helper_availability(env: Env):
     monkeypatch.setenv("PATH", str(env.fakebin))
     res = env.ok("status")
     assert res["terminal_launcher_available"] is False
+    assert res["install_terminal_available"] is False
     assert res["picker_available"] is False
     _install(env.fakebin / "omarchy-launch-terminal", "#!/bin/sh\nexit 0\n")
+    _install(env.fakebin / "omarchy-launch-floating-terminal-with-presentation", "#!/bin/sh\nexit 0\n")
     _install(env.fakebin / "zenity", "#!/bin/sh\nexit 0\n")
     res = env.ok("status")
     assert res["terminal_launcher_available"] is True
+    assert res["install_terminal_available"] is True
     assert res["picker_available"] is True
     assert env.voxtype_calls() == []  # availability is a PATH lookup, never a run
 
@@ -2013,6 +2016,7 @@ def test_record_toggle(env: Env):
     env.remove_fake("voxtype")
     res = env.fail("record.toggle")
     assert "voxtype binary not found" in res["error"]
+    assert "`omarchy voxtype install`" in res["error"]  # `omarchy install voxtype` no longer exists
 
 
 def test_record_toggle_failures_carry_real_error(env: Env, monkeypatch):

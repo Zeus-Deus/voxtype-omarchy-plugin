@@ -208,6 +208,18 @@ Item {
         Quickshell.execDetached(["omarchy-launch-terminal", "sudo", "voxtype", "setup", "gpu", enable ? "--enable" : "--disable"]);
     }
 
+    // Missing-dependency installs go to Omarchy's own floating terminal, the
+    // same launcher Omarchy's first-run "Install Dictation" notification uses.
+    // `kind` only selects one of the fixed Model.INSTALL_SCRIPTS literals; any
+    // other value launches nothing. The user confirms and types any password
+    // in that terminal; the shell never sees either.
+    function launchInstall(kind) {
+        var script = Model.installScript(kind);
+        if (script === "") return false;
+        Quickshell.execDetached(["omarchy-launch-floating-terminal-with-presentation", script]);
+        return true;
+    }
+
     function applyStateText(text) {
         daemonState = Model.readStateFile(text);
     }

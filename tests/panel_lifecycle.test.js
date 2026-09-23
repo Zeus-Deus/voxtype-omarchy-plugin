@@ -482,7 +482,17 @@ test('a missing config.toml locks the panel with a copyable, never executed, vox
   assert.match(panel, /text: root\.lockedCommand; iconText: "󰆏"/);
   assert.match(panel, /onClicked: root\.copyLockedCommand\(\)/);
   h.root.status = Object.assign({}, h.root.status, {voxtype_installed: false});
-  assert.equal(h.root.lockedCommand, 'omarchy install voxtype', 'not-installed wins over not-set-up');
+  assert.equal(h.root.lockedCommand, 'omarchy voxtype install', 'not-installed wins over not-set-up');
+});
+
+test('a missing voxtype-tui locks the panel with a copyable install command', () => {
+  const h = panelHarness();
+  h.root.tuiMissing = true;
+  assert.equal(h.root.locked, true);
+  assert.equal(h.root.lockedCommand, 'omarchy pkg aur add voxtype-tui');
+  h.root.handleTextKey('y');
+  assert.deepEqual(h.copies.slice(), ['omarchy pkg aur add voxtype-tui'], 'y copies the command');
+  assert.equal(h.requests.length, 0, 'locked: nothing runs');
 });
 
 test('an engine switch shows a neutral loading state until its catalog arrives', () => {
@@ -719,4 +729,42 @@ test('the cursor predicates mirror the visible: bindings that actually drive tho
   // The predicate is Node-testable, not inlined in the QML.
   assert.match(panel, /readonly property var settingsTargets: Model\.settingsTargets\(config, engine, modelPath\)/);
   assert.match(panel, /if \(sectionName === "settings"\) return settingsTargets;/);
+});
+
+test('locked install: Enter hides the panel and hands the fixed kind to the floating terminal; y still copies', () => {
+  const installs = [];
+  const h = panelHarness();
+  h.root.service.launchInstall = kind => { installs.push(kind); return true; };
+  h.root.tuiMissing = true;
+  assert.equal(h.root.canInstallLocked, true);
+  assert.equal(h.root.lockedState.install, 'Install voxtype-tui');
+  h.root.handleTextKey('y');
+  assert.deepEqual(h.copies.slice(), ['omarchy pkg aur add voxtype-tui'], 'y copies');
+  h.root.handleTextKey('2');
+  assert.equal(h.root.section, 'dictate', 'section keys stay dead while locked');
+  h.root.activateCursor();
+  assert.deepEqual(installs, ['tui']);
+  assert.equal(h.root.opened, false, 'panel hides before the terminal opens over it');
+  assert.equal(h.requests.length, 0, 'the bridge is never asked to install anything');
+
+  h.root.tuiMissing = false;
+  h.root.status = Object.assign({}, h.root.status, {voxtype_installed: false});
+  h.root.controller.show();
+  h.root.activateCursor();
+  assert.deepEqual(installs, ['tui', 'voxtype']);
+
+  h.root.status = Object.assign({}, h.root.status, {voxtype_installed: true, config_exists: false});
+  assert.equal(h.root.canInstallLocked, false, 'the setup state offers copy only');
+});
+
+test('without Omarchy\'s floating-terminal launcher the locked state falls back to copy', () => {
+  const installs = [];
+  const h = panelHarness();
+  h.root.service.launchInstall = kind => { installs.push(kind); return true; };
+  h.root.tuiMissing = true;
+  h.root.status = Object.assign({}, h.root.status, {install_terminal_available: false});
+  assert.equal(h.root.canInstallLocked, false);
+  h.root.activateCursor();
+  assert.deepEqual(installs, []);
+  assert.deepEqual(h.copies.slice(), ['omarchy pkg aur add voxtype-tui']);
 });

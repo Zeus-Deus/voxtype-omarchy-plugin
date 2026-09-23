@@ -73,9 +73,13 @@ Panel {
     readonly property var lockedState: Model.lockedState(status, tuiMissing ? Model.ERROR_TUI_MISSING : "")
     readonly property bool locked: lockedState !== null
     readonly property string lockedCommand: lockedState ? lockedState.command : ""
+    // The install hand-off needs Omarchy's floating-terminal launcher; without
+    // it the locked state falls back to the copy button alone.
+    readonly property bool canInstallLocked: locked && !!lockedState.install && installTerminalAvailable
     readonly property bool modelMissing: status !== null && status.model && status.model.present === false
     // Undefined means an older bridge: assume the helper exists.
     readonly property bool terminalAvailable: !(status && status.terminal_launcher_available === false)
+    readonly property bool installTerminalAvailable: !(status && status.install_terminal_available === false)
     readonly property bool pickerAvailable: !(status && status.picker_available === false)
     readonly property string primary: root.locked ? "" : Model.primaryAction(status)
     readonly property string tooltip: "Voxtype · " + Model.heroMeta(status, tuiMissing ? Model.ERROR_TUI_MISSING : "")
@@ -379,7 +383,7 @@ Panel {
         noticeTimer.restart();
     }
     function activateCursor() {
-        if (locked) { copyLockedCommand(); return; }
+        if (locked) { if (canInstallLocked) launchLockedInstall(); else copyLockedCommand(); return; }
         if (!cursorActive) { moveCursor(1); return; }
         var key = cursorKey;
         if (section === "dictate") {
@@ -413,6 +417,13 @@ Panel {
         if (lockedCommand === "" || !service.copy(lockedCommand)) return;
         notice = "Copied";
         noticeTimer.restart();
+    }
+    function launchLockedInstall() {
+        if (!canInstallLocked) return;
+        // Same hand-off as the GPU buttons: the terminal would open under the
+        // full-screen panel layer, so hide first. Reopen after installing.
+        controller.hide();
+        service.launchInstall(lockedState.kind);
     }
     function launchGpu(enable) {
         if (locked || !terminalAvailable) return;
@@ -531,6 +542,7 @@ Panel {
         else if (section === "dictate") testField.forceActiveFocus();
     }
     function handleTextKey(t) {
+        if (locked) { if (t === "y" && canInstallLocked) copyLockedCommand(); return; }
         var s = Model.sectionForKey(t);
         if (s !== "") { selectSection(s); return; }
         if (t === "/") focusSearch();
@@ -754,12 +766,23 @@ Panel {
                                 text: root.lockedState ? root.lockedState.hint : ""
                                 color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body; wrapMode: Text.WordWrap
                             }
+                            // Install hands a fixed script to Omarchy's floating
+                            // terminal, where the user confirms and sees it run.
+                            Button {
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                visible: root.canInstallLocked
+                                text: root.lockedState && root.lockedState.install ? root.lockedState.install : ""
+                                iconText: "󰏔"; bordered: true
+                                foreground: root.foreground; fontFamily: root.fontFamily
+                                tooltipText: "Opens a terminal that asks before installing"
+                                onClicked: root.launchLockedInstall()
+                            }
                             // The command is shown and copied, never run by the panel.
                             Button {
                                 anchors.horizontalCenter: parent.horizontalCenter
                                 visible: root.lockedCommand !== ""
-                                text: root.lockedCommand; iconText: "󰆏"; bordered: true
-                                foreground: root.foreground; fontFamily: root.fontFamily
+                                text: root.lockedCommand; iconText: "󰆏"; bordered: !root.canInstallLocked
+                                foreground: root.canInstallLocked ? root.muted : root.foreground; fontFamily: root.fontFamily
                                 tooltipText: "Copy to clipboard"
                                 enabled: !service.copying
                                 onClicked: root.copyLockedCommand()
@@ -1544,7 +1567,7 @@ Panel {
                             id: hints
                             anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
                             textFormat: Text.PlainText
-                            text: root.locked ? (root.lockedCommand !== "" ? "Enter copy   Esc close" : "Esc close") : Model.sectionHints(root.section, {editing: root.editing, cursorActive: root.cursorActive})
+                            text: root.locked ? (root.canInstallLocked ? "Enter install   y copy   Esc close" : (root.lockedCommand !== "" ? "Enter copy   Esc close" : "Esc close")) : Model.sectionHints(root.section, {editing: root.editing, cursorActive: root.cursorActive})
                             color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption
                         }
                     }
