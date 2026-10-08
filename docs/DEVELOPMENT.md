@@ -19,7 +19,7 @@ and nothing here is executed by the plugin.
 3. Every `ConfirmDialog` open sets `selectedIndex = 0` (Cancel) and blocks the `PanelKeyCatcher`.
 4. External GUIs (zenity, terminal) are launched only after `controller.hide()`; `resumeAfterPick()` refuses to re-show once another widget owns the bar popout.
 5. Sudo is never handled in QML or the bridge: GPU enable/disable is a detached `omarchy-launch-terminal sudo voxtype setup gpu --enable|--disable`.
-6. No hard-coded colours, fonts, radii or margins — `Color.*`, `Style.*`, `bar ? bar.foreground : Color.foreground`.
+6. No hard-coded colours, fonts, radii or margins — `Commons.Color.*`, `Style.*`, `bar ? bar.foreground : Commons.Color.foreground`. Always write `Commons.Color` (with `import qs.Commons as Commons`), never a bare `Color.`: Qt 6.12's built-in QtQuick `Color` singleton shadows it and every theme colour becomes undefined.
 7. `status` must stay fast (<150 ms, Textual-free, no `voxtype setup` calls); it is polled every 2 s while the panel is open.
 8. Write ops are refused while the TUI holds `~/.config/voxtype-tui/.lock` (`bridge.WRITE_OPS`, `tui_lock_holder`): the TUI buffers edits until Ctrl+S and then rewrites the whole config, so a concurrent panel write would be lost. `status.tui_open_pid` drives the Dictate notice.
 9. Recording toggles through the direct `voxtype record toggle` Process for latency; the bridge `record.toggle` op stays as the error-reporting fallback.

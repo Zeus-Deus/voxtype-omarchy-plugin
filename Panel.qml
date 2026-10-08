@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls as Controls
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
@@ -83,13 +84,13 @@ Panel {
     readonly property bool pickerAvailable: !(status && status.picker_available === false)
     readonly property string primary: root.locked ? "" : Model.primaryAction(status)
     readonly property string tooltip: "Voxtype · " + Model.heroMeta(status, tuiMissing ? Model.ERROR_TUI_MISSING : "")
-    readonly property color foreground: bar ? bar.foreground : Color.foreground
-    readonly property color urgent: bar ? bar.urgent : Color.urgent
+    readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
+    readonly property color urgent: bar ? bar.urgent : Commons.Color.urgent
     // Commons/Color.qml ships `muted` from the theme (and a per-bar override
     // wins when a bar supplies one). Qt.darker(foreground) was wrong on a
     // light theme — it made "muted" text HEAVIER than the primary
     // foreground, inverting the hierarchy — and it ignored user overrides.
-    readonly property color muted: bar && bar.muted ? bar.muted : Color.muted
+    readonly property color muted: bar && bar.muted ? bar.muted : Commons.Color.muted
     readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
     readonly property int pollIntervalMs: Math.max(1, Math.min(10, setting("pollIntervalSec", 2))) * 1000
     readonly property bool editing: focusedEditor !== null
@@ -689,7 +690,7 @@ Panel {
                         iconComponent: Component {
                             VoxtypeIcon {
                                 daemonState: root.daemonState
-                                color: root.daemonState === "recording" ? Color.accent : root.foreground
+                                color: root.daemonState === "recording" ? Commons.Color.accent : root.foreground
                             }
                         }
                         trailingControl: Component {
@@ -853,14 +854,14 @@ Panel {
                                         width: parent.width
                                         bordered: true
                                         foreground: modelData.kind === "warn" ? root.urgent : root.foreground
-                                        accent: modelData.kind === "warn" ? root.urgent : Color.accent
+                                        accent: modelData.kind === "warn" ? root.urgent : Commons.Color.accent
                                         implicitHeight: noticeRow.implicitHeight + Style.space(20)
                                         Row {
                                             id: noticeRow
                                             anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
                                             anchors.margins: Style.space(12)
                                             spacing: Style.space(10)
-                                            Text { textFormat: Text.PlainText; text: modelData.kind === "warn" ? "󰀦" : "󰋽"; color: modelData.kind === "warn" ? root.urgent : Color.accent; font.family: root.fontFamily; font.pixelSize: Style.font.heading; anchors.verticalCenter: parent.verticalCenter }
+                                            Text { textFormat: Text.PlainText; text: modelData.kind === "warn" ? "󰀦" : "󰋽"; color: modelData.kind === "warn" ? root.urgent : Commons.Color.accent; font.family: root.fontFamily; font.pixelSize: Style.font.heading; anchors.verticalCenter: parent.verticalCenter }
                                             Text {
                                                 width: parent.width - Style.space(30) - parent.spacing
                                                 textFormat: Text.PlainText; wrapMode: Text.WordWrap
@@ -915,7 +916,7 @@ Panel {
                                     width: parent.width; textFormat: Text.PlainText; wrapMode: Text.WordWrap
                                     visible: testField.text.trim() !== ""
                                     text: root.previewOutput === "" ? "…" : "→ " + root.previewOutput
-                                    color: root.previewOutput !== "" && root.previewOutput !== testField.text.trim() ? Color.accent : root.muted
+                                    color: root.previewOutput !== "" && root.previewOutput !== testField.text.trim() ? Commons.Color.accent : root.muted
                                     font.family: root.fontFamily; font.pixelSize: Style.font.subtitle
                                 }
                             }
@@ -946,7 +947,7 @@ Panel {
                                         anchors.verticalCenter: parent.verticalCenter
                                         text: Model.tokenMeter(root.vocabTokens, root.vocabTokenLimit)
                                         textFormat: Text.PlainText
-                                        color: Model.tokenLevel(root.vocabTokens, root.vocabTokenLimit) === "urgent" ? root.urgent : (Model.tokenLevel(root.vocabTokens, root.vocabTokenLimit) === "amber" ? Color.accent : root.muted)
+                                        color: Model.tokenLevel(root.vocabTokens, root.vocabTokenLimit) === "urgent" ? root.urgent : (Model.tokenLevel(root.vocabTokens, root.vocabTokenLimit) === "amber" ? Commons.Color.accent : root.muted)
                                         font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true
                                     }
                                 }
@@ -1072,7 +1073,7 @@ Panel {
                                             Text {
                                                 width: Math.min(implicitWidth, parent.width * 0.45)
                                                 text: Model.sanitize(ruleRow.modelData.to, 120); textFormat: Text.PlainText; elide: Text.ElideRight
-                                                color: Color.accent; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true
+                                                color: Commons.Color.accent; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true
                                                 anchors.verticalCenter: parent.verticalCenter
                                             }
                                         }
@@ -1366,8 +1367,8 @@ Panel {
                                         }
                                         Rectangle {
                                             width: parent.width; height: Math.max(Style.space(4), Style.spacing.sm); radius: height / 2
-                                            color: Style.selectedFillFor(root.foreground, Color.accent)
-                                            Rectangle { width: parent.width * service.downloadProgress / 100; height: parent.height; radius: parent.radius; color: Color.accent
+                                            color: Style.selectedFillFor(root.foreground, Commons.Color.accent)
+                                            Rectangle { width: parent.width * service.downloadProgress / 100; height: parent.height; radius: parent.radius; color: Commons.Color.accent
                                                 Behavior on width { NumberAnimation { duration: 160 } } }
                                         }
                                         Text {
@@ -1399,7 +1400,7 @@ Panel {
                                             Text { width: parent.width; text: Model.sanitize(modelRow.modelData.name, 120); textFormat: Text.PlainText; elide: Text.ElideRight
                                                 color: modelRow.modelData.downloaded ? root.foreground : root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.subtitle; font.bold: modelRow.modelData.active === true }
                                             Text { width: parent.width; text: Model.modelLine(modelRow.modelData); textFormat: Text.PlainText; elide: Text.ElideRight
-                                                color: modelRow.modelData.active ? Color.accent : root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+                                                color: modelRow.modelData.active ? Commons.Color.accent : root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
                                         }
                                         Row {
                                             id: modelActions
@@ -1594,7 +1595,7 @@ Panel {
         property bool accent: false
         spacing: Style.space(2)
         Text { textFormat: Text.PlainText; text: cell.label; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true; font.letterSpacing: 1 }
-        Text { width: parent.width; text: cell.value; textFormat: Text.PlainText; elide: Text.ElideRight; color: cell.accent ? Color.accent : root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.subtitle }
+        Text { width: parent.width; text: cell.value; textFormat: Text.PlainText; elide: Text.ElideRight; color: cell.accent ? Commons.Color.accent : root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.subtitle }
     }
     component EmptyState: Column {
         id: empty

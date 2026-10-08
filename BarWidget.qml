@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
@@ -39,7 +40,7 @@ BarWidget {
         bar: root.bar
         text: Model.barGlyph(root.daemonState)
         active: Model.barActive(root.daemonState)
-        activeColor: root.daemonState === "recording" ? Color.accent : (root.bar ? root.bar.urgent : Color.urgent)
+        activeColor: root.daemonState === "recording" ? Commons.Color.accent : (root.bar ? root.bar.urgent : Commons.Color.urgent)
         tooltipText: panelLoader.item ? panelLoader.item.tooltip : "Voxtype"
         onPressed: function(buttonCode) {
             if (!panelLoader.item) return;

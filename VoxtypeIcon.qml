@@ -1,11 +1,12 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // Microphone mark drawn with the configured Nerd Font; no image assets.
 Item {
     id: root
-    property color color: Color.foreground
+    property color color: Commons.Color.foreground
     property real iconSize: Style.font.display
     property string daemonState: "idle"
     implicitWidth: iconSize

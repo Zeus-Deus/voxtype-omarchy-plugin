@@ -437,12 +437,24 @@ test('the panel is built from the shipped kit with no hard-coded colours, fonts 
   // A colour derived arithmetically is not a theme colour: Qt.darker on a
   // LIGHT theme makes "muted" text heavier than the primary foreground,
   // inverting the hierarchy, and it ignores any user override of the token.
-  // Use Color.muted / bar.muted instead.
+  // Use Commons.Color.muted / bar.muted instead.
   assert.doesNotMatch(code, /Qt\.(darker|lighter|tint)\s*\(/, 'derive muted from the theme token, not arithmetic');
-  assert.match(panel, /readonly property color muted: bar && bar\.muted \? bar\.muted : Color\.muted/);
+  assert.match(panel, /readonly property color muted: bar && bar\.muted \? bar\.muted : Commons\.Color\.muted/);
   for (const kit of ['KeyboardPanel', 'PanelKeyCatcher', 'PanelHero', 'ButtonGroup', 'PanelSectionHeader', 'PanelSeparator', 'Toggle', 'Dropdown', 'TextField', 'NumberField', 'PanelSlider', 'Button', 'PanelActionButton', 'CursorSurface', 'ConfirmDialog', 'Flickable'])
     assert.match(panel, new RegExp('\\b' + kit + ' \\{'), kit);
-  assert.match(panel, /bar \? bar\.foreground : Color\.foreground/);
+  assert.match(panel, /bar \? bar\.foreground : Commons\.Color\.foreground/);
+});
+
+test('theme colours are module-qualified (Qt 6.12 QtQuick Color shadows qs.Commons.Color)', () => {
+  // Qt 6.12 added a built-in QtQuick `Color` singleton. In a file importing
+  // QtQuick a bare `Color.accent` resolves to it, every theme colour is
+  // undefined and text renders black. Same fix as omarchy #14553.
+  for (const name of ['BarWidget.qml', 'Panel.qml', 'Service.qml', 'VoxtypeIcon.qml']) {
+    const code = read(name).split('\n').filter(l => !/^\s*\/\//.test(l)).join('\n');
+    assert.doesNotMatch(code, /(^|[^.A-Za-z0-9_"'])Color\./m, `${name} uses an unqualified Color.`);
+    if (/Commons\.Color\./.test(code))
+      assert.match(code, /^import qs\.Commons as Commons$/m, `${name} needs import qs.Commons as Commons`);
+  }
 });
 
 test('every Text element in Panel.qml declares textFormat (PlainText: no rich-text injection from bridge strings)', () => {
