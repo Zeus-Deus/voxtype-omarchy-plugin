@@ -65,6 +65,54 @@ function daemonState(status) {
     return status.daemon.state || "idle";
 }
 
+// On/off. "Off" is `systemctl --user stop`: the process exits, so the model
+// leaves VRAM/RAM, and the unit stays enabled, so the next login starts it
+// again. A unit systemd gave up on (crash loop) is `failed`, not off; one
+// it is bringing up again after a crash is `activating`.
+function daemonFailed(status) {
+    return !!status && !!status.daemon && !status.daemon.active && status.daemon.active_state === "failed";
+}
+
+function daemonStarting(status) {
+    if (!status || !status.daemon) return false;
+    var d = status.daemon;
+    if (!d.active) return d.active_state === "activating" || d.active_state === "reloading";
+    // Active but the state file has not appeared yet: the model is loading.
+    // Unknowable when the config disables the state file.
+    return d.ready === false && typeof status.state_file_path === "string" && status.state_file_path !== "";
+}
+
+// What the on/off button does next: "off" while the daemon is up (or coming
+// up), "on" while it is stopped or failed, "" before the first status.
+function powerAction(status) {
+    if (!status || !status.daemon || status.voxtype_installed === false || status.config_exists === false) return "";
+    var d = status.daemon;
+    return d.active || d.active_state === "activating" || d.active_state === "reloading" ? "off" : "on";
+}
+
+function powerLabel(action) { return action === "on" ? "Turn on" : (action === "off" ? "Turn off" : ""); }
+
+// STATE cell on the Dictate card.
+function stateLabel(status) {
+    if (!status) return "…";
+    if (daemonStarting(status)) return "Turning on…";
+    if (daemonFailed(status)) return "Failed";
+    var state = daemonState(status);
+    return state === "stopped" ? "Off" : titleCase(state);
+}
+
+// Footer line when nothing else is going on. While off it answers "will it
+// come back after a reboot?" from the unit's real UnitFileState.
+function footerIdle(status) {
+    if (!status || !status.daemon) return "";
+    var d = status.daemon;
+    if (d.active) return "Daemon running";
+    if (daemonFailed(status)) return "Daemon crashed";
+    if (d.starts_at_login === true) return "Back on at next login";
+    if (d.starts_at_login === false) return "Won't start at login";
+    return "Daemon stopped";
+}
+
 // Install commands for the locked states. Both are Omarchy's own entry points
 // (`omarchy commands --all`); tests/model.test.js pins the exact strings.
 var INSTALL_TUI_COMMAND = "omarchy pkg aur add voxtype-tui";
@@ -101,7 +149,9 @@ function heroMeta(status, error) {
     if (status && status.config_exists === false) return "Not set up yet";
     if (!status) return error ? "Unavailable" : "Checking…";
     var state = daemonState(status);
-    if (state === "stopped") return "Stopped";
+    if (daemonStarting(status)) return "Turning on · loading model…";
+    if (daemonFailed(status)) return "Stopped unexpectedly";
+    if (state === "stopped") return "Off · model unloaded";
     if (state === "recording") return "Recording…";
     if (state === "transcribing") return "Transcribing…";
     if (status.daemon.stale) return "Restart to apply changes";
@@ -112,13 +162,14 @@ function heroMeta(status, error) {
 function primaryAction(status) {
     if (!status || status.voxtype_installed === false || status.config_exists === false) return "";
     var state = daemonState(status);
-    if (state === "stopped") return "start";
+    if (state === "stopped") return powerAction(status) === "on" ? "start" : "";
+    if (daemonStarting(status)) return "";
     if (status.daemon.stale) return "restart";
     return "record";
 }
 
 function primaryLabel(action, state) {
-    if (action === "start") return "Start";
+    if (action === "start") return "Turn on";
     if (action === "restart") return "Restart";
     if (action === "record") return state === "recording" ? "Stop" : "Record";
     return "";
@@ -367,7 +418,7 @@ function hintPairs(section, context) {
     var c = context || {};
     if (c.editing) return section === "vocabulary" ? [["Enter", "add"], ["Esc", "back"]] : [["Enter", "save"], ["Esc", "cancel"]];
     var move = c.cursorActive ? [] : [["↑↓", "move"]];
-    if (section === "dictate") return move.concat([["r", "record"], ["Ctrl+R", "restart"], ["1–5", "sections"]]);
+    if (section === "dictate") return move.concat([["r", "record"], ["o", "on/off"], ["Ctrl+R", "restart"], ["1–5", "sections"]]);
     if (section === "vocabulary") return move.concat([["/", "search"], ["a", "add"], ["x", "delete"], ["Tab", "next"]]);
     if (section === "dictionary") return move.concat([["/", "search"], ["a", "add"], ["c", "category"], ["x", "delete"]]);
     if (section === "settings") return move.concat([["Enter", "change"], ["u", "reset"], ["Tab", "next"]]);

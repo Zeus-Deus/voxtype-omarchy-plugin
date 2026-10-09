@@ -213,6 +213,8 @@ if verb == "show":
                 time.strftime("%a %Y-%m-%d %H:%M:%S %Z") if st["active"] else ""))
         elif prop == "ExecMainStartTimestampMonotonic":
             lines.append(f"ExecMainStartTimestampMonotonic={st['mono'] if st['active'] else 0}")
+        elif prop == "UnitFileState":
+            lines.append("UnitFileState=" + st.get("unit_file", "enabled"))
     print("\n".join(lines))
     sys.exit(0)
 if verb == "restart":
@@ -240,6 +242,9 @@ if verb == "daemon-reload":
     sys.exit(0)
 sys.exit(1)
 '''
+
+# The one systemctl call `status` may make (pinned so it stays one call).
+STATUS_SHOW = "--user show voxtype -p MainPID -p ActiveState -p ExecMainStartTimestamp -p ExecMainStartTimestampMonotonic -p UnitFileState"
 
 FAKE_PACTL = r'''#!/usr/bin/python3
 import sys
@@ -633,7 +638,7 @@ def test_status_is_fast_and_never_runs_voxtype_setup(env: Env, engine: str):
     assert elapsed < 0.15, elapsed
     assert res["engine"] == engine and res["model"]["present"] is True
     assert env.voxtype_calls() == []
-    assert env.systemctl_calls() == ["--user show voxtype -p MainPID -p ActiveState -p ExecMainStartTimestamp -p ExecMainStartTimestampMonotonic"]
+    assert env.systemctl_calls() == [STATUS_SHOW]
 
 
 @pytest.mark.parametrize("engine", ENGINES)
@@ -1886,7 +1891,7 @@ def test_daemon_restart_proves_pid_change_and_waits_ready(env: Env):
     assert res["changed"] is True and res["ready"] is True and res["active"] is True
     calls = env.systemctl_calls()
     assert "--user restart voxtype" in calls
-    assert calls.count("--user show voxtype -p MainPID -p ActiveState -p ExecMainStartTimestamp -p ExecMainStartTimestampMonotonic") == 2
+    assert calls.count(STATUS_SHOW) == 2
     assert env.ok("status")["daemon"]["main_pid"] == 4243
 
 
@@ -2000,6 +2005,38 @@ def test_daemon_start_stop(env: Env):
     assert res["daemon"]["active"] is False
     assert "--user stop voxtype" in env.systemctl_calls()
     assert env.ok("status")["daemon"]["state"] == "stopped"
+
+
+def test_turning_off_never_disables_the_unit(env: Env):
+    """Off = stop. The bridge must never run enable/disable/mask, so the
+    unit keeps starting at login, and status says so while it is off."""
+    env.daemon(active=True)
+    assert env.ok("status")["daemon"]["starts_at_login"] is True
+    env.ok("daemon.stop")
+    st = env.ok("status")
+    assert st["daemon"]["active"] is False and st["daemon"]["state"] == "stopped"
+    assert st["daemon"]["starts_at_login"] is True
+    env.ok("daemon.start")
+    verbs = [c.split()[1] for c in env.systemctl_calls()]
+    assert not {"disable", "enable", "mask", "unmask", "kill"} & set(verbs), verbs
+    assert env.ok("status")["daemon"]["active"] is True
+
+
+@pytest.mark.parametrize("unit_file,expected", [
+    ("enabled", True), ("static", True), ("disabled", False), ("masked", False), ("", None),
+])
+def test_status_reports_starts_at_login(env: Env, unit_file: str, expected):
+    env.daemon(active=False)
+    unit = json.loads((env.systemctl_dir / "unit.json").read_text())
+    unit["unit_file"] = unit_file
+    (env.systemctl_dir / "unit.json").write_text(json.dumps(unit))
+    assert env.ok("status")["daemon"]["starts_at_login"] is expected
+
+
+def test_daemon_stop_reports_failure(env: Env):
+    env.remove_fake("systemctl")
+    res = env.fail("daemon.stop")
+    assert "systemctl" in res["error"]
 
 
 def test_daemon_start_failure(env: Env):

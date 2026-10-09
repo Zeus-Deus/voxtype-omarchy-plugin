@@ -37,7 +37,7 @@ test('hero meta and primary action follow the design table', () => {
   assert.equal(Model.heroMeta(stale, ''), 'Restart to apply changes');
   assert.equal(Model.primaryAction(stale), 'restart');
   const stopped = Object.assign({}, base, {daemon: {active: false, state: 'stopped'}});
-  assert.equal(Model.heroMeta(stopped, ''), 'Stopped');
+  assert.equal(Model.heroMeta(stopped, ''), 'Off · model unloaded');
   assert.equal(Model.primaryAction(stopped), 'start');
   const rec = Object.assign({}, base, {daemon: {active: true, state: 'recording', stale: true}});
   assert.equal(Model.heroMeta(rec, ''), 'Recording…');
@@ -55,6 +55,51 @@ test('hero meta and primary action follow the design table', () => {
   assert.equal(Model.heroMeta(null, ''), 'Checking…');
   assert.equal(Model.primaryLabel('record', 'recording'), 'Stop');
   assert.equal(Model.primaryLabel('record', 'idle'), 'Record');
+});
+
+test('on/off: stop is "off", a crash is "failed", start shows loading until the state file appears', () => {
+  const on = {voxtype_installed: true, config_exists: true, state_file_path: '/run/user/1000/voxtype/state',
+              daemon: {active: true, active_state: 'active', state: 'idle', ready: true, stale: false, starts_at_login: true}, model: {name: 'large-v3'}, hotkey: {}};
+  const off = Object.assign({}, on, {daemon: {active: false, active_state: 'inactive', state: 'stopped', ready: false, starts_at_login: true}});
+  const failed = Object.assign({}, on, {daemon: {active: false, active_state: 'failed', state: 'stopped', ready: false, starts_at_login: true}});
+  const loading = Object.assign({}, on, {daemon: {active: true, active_state: 'active', state: 'idle', ready: false, stale: true, starts_at_login: true}});
+  const activating = Object.assign({}, on, {daemon: {active: false, active_state: 'activating', state: 'stopped', ready: false}});
+
+  assert.equal(Model.powerAction(on), 'off');
+  assert.equal(Model.powerAction(loading), 'off');
+  assert.equal(Model.powerAction(activating), 'off', 'systemd is bringing it up: offer off, not a second start');
+  assert.equal(Model.powerAction(off), 'on');
+  assert.equal(Model.powerAction(failed), 'on');
+  assert.equal(Model.powerAction(null), '');
+  assert.equal(Model.powerAction({voxtype_installed: false}), '');
+  assert.equal(Model.powerAction(Object.assign({}, off, {config_exists: false})), '');
+  assert.equal(Model.powerLabel('on'), 'Turn on');
+  assert.equal(Model.powerLabel('off'), 'Turn off');
+
+  assert.equal(Model.stateLabel(on), 'Idle');
+  assert.equal(Model.stateLabel(off), 'Off');
+  assert.equal(Model.stateLabel(failed), 'Failed');
+  assert.equal(Model.stateLabel(loading), 'Turning on…');
+  assert.equal(Model.stateLabel(null), '…');
+
+  assert.equal(Model.heroMeta(off, ''), 'Off · model unloaded');
+  assert.equal(Model.heroMeta(failed, ''), 'Stopped unexpectedly');
+  assert.equal(Model.heroMeta(loading, ''), 'Turning on · loading model…', 'a stale flag during load is not "restart to apply"');
+  assert.equal(Model.primaryAction(off), 'start');
+  assert.equal(Model.primaryLabel('start', 'stopped'), 'Turn on');
+  assert.equal(Model.primaryAction(loading), '', 'no Record/Restart while the model loads');
+  assert.equal(Model.primaryAction(activating), '');
+
+  // A disabled state file cannot tell loading from ready: never stuck on "Turning on".
+  const noStateFile = Object.assign({}, loading, {state_file_path: null});
+  assert.equal(Model.daemonStarting(noStateFile), false);
+
+  assert.equal(Model.footerIdle(on), 'Daemon running');
+  assert.equal(Model.footerIdle(off), 'Back on at next login');
+  assert.equal(Model.footerIdle(Object.assign({}, off, {daemon: Object.assign({}, off.daemon, {starts_at_login: false})})), "Won't start at login");
+  assert.equal(Model.footerIdle(Object.assign({}, off, {daemon: Object.assign({}, off.daemon, {starts_at_login: null})})), 'Daemon stopped');
+  assert.equal(Model.footerIdle(failed), 'Daemon crashed');
+  assert.equal(Model.footerIdle(null), '');
 });
 
 test('bar glyph and state file parsing', () => {

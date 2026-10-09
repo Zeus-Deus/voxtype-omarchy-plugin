@@ -70,7 +70,8 @@ Panel {
     // switch shows a neutral loading state rather than a stale "no models".
     readonly property bool modelsLoading: modelsEngine !== engine || !loaded
     readonly property string modelPath: options && options.model_paths && options.model_paths[engine] ? options.model_paths[engine] : engine + ".model"
-    readonly property bool stale: (status && status.daemon && status.daemon.stale) || restartNeeded.length > 0
+    // Off is not stale: the next start reads the saved config anyway.
+    readonly property bool stale: Model.powerAction(status) !== "on" && ((status && status.daemon && status.daemon.stale) || restartNeeded.length > 0)
     readonly property var lockedState: Model.lockedState(status, tuiMissing ? Model.ERROR_TUI_MISSING : "")
     readonly property bool locked: lockedState !== null
     readonly property string lockedCommand: lockedState ? lockedState.command : ""
@@ -106,7 +107,7 @@ Panel {
 
     function targetsFor(sectionName) {
         if (sectionName === "dictate") {
-            var t = ["record", "restart"];
+            var t = ["record", "power", "restart"];
             if (modelMissing) t.push("download");
             t.push("test");
             return t;
@@ -249,7 +250,10 @@ Panel {
         notice = daemonState === "recording" ? "Stopping…" : "Recording…";
     }
     function restartDaemon() {
-        if (locked || service.restarting) return;
+        if (locked || service.restarting || service.powering) return;
+        // `systemctl restart` starts a stopped unit, so Ctrl+R / middle-click
+        // would silently undo "off". Turning it back on is the power button's job.
+        if (Model.powerAction(status) === "on") { showNotice("Voxtype is not running · press o to turn it on"); return; }
         notice = "Restarting daemon…";
         // The bridge waits up to `timeout` s for readiness on top of
         // systemctl's own 15 s blocking restart; the Service deadline (40 s)
@@ -258,8 +262,32 @@ Panel {
         service.run({op: "daemon.restart", timeout: 18});
     }
     function restartIfStale() { if (stale) restartDaemon() }
+    // Off = `systemctl --user stop voxtype`: the process exits and its model
+    // leaves VRAM/RAM. The unit stays enabled (no disable), so it comes back
+    // at the next login; on = `start`. Stopping mid-dictation drops that
+    // recording, so it asks first.
+    function togglePower() {
+        if (locked || service.powering || service.restarting) return;
+        var action = Model.powerAction(status);
+        if (action === "on") turnOn();
+        else if (action === "off") {
+            if (daemonState === "recording" || daemonState === "transcribing")
+                ask("daemon.stop", {}, "Voxtype is " + daemonState + ".\nTurning it off now drops this dictation.", "Turn off");
+            else turnOff();
+        }
+    }
+    function turnOn() {
+        if (locked || service.powering) return;
+        notice = "Turning on…";
+        service.run({op: "daemon.start"});
+    }
+    function turnOff() {
+        if (locked || service.powering) return;
+        notice = "Turning off…";
+        service.run({op: "daemon.stop"});
+    }
     function runPrimary() {
-        if (primary === "start") service.run({op: "daemon.start"});
+        if (primary === "start") turnOn();
         else if (primary === "restart") restartDaemon();
         else if (primary === "record") toggleRecord();
     }
@@ -389,6 +417,7 @@ Panel {
         var key = cursorKey;
         if (section === "dictate") {
             if (key === "record") toggleRecord();
+            else if (key === "power") togglePower();
             else if (key === "restart") restartDaemon();
             else if (key === "download") selectSection("models");
             else if (key === "test") testField.forceActiveFocus();
@@ -552,6 +581,7 @@ Panel {
         else if (t === "c" && section === "dictionary") cycleRuleCategory();
         else if (t === "d" && section === "models") downloadCursorModel();
         else if (t === "u" && section === "settings") resetCursorSetting();
+        else if (t === "o" && section === "dictate") togglePower();
         else if (t === "r" || t === "R") toggleRecord();
     }
     onFilteredVocabularyChanged: clampCursor()
@@ -599,7 +629,14 @@ Panel {
                 noticeTimer.restart();
                 service.run({op: "status"});
             }
-            else if (op === "daemon.start" || op === "daemon.stop" || op === "record.toggle") service.run({op: "status"});
+            else if (op === "daemon.start" || op === "daemon.stop") {
+                root.notice = op === "daemon.stop" ? "Turned off" : "Turned on";
+                // A fresh start reads the config as it is now.
+                if (op === "daemon.start") root.restartNeeded = [];
+                noticeTimer.restart();
+                service.run({op: "status"});
+            }
+            else if (op === "record.toggle") service.run({op: "status"});
             else if (result.snapshot !== undefined) {
                 root.applySnapshot(result.snapshot);
                 var needed = root.restartNeeded.slice();
@@ -697,13 +734,13 @@ Panel {
                             Button {
                                 visible: root.primary !== ""
                                 text: Model.primaryLabel(root.primary, root.daemonState)
-                                iconText: root.primary === "record" ? (root.daemonState === "recording" ? "󰓛" : "󰍬") : (root.primary === "restart" ? "󰑓" : "󰐊")
+                                iconText: root.primary === "record" ? (root.daemonState === "recording" ? "󰓛" : "󰍬") : (root.primary === "restart" ? "󰑓" : "󰐥")
                                 bordered: true
                                 focusable: false
                                 foreground: root.foreground
                                 fontFamily: root.fontFamily
-                                enabled: !service.recording && !service.restarting
-                                tooltipText: root.primary === "record" ? "r · toggle recording" : (root.primary === "restart" ? "Ctrl+R · restart the daemon" : "Start the voxtype service")
+                                enabled: !service.recording && !service.restarting && !service.powering
+                                tooltipText: root.primary === "record" ? "r · toggle recording" : (root.primary === "restart" ? "Ctrl+R · restart the daemon" : "o · load the model and start listening")
                                 onClicked: root.runPrimary()
                             }
                         }
@@ -814,7 +851,7 @@ Panel {
                                         columns: 2
                                         columnSpacing: Style.space(16)
                                         rowSpacing: Style.space(10)
-                                        StatusCell { width: (statusGrid.width - statusGrid.columnSpacing) / 2; label: "STATE"; value: root.status ? Model.titleCase(root.daemonState) : "…"; accent: root.daemonState === "recording" }
+                                        StatusCell { width: (statusGrid.width - statusGrid.columnSpacing) / 2; label: "STATE"; value: Model.stateLabel(root.status); accent: root.daemonState === "recording" }
                                         StatusCell { width: (statusGrid.width - statusGrid.columnSpacing) / 2; label: "ENGINE"; value: root.status ? root.engine + " · " + Model.sanitize(root.status.model ? root.status.model.name : "", 60) : "…" }
                                         StatusCell { width: (statusGrid.width - statusGrid.columnSpacing) / 2; label: "HOTKEY"; value: root.status ? Model.hotkeyLabel(root.status.hotkey) : "…" }
                                         StatusCell { width: (statusGrid.width - statusGrid.columnSpacing) / 2; label: "OUTPUT"; value: root.status ? String(root.status.output_mode || "") + (root.status.hotkey && root.status.hotkey.mode ? " · " + String(root.status.hotkey.mode).replace(/_/g, " ") : "") : "…" }
@@ -834,6 +871,21 @@ Panel {
                                         onHovered: function(h) { if (h) root.setCursor("record", -1) }
                                         onClicked: root.toggleRecord()
                                     }
+                                    // On/off: stop frees the model's VRAM/RAM; the unit stays
+                                    // enabled, so it starts again at the next login.
+                                    Button {
+                                        readonly property string action: Model.powerAction(root.status)
+                                        text: Model.powerLabel(action) || "Turn off"
+                                        iconText: "󰐥"
+                                        bordered: true
+                                        hasCursor: root.cursorIs("power")
+                                        foreground: root.foreground
+                                        fontFamily: root.fontFamily
+                                        enabled: action !== "" && !service.powering && !service.restarting
+                                        tooltipText: action === "on" ? "o · load the model and start listening" : "o · stop Voxtype and free its GPU/RAM until you turn it on (it still starts at login)"
+                                        onHovered: function(h) { if (h) root.setCursor("power", -1) }
+                                        onClicked: root.togglePower()
+                                    }
                                     Button {
                                         text: "Restart daemon"
                                         iconText: "󰑓"
@@ -841,7 +893,7 @@ Panel {
                                         hasCursor: root.cursorIs("restart")
                                         foreground: root.foreground
                                         fontFamily: root.fontFamily
-                                        enabled: !service.restarting
+                                        enabled: !service.restarting && !service.powering && root.daemonState !== "stopped"
                                         onHovered: function(h) { if (h) root.setCursor("restart", -1) }
                                         onClicked: root.restartDaemon()
                                     }
@@ -1556,7 +1608,7 @@ Panel {
                             busyText: service.picking ? "Choosing a bundle…" : (service.restarting ? "Restarting daemon…" : ""),
                             notice: root.notice,
                             restartNeeded: root.stale,
-                            idleText: root.locked ? "" : (root.status ? (root.status.daemon && root.status.daemon.active ? "Daemon running" : "Daemon stopped") : "")
+                            idleText: root.locked ? "" : Model.footerIdle(root.status)
                         })
                         Text {
                             anchors.left: parent.left; anchors.right: hints.left; anchors.rightMargin: Style.space(12); anchors.verticalCenter: parent.verticalCenter

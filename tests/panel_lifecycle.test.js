@@ -622,7 +622,80 @@ test('footer hints mirror the live key bindings: every hinted key is bound and e
   }
   assert.match(panel, /Model\.sectionHints\(root\.section, \{editing: root\.editing, cursorActive: root\.cursorActive\}\)/);
   assert.doesNotMatch(panel, /pid " \+/, 'the idle footer no longer prints the PID');
-  assert.match(panel, /"Daemon running" : "Daemon stopped"/);
+  assert.match(panel, /idleText: root\.locked \? "" : Model\.footerIdle\(root\.status\)/);
+});
+
+test('on/off: o stops and starts the unit, never restarts or disables it', () => {
+  const h = panelHarness();
+  const daemon = (over) => Object.assign({active: true, active_state: 'active', state: 'idle', ready: true, stale: false, starts_at_login: true}, over);
+  h.root.status = Object.assign({}, h.root.status, {daemon: daemon(), state_file_path: '/run/user/1000/voxtype/state'});
+  h.root.handleTextKey('o');
+  assert.equal(JSON.stringify(h.requests.map(r => r.op)), JSON.stringify(['daemon.stop']), 'o while running stops');
+  assert.equal(h.root.notice, 'Turning off…');
+  h.complete('daemon.stop', {ok: true, daemon: {active: false}});
+  assert.equal(h.root.notice, 'Turned off');
+  assert.equal(h.requests[h.requests.length - 1].op, 'status');
+
+  // Now off. Ctrl+R / middle-click must not quietly turn it back on (systemctl restart starts a stopped unit).
+  h.root.status = Object.assign({}, h.root.status, {daemon: daemon({active: false, active_state: 'inactive', state: 'stopped', ready: false, stale: true})});
+  h.root.service.daemonState = 'stopped';
+  h.requests.length = 0;
+  h.root.restartDaemon();
+  h.root.restartIfStale();
+  assert.equal(JSON.stringify(h.requests), JSON.stringify([]), 'restart is refused while off');
+  assert.match(h.root.notice, /not running · press o/);
+  assert.equal(h.root.stale, false, 'off is not "restart to apply"');
+
+  h.root.handleTextKey('o');
+  assert.equal(JSON.stringify(h.requests.map(r => r.op)), JSON.stringify(['daemon.start']), 'o while off starts');
+  h.root.restartNeeded = ['engine'];
+  h.complete('daemon.start', {ok: true, daemon: {active: true}});
+  assert.equal(JSON.stringify(h.root.restartNeeded), JSON.stringify([]), 'a fresh start has read the saved config');
+
+  // The Turn on hero button is the same start.
+  h.requests.length = 0;
+  assert.equal(h.root.primary, 'start');
+  h.root.runPrimary();
+  assert.equal(JSON.stringify(h.requests.map(r => r.op)), JSON.stringify(['daemon.start']));
+
+  // o is Dictate-only; elsewhere it is not bound.
+  h.requests.length = 0;
+  h.root.section = 'vocabulary';
+  h.root.handleTextKey('o');
+  assert.equal(JSON.stringify(h.requests), JSON.stringify([]));
+
+  // No enable/disable/restart op anywhere on the power path.
+  const power = panel.match(/function togglePower\(\) \{[\s\S]*?\n    function runPrimary/)[0];
+  assert.doesNotMatch(power, /daemon\.restart|disable|enable/);
+});
+
+test('on/off: turning off mid-dictation asks first, Cancel keeps it running', () => {
+  const h = panelHarness();
+  h.root.status = Object.assign({}, h.root.status, {daemon: {active: true, active_state: 'active', state: 'recording', ready: true, stale: false}});
+  h.root.service.daemonState = 'recording';
+  h.root.togglePower();
+  assert.equal(JSON.stringify(h.requests), JSON.stringify([]), 'nothing stopped before the answer');
+  assert.equal(h.root.confirmation.opened, true);
+  assert.equal(h.root.confirmation.selectedIndex, 0, 'Cancel is the default');
+  assert.match(h.root.confirmation.message, /drops this dictation/);
+  h.root.confirmation.opened = false; h.root.confirmAction = ''; h.root.confirmPayload = null; // Cancel
+  assert.equal(JSON.stringify(h.requests), JSON.stringify([]));
+  h.root.togglePower();
+  h.root.confirmation.opened = false;
+  h.root.applyConfirmed();
+  assert.equal(JSON.stringify(h.requests.map(r => r.op)), JSON.stringify(['daemon.stop']));
+});
+
+test('on/off: a second press while a start/stop is in flight is ignored, and the Dictate cursor reaches the button', () => {
+  const h = panelHarness();
+  h.root.service.powering = true;
+  h.root.togglePower();
+  h.root.turnOn();
+  h.root.restartDaemon();
+  assert.equal(JSON.stringify(h.requests), JSON.stringify([]));
+  assert.equal(JSON.stringify(h.root.targetsFor('dictate').slice(0, 3)), JSON.stringify(['record', 'power', 'restart']));
+  assert.match(panel, /else if \(key === "power"\) togglePower\(\)/);
+  assert.match(panel, /setCursor\("power", -1\)/);
 });
 
 test('the panel forgets options and gpu status when appropriate, and asks the bridge for an 18 s restart wait', () => {

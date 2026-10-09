@@ -23,7 +23,8 @@ You need Voxtype itself and the `voxtype-tui` package (AUR: `voxtype-tui`) insta
 ## What the panel does
 
 - **Bar button** with the live daemon state: idle, recording (accent), transcribing, stopped. Left-click opens the panel, right-click toggles recording, middle-click restarts a stale daemon. The tooltip is the hero line.
-- **Dictate** — status card (state, engine + model, hotkey, output mode), Record and Restart buttons, a missing-model banner, and a *test a phrase* field that shows what the dictionary engine would type.
+- **Dictate** — status card (state, engine + model, hotkey, output mode), Record, **Turn off / Turn on** and Restart buttons, a missing-model banner, and a *test a phrase* field that shows what the dictionary engine would type.
+- **Turn off / Turn on** (`o` on Dictate) stops the Voxtype service so its model leaves your GPU memory (or RAM on CPU) until you turn it back on. It is a plain `systemctl --user stop`: nothing is uninstalled or disabled, so Voxtype still starts at your next login. Turning on reloads the model (a few seconds for a large one). While it is off the hotkey does nothing and Restart will not quietly start it.
 - **Vocabulary** — search/add field (Enter adds), token meter `n / 224` (amber at 200, urgent at 224), delete on the cursor row (`x`, confirmed).
 - **Dictionary** — add `from → to` with a category chip, search, `c` cycles category, `x` deletes (confirmed).
 - **Settings** — engine & model, hotkey (key, modifier chips, mode, enabled), audio (device, max duration, feedback theme/volume), output (mode, fallback, auto-submit, smart auto-submit, spoken punctuation, type delay), voice activity, post-processing, remote Whisper (endpoint, model, timeout, *API key is set* indicator + Clear — the key is never entered or shown here), GPU (backend status, device drop-in, Enable/Disable acceleration handed to your terminal for `sudo`). Changes are written immediately and validated by the bridge; restart-sensitive ones light **Restart to apply**.
@@ -32,7 +33,7 @@ You need Voxtype itself and the `voxtype-tui` package (AUR: `voxtype-tui`) insta
 
 ## Keyboard
 
-`1`–`5` jump to a section, `Tab`/`Shift+Tab` cycle, `↑↓`/`j k` move the cursor, `Enter`/`Space` activate, `←→` nudge sliders, `/` or `Ctrl+F` focus search, `a` add, `c` cycle category, `d` download, `u` reset a setting to its default, `x` delete, `r` toggle recording, `Ctrl+R` restart the daemon, `Esc` leaves a field, then closes the panel.
+`1`–`5` jump to a section, `Tab`/`Shift+Tab` cycle, `↑↓`/`j k` move the cursor, `Enter`/`Space` activate, `←→` nudge sliders, `/` or `Ctrl+F` focus search, `a` add, `c` cycle category, `d` download, `u` reset a setting to its default, `x` delete, `r` toggle recording, `o` turn Voxtype off/on (Dictate), `Ctrl+R` restart the daemon, `Esc` leaves a field, then closes the panel.
 
 ## Dependencies
 
@@ -85,7 +86,7 @@ Plugins run unsandboxed inside `omarchy-shell`, so:
 An automated baseline scan will detect two capabilities in this plugin. Both are
 intentional and visible in the source:
 
-- **`privilege`** — one `sudo` reference, at `Service.qml:208`. It is a fixed
+- **`privilege`** — one `sudo` reference, at `Service.qml:210`. It is a fixed
   argv (`omarchy-launch-terminal sudo voxtype setup gpu --enable|--disable`)
   in which no element comes from user input or a config file. It is detached
   into your terminal so the credential is typed by you, to `sudo`, outside
@@ -95,7 +96,9 @@ intentional and visible in the source:
   a read-only `systemctl --user show voxtype`. The verb is chosen from a fixed
   set in `bridge.py`; it is never taken from the request JSON. This is how the
   panel starts, stops and restarts the voice daemon, which is the plugin's
-  purpose.
+  purpose. **Turn off / Turn on** is exactly `stop` / `start`; the plugin never
+  runs `enable`, `disable` or `mask`, so it cannot change whether Voxtype
+  starts at login.
 
 There are no bundled binaries, no installer script, and no remote build or
 download-and-execute path. Everything the plugin runs is either
@@ -103,7 +106,7 @@ download-and-execute path. Everything the plugin runs is either
 installed on the system.
 
 **Missing-dependency install button.** When Voxtype or `voxtype-tui` is not
-installed, the locked panel offers an Install button (`Service.qml:219`). It
+installed, the locked panel offers an Install button (`Service.qml:221`). It
 opens Omarchy's own floating terminal
 (`omarchy-launch-floating-terminal-with-presentation`, the launcher Omarchy's
 first-run "Install Dictation" notification uses) with one of two fixed scripts

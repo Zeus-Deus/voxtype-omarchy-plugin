@@ -22,6 +22,8 @@ Item {
     // so rows and buttons do not flicker on every poll.
     readonly property bool mutating: busy && request.op !== "status"
     readonly property bool restarting: busy && request.op === "daemon.restart"
+    readonly property bool powering: (busy && (request.op === "daemon.start" || request.op === "daemon.stop"))
+                                     || queue.some(function(q) { return q.op === "daemon.start" || q.op === "daemon.stop" })
     property bool timedOut: false
     property int workerGeneration: 0
     property var queue: []

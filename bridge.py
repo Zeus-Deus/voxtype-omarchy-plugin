@@ -561,7 +561,12 @@ SYSTEMCTL_SHOW = [
     "systemctl", "--user", "show", "voxtype",
     "-p", "MainPID", "-p", "ActiveState",
     "-p", "ExecMainStartTimestamp", "-p", "ExecMainStartTimestampMonotonic",
+    "-p", "UnitFileState",
 ]
+
+# UnitFileState values that mean "starts with the session". `stop` never
+# changes this; only enable/disable does, and the panel never runs those.
+_STARTS_AT_LOGIN = ("enabled", "enabled-runtime", "static", "alias", "indirect", "generated")
 
 DAEMON_READY_STATES = ("idle", "recording", "transcribing")
 
@@ -574,6 +579,8 @@ class UnitInfo:
     start_monotonic_us: int | None
     start_wall: float | None
     available: bool
+    # True/False from UnitFileState; None when systemd did not say.
+    starts_at_login: bool | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -582,6 +589,7 @@ class UnitInfo:
             "main_pid": self.main_pid,
             "started_at": _iso(self.start_wall),
             "start_monotonic_us": self.start_monotonic_us,
+            "starts_at_login": self.starts_at_login,
         }
 
 
@@ -636,7 +644,10 @@ def _unit_info() -> UnitInfo:
         wall = _parse_systemd_timestamp(props["ExecMainStartTimestamp"])
     if not active:
         wall = None
-    return UnitInfo(active, active_state, pid or None, mono, wall, available=True)
+    unit_file = props.get("UnitFileState", "")
+    starts_at_login = (unit_file in _STARTS_AT_LOGIN) if unit_file else None
+    return UnitInfo(active, active_state, pid or None, mono, wall, available=True,
+                    starts_at_login=starts_at_login)
 
 
 def _state_file(paths: Paths, cfg: dict[str, Any] | None) -> Path | None:
