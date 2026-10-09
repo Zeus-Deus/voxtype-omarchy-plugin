@@ -2053,7 +2053,7 @@ def test_record_toggle(env: Env):
     env.remove_fake("voxtype")
     res = env.fail("record.toggle")
     assert "voxtype binary not found" in res["error"]
-    assert "`omarchy voxtype install`" in res["error"]  # `omarchy install voxtype` no longer exists
+    assert "`omarchy install dictation voxtype`" in res["error"]  # `omarchy install voxtype` no longer exists
 
 
 def test_record_toggle_failures_carry_real_error(env: Env, monkeypatch):

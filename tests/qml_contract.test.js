@@ -607,7 +607,7 @@ test('install hand-off: only the two fixed scripts reach the floating terminal',
     assert.equal(h.root.launchInstall(bad), false, `kind ${String(bad)} launches nothing`);
   assert.deepEqual(JSON.parse(JSON.stringify(h.root.Quickshell.detached)), [
     ['omarchy-launch-floating-terminal-with-presentation', 'if gum confirm "Install voxtype-tui from the AUR?"; then omarchy pkg aur add voxtype-tui; fi'],
-    ['omarchy-launch-floating-terminal-with-presentation', 'omarchy voxtype install'],
+    ['omarchy-launch-floating-terminal-with-presentation', 'omarchy install dictation voxtype'],
   ], 'fixed argv; the AUR install asks before yay --noconfirm runs');
   // The launcher is the only new execDetached, and its script comes from Model.
   assert.match(stripComments(service), /execDetached\(\["omarchy-launch-floating-terminal-with-presentation", script\]\)/);

@@ -16,6 +16,8 @@ A bar widget for **Omarchy Quattro** that manages [Voxtype](https://github.com/p
 omarchy plugin add https://github.com/Zeus-Deus/voxtype-omarchy-plugin.git --enable --yes
 ```
 
+To remove it again: `omarchy plugin remove io.github.zeus-deus.voxtype` (see [Uninstall](#uninstall)).
+
 The widget lands in the right bar section; move it with `omarchy bar move`. Plugin settings (poll interval, right-click records) live under Setup › Plugins.
 
 You need Voxtype itself and the `voxtype-tui` package (AUR: `voxtype-tui`) installed — see [Dependencies](#dependencies). If either is missing, the panel says so and offers an **Install** button that opens Omarchy's terminal and asks before installing anything. Nothing is downloaded or built when the plugin itself is installed.
@@ -110,7 +112,7 @@ installed, the locked panel offers an Install button (`Service.qml:221`). It
 opens Omarchy's own floating terminal
 (`omarchy-launch-floating-terminal-with-presentation`, the launcher Omarchy's
 first-run "Install Dictation" notification uses) with one of two fixed scripts
-from `Model.js` `INSTALL_SCRIPTS`: `omarchy voxtype install`, or
+from `Model.js` `INSTALL_SCRIPTS`: `omarchy install dictation voxtype`, or
 `omarchy pkg aur add voxtype-tui` behind a `gum confirm` prompt. The panel
 chooses between them by locked-state kind and launches nothing for any other
 value; nothing in either script comes from the bridge, the config or user

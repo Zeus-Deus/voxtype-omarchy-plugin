@@ -1632,7 +1632,7 @@ def op_record_toggle(args: dict, paths: Paths) -> dict[str, Any]:
     drive the hotkey directly: the panel's Record button uses it.
     Failures always carry a non-empty, ANSI-free ``error``."""
     if shutil.which("voxtype") is None:
-        raise BridgeError("voxtype binary not found — run `omarchy voxtype install`")
+        raise BridgeError("voxtype binary not found — run `omarchy install dictation voxtype`")
     code, out, err = _run(["voxtype", "record", "toggle"], timeout=5)
     message = _strip_ansi((err.strip() or out.strip()))
     message = " ".join(message.split()) if message else ""

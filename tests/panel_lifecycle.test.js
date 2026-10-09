@@ -482,7 +482,7 @@ test('a missing config.toml locks the panel with a copyable, never executed, vox
   assert.match(panel, /text: root\.lockedCommand; iconText: "󰆏"/);
   assert.match(panel, /onClicked: root\.copyLockedCommand\(\)/);
   h.root.status = Object.assign({}, h.root.status, {voxtype_installed: false});
-  assert.equal(h.root.lockedCommand, 'omarchy voxtype install', 'not-installed wins over not-set-up');
+  assert.equal(h.root.lockedCommand, 'omarchy install dictation voxtype', 'not-installed wins over not-set-up');
 });
 
 test('a missing voxtype-tui locks the panel with a copyable install command', () => {

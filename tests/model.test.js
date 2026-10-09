@@ -49,7 +49,7 @@ test('hero meta and primary action follow the design table', () => {
   assert.equal(Model.primaryAction({voxtype_installed: true, config_exists: false, daemon: {active: false}}), '');
   assert.equal(Model.lockedState(base, ''), null);
   assert.equal(Model.lockedState(null, 'voxtype-tui-missing').kind, 'tui');
-  assert.equal(Model.lockedState({voxtype_installed: false, config_exists: false}, '').command, 'omarchy voxtype install');
+  assert.equal(Model.lockedState({voxtype_installed: false, config_exists: false}, '').command, 'omarchy install dictation voxtype');
   same(Model.lockedState({voxtype_installed: true, config_exists: false}, ''), {kind: 'setup', title: 'Voxtype is installed but not set up', hint: 'Run the setup wizard in a terminal, then reopen the panel:', command: 'voxtype setup'});
   assert.equal(Model.lockedState({voxtype_installed: true}, ''), null, 'an older bridge without config_exists is not locked');
   assert.equal(Model.heroMeta(null, ''), 'Checking…');
@@ -443,7 +443,7 @@ test('notices lists the TUI lock, sync conflicts, reconcile warnings, synced-fro
 test('every locked state offers a concrete install command that exists', () => {
   const tui = Model.lockedState(null, 'voxtype-tui-missing');
   assert.equal(tui.command, 'omarchy pkg aur add voxtype-tui', 'no prose-only "install it from the AUR"');
-  assert.equal(Model.lockedState({voxtype_installed: false}, '').command, 'omarchy voxtype install');
+  assert.equal(Model.lockedState({voxtype_installed: false}, '').command, 'omarchy install dictation voxtype');
   // Omarchy reshuffles its subcommand tree (`omarchy install voxtype` stopped
   // existing), so check the strings against the machine when Omarchy is here.
   const {execFileSync} = require('node:child_process');
@@ -451,5 +451,5 @@ test('every locked state offers a concrete install command that exists', () => {
   try { listed = execFileSync('omarchy', ['commands', '--all'], {encoding: 'utf8', timeout: 20000}); } catch (e) { return; }
   const routes = listed.split('\n').map(l => l.trim().split(/\s{2,}/)[0]);
   assert.ok(routes.includes('omarchy pkg aur add <packages...>'), 'omarchy pkg aur add exists');
-  assert.ok(routes.includes('omarchy voxtype install'), 'omarchy voxtype install exists');
+  assert.ok(routes.includes('omarchy install dictation voxtype'), 'omarchy install dictation voxtype exists');
 });

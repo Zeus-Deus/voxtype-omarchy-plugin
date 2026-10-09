@@ -116,13 +116,13 @@ function footerIdle(status) {
 // Install commands for the locked states. Both are Omarchy's own entry points
 // (`omarchy commands --all`); tests/model.test.js pins the exact strings.
 var INSTALL_TUI_COMMAND = "omarchy pkg aur add voxtype-tui";
-var INSTALL_VOXTYPE_COMMAND = "omarchy voxtype install";
+var INSTALL_VOXTYPE_COMMAND = "omarchy install dictation voxtype";
 
 // What the Install button runs, keyed by locked-state kind. Each script is a
 // fixed literal handed to Omarchy's floating terminal
 // (omarchy-launch-floating-terminal-with-presentation), which shows the
 // Omarchy header and a Done/Failed screen. Nothing in them comes from the
-// bridge, the config or the user. `omarchy voxtype install` asks its own
+// bridge, the config or the user. `omarchy install dictation voxtype` asks its own
 // confirmation; the AUR install is prefixed with one so no package is added
 // without a yes in the terminal (omarchy pkg aur add runs yay --noconfirm).
 var INSTALL_SCRIPTS = {

@@ -31,7 +31,7 @@ docs/DEVELOPMENT.md README.md LICENSE
 
 | State | Detection | UI |
 |---|---|---|
-| `voxtype` binary missing | bridge `status.voxtype_installed=false` | Locked hero: "Voxtype is not installed" + **Install Voxtype** (runs `omarchy voxtype install` in Omarchy's floating terminal, which asks first) and a copyable `omarchy voxtype install` |
+| `voxtype` binary missing | bridge `status.voxtype_installed=false` | Locked hero: "Voxtype is not installed" + **Install Voxtype** (runs `omarchy install dictation voxtype` in Omarchy's floating terminal, which asks first) and a copyable `omarchy install dictation voxtype` |
 | `voxtype_tui` package missing | bridge exits 3 / QML gets `{"ok":false,"error":"voxtype-tui-missing"}` | Locked hero: "Install voxtype-tui to manage Voxtype here" + **Install voxtype-tui** (Omarchy's floating terminal: `gum confirm`, then `omarchy pkg aur add voxtype-tui`) and a copyable `omarchy pkg aur add voxtype-tui` |
 | daemon off (stopped) | `status.daemon.active=false`, `active_state` not `failed` | Hero meta "Off · model unloaded", STATE "Off", primary action **Turn on**; footer "Back on at next login" (from `starts_at_login`). Restart / Ctrl+R / middle-click are refused while off so they cannot silently start it |
 | daemon crashed | `status.daemon.active_state=failed` | Hero meta "Stopped unexpectedly", STATE "Failed", **Turn on** |
