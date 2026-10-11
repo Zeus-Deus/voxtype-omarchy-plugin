@@ -2756,7 +2756,7 @@ def test_status_reports_qwen3_engine_and_a_down_server(env: Env):
     # Unit failed: the detail names it.
     env.monkeypatch.setenv("FAKE_ASR_STATE", "failed")
     r = env.ok("status")
-    assert r["asr"]["healthy"] is False and "server not running (failed" in r["asr"]["detail"]
+    assert r["asr"]["healthy"] is False and r["asr"]["detail"] == "not running"
 
 
 @needs_extra

@@ -435,8 +435,12 @@ function asrDown(status) {
 
 function asrNotice(status) {
     if (!asrDown(status)) return "";
-    var detail = status.asr.detail ? " (" + sanitize(status.asr.detail, 100) + ")" : "";
-    return "Qwen3-ASR server is down" + detail + " — dictation fails until it is back. Restart may fix it.";
+    // voxtype-tui sends a short human reason ("not running", "still starting",
+    // "port taken by another program"); older builds sent a long technical
+    // string, so only show reasons that fit on one line.
+    var d = status.asr.detail ? sanitize(status.asr.detail, 60) : "";
+    var why = (d && d.length <= 40 && d !== "ok") ? " (" + d + ")" : "";
+    return "Qwen3-ASR server is down" + why + ". Restart to fix it.";
 }
 
 function plainOptions(list) {

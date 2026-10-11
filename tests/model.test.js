@@ -492,12 +492,14 @@ test('a down Qwen3-ASR server is a warning only while voxtype runs', () => {
               asr: {active: true, healthy: true, detail: 'ok'}};
   assert.equal(Model.asrDown(up), false);
   assert.equal(Model.heroMeta(up, ''), 'Listening · 0.6b-q4_k · X');
-  const down = Object.assign({}, up, {asr: {active: true, healthy: false, detail: 'server not running (failed, exit-code)'}});
+  const down = Object.assign({}, up, {asr: {active: true, healthy: false, detail: 'not running'}});
   assert.equal(Model.asrDown(down), true);
   assert.equal(Model.heroMeta(down, ''), 'Qwen3-ASR server down');
   const n = Model.notices(down, {});
   assert.equal(n[0].kind, 'warn');
-  assert.match(n[0].text, /^Qwen3-ASR server is down \(server not running \(failed, exit-code\)\)/);
+  assert.equal(n[0].text, 'Qwen3-ASR server is down (not running). Restart to fix it.');
+  const noisy = Object.assign({}, up, {asr: {active: true, healthy: false, detail: 'server not running (inactive); port 44999 is in use (another process, or the server is still shutting down)'}});
+  assert.equal(Model.notices(noisy, {})[0].text, 'Qwen3-ASR server is down. Restart to fix it.', 'long technical details are not shown');
   const off = Object.assign({}, down, {daemon: {active: false, state: 'stopped'}});
   assert.equal(Model.asrDown(off), false, 'turned off: the server is off too, by design');
   assert.equal(Model.notices(off, {}).length, 0);
