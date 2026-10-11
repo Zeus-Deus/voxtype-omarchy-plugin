@@ -896,3 +896,18 @@ test('a save whose Qwen3-ASR server update failed says so instead of a silent Sa
     asr_problems: ['could not enable voxtype-asr.service: boom']}, {op: 'vocab.add', phrase: 'x'});
   assert.match(h.root.errorText, /could not enable voxtype-asr\.service: boom/);
 });
+
+test('loadModels derives the engine itself: inside onEngineChanged the modelsView binding may still be stale', () => {
+  // Found live: reopening the panel after the engine changed elsewhere listed
+  // the previous engine's catalog and stayed on "Reading the model catalog…".
+  const body = panel.slice(panel.indexOf('    function loadModels()'), panel.indexOf('    function pickModelsEngine('));
+  assert.doesNotMatch(body.replace(/\/\/.*$/gm, ''), /modelsView/);
+  const h = panelHarness();
+  h.root.section = 'models';
+  h.root.snapshot = {settings: {engine: 'qwen3-asr'}};
+  // Simulate the stale binding: modelsView still reports the old engine.
+  Object.defineProperty(h.root, 'modelsView', {get: () => 'qwen3-asr', configurable: true});
+  h.root.snapshot = {settings: {engine: 'whisper'}};
+  h.root.loadModels();
+  assert.deepEqual(JSON.parse(JSON.stringify(h.requests.pop())), {op: 'models.list', engine: 'whisper'});
+});

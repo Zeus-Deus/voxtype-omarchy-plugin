@@ -247,7 +247,10 @@ Panel {
     function loadModels() {
         if (service.downloading) return;
         service.cancelQueued("models.list");
-        service.run({op: "models.list", engine: modelsView});
+        // Derived here, not read from `modelsView`: inside onEngineChanged
+        // that binding can still hold the previous engine, which would list
+        // the old catalog and leave the section loading forever.
+        service.run({op: "models.list", engine: browseEngine !== "" ? browseEngine : engine});
     }
     function pickModelsEngine(value) {
         if (value === engine) { if (browseEngine !== "") { browseEngine = ""; loadModels(); } return; }
