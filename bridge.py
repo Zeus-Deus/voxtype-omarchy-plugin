@@ -32,6 +32,14 @@ time, so the bridge re-points them before every call (see
 startup sync reconcile inside ``AppState.load``). Config / sidecar paths
 are passed explicitly to ``AppState.load``; ``gpu.DROPIN_PATH`` is a
 ``~``-relative path expanded at call time, so ``HOME`` covers it.
+
+Extra models: newer voxtype-tui releases add quantized whisper files and
+Qwen3-ASR (``voxtype_tui.extra_models`` / ``voxtype_tui.asr_server``, both
+Textual-free). The bridge feature-detects them (``_extra``); with an older
+voxtype-tui every op behaves exactly as before. Qwen3-ASR shows up as the
+engine ``qwen3-asr`` with the virtual setting ``qwen3-asr.model``; under the
+hood it is a local server voxtype reaches through its whisper remote mode,
+which ``asr_server`` wires up on every ``AppState.save``.
 """
 from __future__ import annotations
 
@@ -207,13 +215,59 @@ def _import_state(paths: Paths):
     return state
 
 
+# Engine key and virtual settings path for Qwen3-ASR. The key mirrors
+# voxtype_tui.extra_models.ENGINE_QWEN3 (pinned by a test); it is never
+# written to `engine = ...` in config.toml. The model lives in the sidecar,
+# so `qwen3-asr.model` is answered by the bridge, not by SETTING_TYPES.
+ENGINE_QWEN3 = "qwen3-asr"
+QWEN3_MODEL_PATH = "qwen3-asr.model"
+
+
+def _has_extra_models() -> bool:
+    """Cheap check (no import) for a voxtype-tui that ships extra models."""
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec("voxtype_tui.extra_models") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _extra():
+    """``(extra_models, asr_server)`` from a voxtype-tui that has them, else
+    None. Both modules are Textual-free; an older voxtype-tui lacks them and
+    the bridge then behaves exactly as before."""
+    if not _has_extra_models():
+        return None
+    try:
+        from voxtype_tui import asr_server, extra_models
+    except ImportError:
+        return None
+    return extra_models, asr_server
+
+
+def _catalog_whisper_name(value: str) -> str:
+    """``ggml-<name>.bin`` (bare filename, as voxtype-tui writes extra whisper
+    models into config.toml) -> ``<name>``. Inlined copy of
+    ``extra_models.catalog_model_name`` so ``status`` needs no import;
+    pinned by tests/test_bridge.py."""
+    if "/" in value or not (value.startswith("ggml-") and value.endswith(".bin")):
+        return value
+    return value[len("ggml-"):-len(".bin")]
+
+
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
 
 
 class BridgeError(Exception):
-    """Human-readable failure; becomes ``{"ok": false, "error": str}``."""
+    """Human-readable failure; becomes ``{"ok": false, "error": str}``.
+    Keyword arguments are added to that response (e.g. ``needs_download``)."""
+
+    def __init__(self, message: str, **extra: Any):
+        super().__init__(message)
+        self.extra = extra
 
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -484,6 +538,17 @@ def _snapshot(st) -> dict[str, Any]:
             settings_out[path] = _plain(val)
     api_key = _get_path(st.doc, "whisper.remote_api_key")
     settings_out["whisper.remote_api_key_set"] = bool(api_key) and str(api_key) != ""
+    x = _extra()
+    if x is not None:
+        # The panel sees engines and models as the user picks them: extra
+        # whisper models by catalog name, Qwen3-ASR as its own engine (its
+        # config is whisper remote mode underneath).
+        if isinstance(settings_out.get("whisper.model"), str):
+            settings_out["whisper.model"] = x[0].catalog_model_name("whisper", settings_out["whisper.model"])
+        ui_engine, ui_model = x[1].active_engine_model(st.doc, st.sc)
+        if ui_engine == ENGINE_QWEN3:
+            settings_out["engine"] = ENGINE_QWEN3
+            settings_out[QWEN3_MODEL_PATH] = ui_model
 
     sr = st.sync_reconcile
     return {
@@ -526,6 +591,11 @@ def _save_and_reply(st, extra: dict[str, Any] | None = None) -> dict[str, Any]:
         # daemon start), not just the restart-sensitive subset above.
         "daemon_stale": bool(st.daemon_stale),
     }
+    # Problems from reconciling the Qwen3-ASR server unit after the save
+    # (newer voxtype-tui only); the save itself succeeded.
+    problems = [str(p) for p in (getattr(st, "asr_problems", None) or [])]
+    if problems:
+        out["asr_problems"] = problems
     if extra:
         out.update(extra)
     return out
@@ -798,9 +868,18 @@ def op_status(args: dict, paths: Paths) -> dict[str, Any]:
 
     engine = str(cfg.get("engine") or "whisper")
     model_name = _get_path(cfg, f"{engine}.model")
+    if engine == "whisper" and isinstance(model_name, str):
+        # Extra whisper models are written as their bare filename.
+        model_name = _catalog_whisper_name(model_name)
     model_path: Path | None = None
     present: bool | None = None
-    if isinstance(model_name, str) and model_name:
+    asr = _status_qwen3(cfg, paths) if not config_error else None
+    if asr is not None:
+        engine = ENGINE_QWEN3
+        model_name = asr.pop("model_name")
+        model_path = Path(asr.pop("model_path"))
+        present = asr.pop("model_present")
+    elif isinstance(model_name, str) and model_name:
         if model_name.startswith("/") or model_name.startswith("~"):
             model_path = Path(model_name).expanduser()
             present = model_path.exists()
@@ -848,9 +927,66 @@ def op_status(args: dict, paths: Paths) -> dict[str, Any]:
         "picker_available": shutil.which("zenity") is not None,
         "tui_open_pid": tui_lock_holder(paths),
     }
+    if asr is not None:
+        out["asr"] = asr
     if config_error:
         out["warnings"] = [f"config.toml could not be parsed: {config_error}"]
     return out
+
+
+def _status_qwen3(cfg: dict[str, Any], paths: Paths) -> dict[str, Any] | None:
+    """Qwen3-ASR block for ``status`` when it is the active engine, else None.
+
+    Stays on the fast path: ``asr_server`` (stdlib-only, no Textual) is
+    imported only when the sidecar's ``qwen3_asr`` marker says active. Costs
+    one extra ``systemctl show`` and one local ``/health`` GET (0.5 s
+    timeout) while Qwen3-ASR is active.
+    """
+    try:
+        raw = paths.sidecar.read_bytes()
+    except OSError:
+        return None
+    if b'"qwen3_asr"' not in raw:
+        return None
+    try:
+        sc = json.loads(raw)
+    except ValueError:
+        return None
+    block = sc.get("qwen3_asr") if isinstance(sc, dict) else None
+    if not isinstance(block, dict) or block.get("active") is not True:
+        return None
+    x = _extra()
+    if x is None:
+        return None
+    xm, asr_server = x
+    if not asr_server.is_qwen3_active(cfg, sc):
+        return None
+    st = asr_server.status(cfg, sc, probe=True)
+    q = st.get("qwen3") or {}
+    name = str(q.get("model") or "")
+    m = xm.get_extra(ENGINE_QWEN3, name)
+    model_path = xm.model_path(m, paths.models_dir) if m else paths.models_dir / name
+    variant = str(q.get("variant") or "")
+    build_ok = variant in xm.CRISPASR_BUILDS and xm.build_installed(variant)
+    unit = q.get("unit") or {}
+    return {
+        "model_name": name,
+        "model_path": str(model_path),
+        # The model counts as downloaded only with its server build, so the
+        # Dictate banner offers Download (which fetches whatever is missing).
+        "model_present": _model_present(model_path) and build_ok,
+        "engine_label": xm.engine_label(ENGINE_QWEN3),
+        "active": True,
+        "model": name,
+        "endpoint": q.get("endpoint"),
+        "healthy": bool(q.get("healthy")),
+        "detail": q.get("detail"),
+        "unit": {
+            "active_state": unit.get("active_state"),
+            "main_pid": unit.get("main_pid"),
+            "result": unit.get("result"),
+        },
+    }
 
 
 def op_load(args: dict, paths: Paths) -> dict[str, Any]:
@@ -867,14 +1003,29 @@ def op_options(args: dict, paths: Paths) -> dict[str, Any]:
         for label, name in settings.enumerate_audio_devices_sync()
         if name != settings.CUSTOM_AUDIO_DEVICE
     ]
+    engines = list(settings.ENGINES)
+    compiled = set(voxtype_cli.compiled_engines())
+    model_paths = dict(settings.MODEL_PATH_PER_ENGINE)
+    labels = {e: e for e in engines}
+    x = _extra()
+    if x is not None:
+        xm = x[0]
+        # Qwen3-ASR is reached through voxtype's whisper remote mode, so it
+        # works wherever whisper does.
+        engines.append(ENGINE_QWEN3)
+        if "whisper" in compiled:
+            compiled.add(ENGINE_QWEN3)
+        model_paths[ENGINE_QWEN3] = QWEN3_MODEL_PATH
+        labels = {e: xm.engine_label(e) for e in engines}
     return {
         "ok": True,
-        "engines": list(settings.ENGINES),
-        "compiled_engines": sorted(voxtype_cli.compiled_engines()),
+        "engines": engines,
+        "engine_labels": labels,
+        "compiled_engines": sorted(compiled),
         "models_per_engine": {
             e: [m.name for m in infos] for e, infos in models.MODEL_CATALOG.items()
         },
-        "model_paths": dict(settings.MODEL_PATH_PER_ENGINE),
+        "model_paths": model_paths,
         "hotkey_modifiers": list(settings.HOTKEY_MODIFIERS),
         "hotkey_modes": list(settings.HOTKEY_MODES),
         "output_modes": list(settings.OUTPUT_MODES),
@@ -894,7 +1045,26 @@ def _active_model(doc: Any, engine: str) -> str:
     if path is None:
         raise BridgeError(f"unknown engine {engine!r}")
     val = _get_path(doc, path)
-    return str(val) if val else ""
+    val = str(val) if val else ""
+    return _catalog_whisper_name(val) if engine == "whisper" else val
+
+
+def _qwen3_active(st) -> bool:
+    x = _extra()
+    return x is not None and x[1].is_qwen3_active(st.doc, st.sc)
+
+
+def _ui_active_model(st, engine: str) -> str:
+    """The model the panel marks active for ``engine``: Qwen3-ASR's model
+    while it is active (and no whisper row then), else the configured one."""
+    x = _extra()
+    if x is not None:
+        live_engine, live_model = x[1].active_engine_model(st.doc, st.sc)
+        if engine == ENGINE_QWEN3:
+            return live_model if live_engine == ENGINE_QWEN3 else ""
+        if engine == "whisper" and live_engine == ENGINE_QWEN3:
+            return ""
+    return _active_model(st.doc, engine)
 
 
 def op_models_list(args: dict, paths: Paths) -> dict[str, Any]:
@@ -903,14 +1073,18 @@ def op_models_list(args: dict, paths: Paths) -> dict[str, Any]:
     if engine not in models.MODEL_CATALOG:
         raise BridgeError(f"unknown engine {engine!r}")
     st = _load_state(paths)
-    active = _active_model(st.doc, engine)
+    active = _ui_active_model(st, engine)
     downloaded = models.scan_downloaded(engine)
+    x = _extra()
+    extra_rows: dict[str, dict[str, Any]] = {}
+    if x is not None:
+        extra_rows = {r["name"]: r for r in x[0].list_extra_models(engine, models_dir=paths.models_dir)}
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
     for info in models.MODEL_CATALOG[engine]:
         seen.add(info.name)
         on_disk = downloaded.get(info.name)
-        rows.append({
+        row = {
             "name": info.name,
             "size_mb": info.size_mb,
             "on_disk_bytes": on_disk,
@@ -918,9 +1092,20 @@ def op_models_list(args: dict, paths: Paths) -> dict[str, Any]:
             "unknown": False,
             "active": info.name == active,
             "path": str(models.model_file_path(engine, info.name, models_dir=paths.models_dir)),
-        })
+        }
+        extra = extra_rows.get(info.name)
+        if extra is not None:
+            # Same row shape as a native model, plus why it can't be used
+            # here. `incomplete`: the file is there but its engine build
+            # isn't, so Download is still the action (it fetches the rest).
+            row["available"] = bool(extra["available"])
+            row["disabled_reason"] = extra["disabled_reason"] if not extra["available"] else None
+            row["incomplete"] = bool(extra["available"] and row["downloaded"] and extra["disabled_reason"])
+            if row["incomplete"]:
+                row["disabled_reason"] = None
+        rows.append(row)
     for name, size in downloaded.items():
-        if name in seen:
+        if name in seen or name.endswith(".part"):
             continue
         rows.append({
             "name": name,
@@ -1321,6 +1506,11 @@ def _ensure_required_sections(doc: Any) -> None:
 
 def op_settings_set(args: dict, paths: Paths) -> dict[str, Any]:
     path = _require_str(args, "path")
+    x = _extra()
+    if x is not None:
+        routed = _settings_set_extra(path, args.get("value"), paths, x)
+        if routed is not None:
+            return routed
     if path not in SETTING_TYPES:
         raise BridgeError(f"'{path}' is not a settable path")
     if path in SECRET_SETTINGS:
@@ -1348,8 +1538,61 @@ def op_settings_set(args: dict, paths: Paths) -> dict[str, Any]:
     return _save_and_reply(st, {"path": path, "value": value if path not in SECRET_SETTINGS else None})
 
 
+def _settings_set_extra(path: str, value: Any, paths: Paths, x) -> dict[str, Any] | None:
+    """Engine / model writes that involve an extra model or Qwen3-ASR go
+    through voxtype-tui's ``asr_server`` (bare ``.bin`` filenames, the
+    remote-mode switch and its restore). Returns None for everything else."""
+    xm, asr_server = x
+    if path == QWEN3_MODEL_PATH:
+        if not isinstance(value, str) or not value.strip():
+            raise BridgeError(f"'{path}' expects a model name")
+        return op_models_set_active({"engine": ENGINE_QWEN3, "name": value.strip()}, paths)
+    if path == "whisper.model" and isinstance(value, str) and xm.is_extra_model("whisper", value):
+        return op_models_set_active({"engine": "whisper", "name": value}, paths)
+    if path != "engine" or not isinstance(value, str):
+        return None
+    if value == ENGINE_QWEN3:
+        st = _load_state(paths)
+        if asr_server.is_qwen3_active(st.doc, st.sc):
+            return _save_and_reply(st, {"path": path, "value": value})
+        # Same choice the TUI makes: the last-used Qwen3 model, else the
+        # first one that is downloaded.
+        remembered = str(asr_server.qwen3_state(st.sc).get("model") or "")
+        names = xm.extra_names(ENGINE_QWEN3)
+        candidates = ([remembered] if remembered in names else []) + [n for n in names if n != remembered]
+        error = None
+        for name in candidates:
+            if not xm.is_downloaded(ENGINE_QWEN3, name, paths.models_dir):
+                continue
+            try:
+                asr_server.set_active_model(st, ENGINE_QWEN3, name, models_dir=paths.models_dir)
+            except xm.RefusedError as e:
+                error = str(e)
+                continue
+            return _save_and_reply(st, {"path": path, "value": value})
+        raise BridgeError(
+            error or "no Qwen3-ASR model is downloaded yet — download one first",
+            needs_download=True, engine=ENGINE_QWEN3,
+        )
+    st = _load_state(paths)
+    if not asr_server.is_qwen3_active(st.doc, st.sc):
+        return None
+    from voxtype_tui import settings
+
+    if value not in settings.ENGINES:
+        raise BridgeError(f"unknown engine {value!r}")
+    # Leaving Qwen3-ASR: restore the whisper settings it replaced; the
+    # server unit is disabled and stopped by the save.
+    asr_server.deactivate_qwen3(st, restore_engine=(value == "whisper"))
+    st.set_setting("engine", value)
+    _ensure_required_sections(st.doc)
+    return _save_and_reply(st, {"path": path, "value": value})
+
+
 def op_settings_unset(args: dict, paths: Paths) -> dict[str, Any]:
     path = _require_str(args, "path")
+    if path == QWEN3_MODEL_PATH and _extra() is not None:
+        raise BridgeError("pick another engine to stop using Qwen3-ASR")
     if path not in SETTING_TYPES:
         raise BridgeError(f"'{path}' is not a settable path")
     st = _load_state(paths)
@@ -1381,6 +1624,20 @@ def op_models_set_active(args: dict, paths: Paths) -> dict[str, Any]:
     from voxtype_tui import settings
 
     engine, name, models = _model_args(args, paths)
+    x = _extra()
+    if x is not None:
+        xm, asr_server = x
+        st = _load_state(paths)
+        if engine == ENGINE_QWEN3 or xm.is_extra_model(engine, name) or asr_server.is_qwen3_active(st.doc, st.sc):
+            try:
+                asr_server.set_active_model(
+                    st, engine, name, models_dir=paths.models_dir,
+                    is_installed=lambda e, n: models.is_model_installed(e, n, models_dir=paths.models_dir),
+                )
+            except xm.RefusedError as e:
+                raise BridgeError(str(e)) from e
+            _ensure_required_sections(st.doc)
+            return _save_and_reply(st, {"engine": engine, "name": name})
     if not models.is_model_installed(engine, name, models_dir=paths.models_dir):
         raise BridgeError(f"'{name}' is not downloaded for {engine} — download it first")
     st = _load_state(paths)
@@ -1391,10 +1648,34 @@ def op_models_set_active(args: dict, paths: Paths) -> dict[str, Any]:
 def op_models_delete(args: dict, paths: Paths) -> dict[str, Any]:
     engine, name, models = _model_args(args, paths)
     st = _load_state(paths)
-    if name == _active_model(st.doc, engine):
+    qwen3 = _qwen3_active(st)
+    if name == _ui_active_model(st, engine):
         raise BridgeError(
             f"'{name}' is the active {engine} model — set a different model active first"
         )
+    if qwen3 and engine == "whisper" and name == _active_model(st.doc, "whisper"):
+        # Qwen3-ASR switches back to this whisper model; keep it.
+        raise BridgeError(
+            f"'{name}' is the whisper model used when you switch back from "
+            "Qwen3-ASR — set a different model active first"
+        )
+    x = _extra()
+    if x is not None and x[0].is_extra_model(engine, name):
+        try:
+            freed = x[0].delete(engine, name, doc=st.doc, sc=st.sc, models_dir=paths.models_dir)
+        except x[0].RefusedError as e:
+            raise BridgeError(str(e)) from e
+        except OSError as e:
+            raise BridgeError(f"delete failed: {e}") from e
+        return {
+            "ok": True,
+            "snapshot": _snapshot(st),
+            "restart_needed": [],
+            "daemon_stale": False,
+            "engine": engine,
+            "name": name,
+            "freed_bytes": freed,
+        }
     path = models.model_file_path(engine, name, models_dir=paths.models_dir)
     if not path.exists():
         raise BridgeError(f"'{name}' is not downloaded — nothing to delete")
@@ -1699,7 +1980,7 @@ def handle(request: Any) -> dict[str, Any]:
     try:
         return OPS[op](request, paths)
     except BridgeError as e:
-        return {"ok": False, "error": str(e), "op": op}
+        return {"ok": False, "error": str(e), "op": op, **e.extra}
     except Exception as e:  # never leak a traceback to the panel
         return {"ok": False, "error": f"{type(e).__name__}: {e}", "op": op}
 
@@ -1758,13 +2039,35 @@ def run_download(engine: str, name: str, out=None) -> int:
     # engine before we spawn anything, and because the cancel path below
     # needs it to locate the partial artifact.
     argv = ["voxtype", "setup", "--download", "--model", name]
-    emit("LOG $ " + " ".join(argv))
+    child_env = None
+    x = _extra()
+    xm = x[0] if x is not None else None
+    extra = xm is not None and xm.is_extra_model(engine, name)
+    if extra:
+        # Extra models come from voxtype-tui's own sha256-verified
+        # downloader: same NN.N% progress frames, SIGTERM removes its
+        # `.part`, and it never edits config.toml.
+        ok, reason = xm.availability(engine, name)
+        if not ok:
+            emit(f"FAILED {name}: {reason}")
+            return 1
+        argv = list(xm.download_argv(engine, name))
+        if argv and argv[0] == sys.executable:
+            # -P: don't put the bridge's working directory on the child's
+            # import path (a stray `json.py` there must not load).
+            argv.insert(1, "-P")
+        child_env = dict(os.environ, VOXTYPE_MODELS_DIR=str(paths.models_dir))
+        shown = ["voxtype-tui", "download", engine, name]
+    else:
+        shown = argv
+    emit("LOG $ " + " ".join(shown))
     try:
         # bufsize=0: raw pipe, so read(256) returns whatever is available
         # instead of blocking until 256 bytes have accumulated. That is
         # what makes the progress lines stream in real time.
         proc = subprocess.Popen(
             argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0,
+            env=child_env,
         )
     except OSError as e:
         emit(f"FAILED could not launch voxtype: {e}")
@@ -1813,6 +2116,13 @@ def run_download(engine: str, name: str, out=None) -> int:
         proc.kill()
         code = proc.wait()
 
+    if cancelled and extra:
+        # The child removes its own `.part` on SIGTERM; this catches one it
+        # could not (killed hard). A complete, verified file is never touched.
+        if xm.cleanup_partial(engine, name, models_dir=paths.models_dir):
+            emit("LOG removed partial download")
+        emit("FAILED cancelled")
+        return 1
     if cancelled:
         partial = models.model_file_path(engine, name, models_dir=paths.models_dir)
         if partial.exists():
@@ -1827,10 +2137,44 @@ def run_download(engine: str, name: str, out=None) -> int:
         emit("FAILED cancelled")
         return 1
     if code == 0:
+        if extra:
+            msg = _activate_after_download(engine, name, paths)
+            if msg:
+                emit_log(msg)
         emit("DONE")
         return 0
     emit(f"FAILED exit {code}")
     return 1
+
+
+def _activate_after_download(engine: str, name: str, paths: Paths) -> str:
+    """Make a freshly downloaded extra model active, the way
+    ``voxtype setup --download --model`` does for its own models, so both
+    kinds behave the same in the panel. Returns a log line; never raises
+    (the download itself succeeded)."""
+    if tui_lock_holder(paths) is not None:
+        return "voxtype-tui is open — set the model active there or after closing it"
+    x = _extra()
+    if x is None:
+        return ""
+    xm, asr_server = x
+    try:
+        st = _load_state(paths)
+        live_engine = asr_server.active_engine_model(st.doc, st.sc)[0]
+        if engine == ENGINE_QWEN3 or live_engine == engine:
+            asr_server.set_active_model(st, engine, name, models_dir=paths.models_dir)
+            _ensure_required_sections(st.doc)
+        else:
+            # Like `voxtype setup --download` on another engine: the
+            # whisper model is set, the engine in use is left alone.
+            st.set_setting(f"{engine}.model", xm.config_model_value(engine, name))
+        st.save()
+    except Exception as e:  # noqa: BLE001 — report, the file is downloaded
+        return f"downloaded, but could not set it active: {e}"
+    problems = [str(p) for p in (getattr(st, "asr_problems", None) or [])]
+    if problems:
+        return "set active; " + "; ".join(problems)
+    return f"set {name} active"
 
 
 # ---------------------------------------------------------------------------

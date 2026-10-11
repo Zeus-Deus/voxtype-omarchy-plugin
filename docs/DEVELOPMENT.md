@@ -29,6 +29,9 @@ and nothing here is executed by the plugin.
 ```bash
 node --test tests/*.test.js
 uv run --python /usr/bin/python3 --with pytest pytest -q tests/test_bridge.py   # /usr/bin/python3 has no pytest module
+# Extra models (Qwen3-ASR, quantized whisper) need a voxtype-tui that has them; run the suite
+# against both the released package (those tests skip) and a checkout:
+#   env PYTHONPATH=<voxtype-tui checkout> uv run --python /usr/bin/python3 --with pytest pytest -q tests/test_bridge.py
 qmllint -I /usr/share/omarchy/shell BarWidget.qml Panel.qml Service.qml VoxtypeIcon.qml   # exit 0, empty output (syntax only)
 # Semantic lint: the Qt 6 linter with the shell importable as `qs`:
 #   d=$(mktemp -d) && ln -s /usr/share/omarchy/shell "$d/qs" && /usr/lib/qt6/bin/qmllint -I "$d" -I /usr/lib/qt6/qml Panel.qml
@@ -38,7 +41,9 @@ omarchy plugin validate .
 
 Bridge tests run only against temporary config/sidecar/models/HOME trees via the
 `VOXTYPE_CONFIG`, `VOXTYPE_TUI_SIDECAR`, `VOXTYPE_MODELS_DIR` and `HOME` overrides,
-with a fake `voxtype` on `PATH`. They never touch `~/.config/voxtype`.
+with a fake `voxtype` on `PATH`. They never touch `~/.config/voxtype`. The fixture also
+points `XDG_CONFIG_HOME` / `XDG_DATA_HOME` into the temp HOME, because voxtype-tui writes
+the Qwen3-ASR unit, its hotwords file and the CrispASR build there.
 
 ## Live verification
 

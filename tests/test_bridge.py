@@ -146,6 +146,11 @@ if a[:1] == ["setup"]:
         sys.stdout.write(f"Model downloaded to {target}\n")
         sys.exit(0)
 
+if a[:3] == ["info", "variants", "--json"]:
+    # What newer voxtype-tui reads to decide whether GPU-only models work.
+    print('{"running_variant": "%s"}' % os.environ.get("FAKE_VOXTYPE_VARIANT", "whisper-avx2"))
+    sys.exit(0)
+
 if a[:2] == ["record", "toggle"]:
     mode = os.environ.get("FAKE_VOXTYPE_TOGGLE", "ok")
     if mode == "fail":
@@ -197,6 +202,21 @@ if a[:1] != ["--user"]:
     sys.exit(1)
 verb = a[1]
 st = load()
+if verb == "show" and "voxtype-asr.service" in a:
+    # The Qwen3-ASR unit follows voxtype (PartOf=); FAKE_ASR_STATE forces it.
+    forced = os.environ.get("FAKE_ASR_STATE")
+    up = st["active"] and not forced
+    print("\n".join([
+        "ActiveState=" + ("active" if up else (forced or "inactive")),
+        "SubState=" + ("running" if up else "dead"),
+        "MainPID=" + (str(st["pid"] + 100) if up else "0"),
+        "UnitFileState=enabled",
+        "NRestarts=0",
+        "Result=" + ("exit-code" if forced == "failed" else "success"),
+    ]))
+    sys.exit(0)
+if verb in ("enable", "disable"):
+    sys.exit(0)
 if verb == "show":
     active = "active" if st["active"] else "inactive"
     lines = []
@@ -383,6 +403,18 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Env:
     _install(e.fakebin / "pactl", FAKE_PACTL)
 
     monkeypatch.setenv("HOME", str(e.home))
+    # voxtype-tui resolves its own dirs (Qwen3-ASR unit, hotwords file,
+    # engine builds) from these when set, which the host shell usually does.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(e.home / ".config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(e.home / ".local" / "share"))
+    monkeypatch.delenv("FAKE_VOXTYPE_VARIANT", raising=False)
+    monkeypatch.delenv("FAKE_ASR_STATE", raising=False)
+    monkeypatch.delenv("VOXTYPE_TUI_SYSTEMCTL", raising=False)
+    if bridge._has_extra_models():
+        from voxtype_tui import extra_models
+
+        # detect_accel() caches per process; every test starts unprobed.
+        monkeypatch.setattr(extra_models, "_ACCEL_CACHE", None)
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(e.runtime))
     monkeypatch.setenv("VOXTYPE_CONFIG", str(e.config))
     monkeypatch.setenv("VOXTYPE_TUI_SIDECAR", str(e.sidecar))
@@ -532,8 +564,11 @@ def test_cli_roundtrip_write_op(env: Env):
 def test_cli_exit_3_when_voxtype_tui_missing(env: Env):
     # -S drops site-packages, so voxtype_tui is unimportable while the
     # stdlib still is: exactly the "package missing" failure mode.
+    # PYTHONPATH survives -S, so drop it too (it points at a voxtype-tui
+    # checkout when the suite runs against an unreleased one).
+    child_env = {k: v for k, v in env.subprocess_env().items() if k != "PYTHONPATH"}
     r = subprocess.run([sys.executable, "-S", str(BRIDGE)], input='{"op":"status"}',
-                       capture_output=True, text=True, env=env.subprocess_env())
+                       capture_output=True, text=True, env=child_env)
     assert r.returncode == 3
     assert json.loads(r.stdout) == {"ok": False, "error": "voxtype-tui-missing"}
 
@@ -984,7 +1019,10 @@ def test_load_missing_config_is_clean_error(env: Env):
 def test_options(env: Env):
     res = env.ok("options")
     assert res["engines"][0] == "whisper"
-    assert res["compiled_engines"] == ["whisper"]
+    # Qwen3-ASR rides on whisper's remote mode, so it is "compiled" whenever
+    # whisper is (newer voxtype-tui only).
+    expected = ["qwen3-asr", "whisper"] if bridge._extra() is not None else ["whisper"]
+    assert res["compiled_engines"] == expected
     assert "large-v3" in res["models_per_engine"]["whisper"]
     assert res["model_paths"]["parakeet"] == "parakeet.model"
     assert res["hotkey_modifiers"] == ["LEFTCTRL", "LEFTALT", "LEFTSHIFT", "LEFTMETA"]
@@ -1908,7 +1946,9 @@ def test_daemon_restart_noop_is_not_ok(env: Env, monkeypatch):
     assert res["ok"] is False
     assert res["main_pid_before"] == res["main_pid_after"] == 4242
     assert res["changed"] is False and res["ready"] is False
-    assert "did not change" in res["message"]
+    # The bridge's own wording, or voxtype-tui's since it verifies the PID
+    # change itself (voxtype-tui after 0.1.8).
+    assert "did not change" in res["message"] or "was not restarted" in res["message"]
 
 
 def test_daemon_restart_ready_timeout(env: Env, monkeypatch):
@@ -2452,3 +2492,418 @@ def test_qml_deadline_constant_matches_service_qml():
     restart_ms, default_ms = int(m.group(1)), int(m.group(2))
     assert restart_ms == bridge.QML_DAEMON_RESTART_DEADLINE * 1000
     assert restart_ms > default_ms
+
+
+# ---------------------------------------------------------------------------
+# Extra models (voxtype-tui with extra_models / asr_server): quantized
+# whisper files and Qwen3-ASR. Skipped against an older voxtype-tui; the
+# backward-compat tests at the end run against both.
+# ---------------------------------------------------------------------------
+
+needs_extra = pytest.mark.skipif(
+    not bridge._has_extra_models(), reason="installed voxtype-tui has no extra models",
+)
+Q5 = "large-v3-turbo-q5_0"
+Q4K = "0.6b-q4_k"
+
+
+def _xm():
+    from voxtype_tui import extra_models
+
+    return extra_models
+
+
+def _qwen3_ready(env: Env, name: str = Q4K) -> Path:
+    """Put a Qwen3 GGUF and the matching CrispASR build on disk (fakes)."""
+    xm = _xm()
+    m = xm.get_extra("qwen3-asr", name)
+    gguf = env.models_dir / m.filename
+    gguf.write_bytes(b"g" * 4096)
+    variant = xm.crispasr_variant(xm.detect_accel())
+    binary = xm.crispasr_binary(variant)
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    return gguf
+
+
+def _activate_qwen3(env: Env, name: str = Q4K) -> dict:
+    _qwen3_ready(env, name)
+    return env.ok("models.set_active", engine="qwen3-asr", name=name)
+
+
+def _asr_unit(env: Env) -> Path:
+    return env.home / ".config" / "systemd" / "user" / "voxtype-asr.service"
+
+
+def _hotwords_file(env: Env) -> Path:
+    return env.home / ".config" / "voxtype-tui" / "qwen3-asr.env"
+
+
+@needs_extra
+def test_extra_constants_match_tui():
+    xm = _xm()
+    assert bridge.ENGINE_QWEN3 == xm.ENGINE_QWEN3
+    for value in ("ggml-large-v3-turbo-q5_0.bin", "ggml-base.en.bin", "base.en",
+                  "/abs/ggml-x.bin", "ggml-x.gguf", ""):
+        assert bridge._catalog_whisper_name(value) == xm.catalog_model_name("whisper", value), value
+
+
+@needs_extra
+def test_options_lists_qwen3_as_a_normal_engine(env: Env):
+    res = env.ok("options")
+    assert res["engines"][-1] == "qwen3-asr" and res["engines"][0] == "whisper"
+    assert res["engine_labels"]["qwen3-asr"] == "Qwen3-ASR"
+    assert res["engine_labels"]["whisper"] == "whisper"
+    assert res["model_paths"]["qwen3-asr"] == "qwen3-asr.model"
+    assert res["models_per_engine"]["qwen3-asr"] == ["0.6b-q8_0", "0.6b-q4_k"]
+    assert Q5 in res["models_per_engine"]["whisper"]
+
+
+@needs_extra
+def test_models_list_quantized_whisper_needs_gpu_on_cpu_build(env: Env):
+    rows = {m["name"]: m for m in env.ok("models.list", engine="whisper")["models"]}
+    q5 = rows[Q5]
+    assert q5["available"] is False and q5["disabled_reason"] == "needs GPU acceleration"
+    assert q5["downloaded"] is False and q5["unknown"] is False
+    assert q5["path"] == str(env.models_dir / "ggml-large-v3-turbo-q5_0.bin")
+    assert "available" not in rows["base.en"], "native rows keep their old shape"
+
+
+@needs_extra
+def test_models_list_quantized_whisper_available_on_vulkan(env: Env):
+    env.monkeypatch.setenv("FAKE_VOXTYPE_VARIANT", "whisper-vulkan")
+    rows = {m["name"]: m for m in env.ok("models.list", engine="whisper")["models"]}
+    assert rows[Q5]["available"] is True and rows[Q5]["disabled_reason"] is None
+
+
+@needs_extra
+def test_models_list_qwen3_rows_and_incomplete_engine(env: Env):
+    res = env.ok("models.list", engine="qwen3-asr")
+    rows = {m["name"]: m for m in res["models"]}
+    assert set(rows) == {"0.6b-q8_0", "0.6b-q4_k"} and res["active"] is None
+    assert rows[Q4K]["available"] is True and rows[Q4K]["downloaded"] is False
+    assert rows[Q4K]["incomplete"] is False
+    # GGUF on disk but no CrispASR build yet: still a Download, not Set active.
+    (env.models_dir / "qwen3-asr-0.6b-q4_k.gguf").write_bytes(b"g" * 10)
+    rows = {m["name"]: m for m in env.ok("models.list", engine="qwen3-asr")["models"]}
+    assert rows[Q4K]["downloaded"] is True and rows[Q4K]["incomplete"] is True
+    assert rows[Q4K]["disabled_reason"] is None
+
+
+@needs_extra
+def test_download_refuses_gpu_only_model_on_cpu_without_spawning(env: Env):
+    r = env.run_cli(None, "--download", "whisper", Q5)
+    assert r.returncode == 1
+    assert r.stdout.splitlines() == ["FAILED large-v3-turbo-q5_0: needs GPU acceleration"]
+    assert env.voxtype_calls() == ["info variants --json"]
+
+
+FAKE_EXTRA_DOWNLOAD = r"""
+import os, signal, sys, time
+from pathlib import Path
+engine, name, filename, build = sys.argv[1:5]
+models = Path(os.environ["VOXTYPE_MODELS_DIR"])
+dest = models / filename
+part = dest.with_name(dest.name + ".part")
+def stop(*_):
+    part.unlink(missing_ok=True)
+    sys.stdout.write("\nCancelled; partial file removed\n"); sys.stdout.flush()
+    sys.exit(130)
+signal.signal(signal.SIGTERM, stop)
+if build:
+    b = Path(build); b.parent.mkdir(parents=True, exist_ok=True)
+    b.write_text("#!/bin/sh\n"); b.chmod(0o755)
+sys.stdout.write("Downloading " + filename + "\n")
+for pct in ("10.0", "55.5", "99.5"):
+    sys.stdout.write("\r" + filename + ": " + pct.rjust(5) + "%"); sys.stdout.flush()
+    time.sleep(0.02)
+part.write_bytes(b"p")
+if name.endswith("slow"):
+    sys.stdout.write("\nstill downloading\n"); sys.stdout.flush()
+    time.sleep(30)
+part.rename(dest)
+dest.write_bytes(b"m" * 2048)
+sys.stdout.write("\r" + filename + ": 100.0%\nVerified sha256, saved " + str(dest) + "\n")
+"""
+
+
+def _run_extra_download(env: Env, engine: str, name: str, *, slow: bool = False) -> subprocess.Popen:
+    """Run the real bridge --download in a child, with voxtype-tui's
+    download_argv pointed at a local fake (no network)."""
+    xm = _xm()
+    m = xm.get_extra(engine, name)
+    build = ""
+    if engine == "qwen3-asr":
+        build = str(xm.crispasr_binary(xm.crispasr_variant(xm.detect_accel())))
+    script = env.root / "fake_extra_download.py"
+    script.write_text(FAKE_EXTRA_DOWNLOAD)
+    child_name = name + ("-slow" if slow else "")
+    code = (
+        "import sys; sys.path.insert(0, %r); import bridge; "
+        "from voxtype_tui import extra_models as xm; "
+        "xm.download_argv = lambda e, n: [sys.executable, %r, e, %r, %r, %r]; "
+        "sys.exit(bridge.run_download(%r, %r))"
+        % (str(REPO), str(script), child_name, m.filename, build, engine, name)
+    )
+    return subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, env=env.subprocess_env())
+
+
+@needs_extra
+def test_download_qwen3_streams_progress_and_makes_it_active(env: Env):
+    proc = _run_extra_download(env, "qwen3-asr", Q4K)
+    out, _ = proc.communicate(timeout=60)
+    lines = out.splitlines()
+    assert proc.returncode == 0, out
+    assert lines[0] == "LOG $ voxtype-tui download qwen3-asr 0.6b-q4_k"
+    for pct in ("PROGRESS 10", "PROGRESS 55.5", "PROGRESS 99.5", "PROGRESS 100"):
+        assert pct in lines, (pct, lines)
+    assert "LOG set 0.6b-q4_k active" in lines
+    assert lines[-1] == "DONE"
+    assert all(l.split()[0] in {"PROGRESS", "LOG", "DONE"} for l in lines)
+    # Same as `voxtype setup --download` for native models: now active.
+    snap = env.ok("load")["snapshot"]["settings"]
+    assert snap["engine"] == "qwen3-asr" and snap["qwen3-asr.model"] == Q4K
+    cfg = env.config_dict()
+    assert cfg["engine"] == "whisper" and cfg["whisper"]["mode"] == "remote"
+    assert _asr_unit(env).exists()
+    rows = {m["name"]: m for m in env.ok("models.list", engine="qwen3-asr")["models"]}
+    assert rows[Q4K]["active"] is True and rows[Q4K]["incomplete"] is False
+
+
+@needs_extra
+def test_download_extra_sigterm_cancels_and_leaves_no_part(env: Env):
+    env.monkeypatch.setenv("FAKE_VOXTYPE_VARIANT", "whisper-vulkan")
+    proc = _run_extra_download(env, "whisper", Q5, slow=True)
+    assert proc.stdout is not None
+    seen: list[str] = []
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        line = proc.stdout.readline()
+        if not line:
+            break
+        seen.append(line.rstrip("\n"))
+        if line.startswith("LOG still downloading"):
+            break
+    part = env.models_dir / "ggml-large-v3-turbo-q5_0.bin.part"
+    assert part.exists() and "PROGRESS 10" in seen, seen
+    proc.send_signal(signal.SIGTERM)
+    rest = proc.stdout.read().splitlines()
+    assert proc.wait(timeout=20) == 1
+    assert rest[-1] == "FAILED cancelled", rest
+    assert not part.exists()
+    assert not (env.models_dir / "ggml-large-v3-turbo-q5_0.bin").exists()
+    assert env.config_dict()["whisper"]["model"] == "base.en", "a cancel never touches config.toml"
+
+
+@needs_extra
+def test_set_active_qwen3_wires_remote_mode_and_the_server_unit(env: Env):
+    res = _activate_qwen3(env)
+    assert res["engine"] == "qwen3-asr" and res["name"] == Q4K
+    assert res["restart_needed"] and res["daemon_stale"] is True
+    assert "asr_problems" not in res
+    settings = res["snapshot"]["settings"]
+    assert settings["engine"] == "qwen3-asr" and settings["qwen3-asr.model"] == Q4K
+    cfg = env.config_dict()
+    assert cfg["engine"] == "whisper"
+    w = cfg["whisper"]
+    port = env.sidecar_dict()["qwen3_asr"]["port"]
+    assert w["mode"] == "remote" and w["remote_endpoint"] == f"http://127.0.0.1:{port}"
+    assert w["model"] == "base.en", "remote mode leaves the whisper model for the way back"
+    unit = _asr_unit(env).read_text()
+    assert "PartOf=voxtype.service" in unit and "WantedBy=voxtype.service" in unit
+    assert "--port %d" % port in unit and "qwen3-asr-0.6b-q4_k.gguf" in unit
+    assert "enable voxtype-asr.service" in " ".join(env.systemctl_calls())
+    ml = env.ok("models.list", engine="qwen3-asr")
+    assert ml["active"] == Q4K
+    assert not any(m["active"] for m in env.ok("models.list", engine="whisper")["models"]), \
+        "no whisper row is marked active while Qwen3-ASR is"
+
+
+@needs_extra
+def test_set_active_refusals_are_readable(env: Env):
+    res = env.fail("models.set_active", engine="qwen3-asr", name=Q4K)
+    assert "download it first" in res["error"]
+    env.add_model("whisper", Q5)
+    res = env.fail("models.set_active", engine="whisper", name=Q5)
+    assert "needs GPU acceleration" in res["error"]
+    env.fail("models.set_active", engine="qwen3-asr", name="0.6b-nope")
+
+
+@needs_extra
+def test_status_reports_qwen3_engine_and_a_down_server(env: Env):
+    _activate_qwen3(env)
+    env.daemon(active=True)
+    code = (
+        "import sys, time; sys.path.insert(0, %r); import bridge; t = time.monotonic(); "
+        "r = bridge.handle({'op': 'status'}); dt = time.monotonic() - t; "
+        "import json; print(json.dumps({'r': r, 'dt': dt, 'textual': 'textual' in sys.modules, "
+        "'models': 'voxtype_tui.models' in sys.modules}))" % str(REPO)
+    )
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                          env=env.subprocess_env())
+    out = json.loads(proc.stdout)
+    r = out["r"]
+    assert out["textual"] is False and out["models"] is False, "status stays Textual-free"
+    assert out["dt"] < 1.0, out["dt"]
+    assert r["engine"] == "qwen3-asr"
+    assert r["model"]["name"] == Q4K and r["model"]["present"] is True
+    asr = r["asr"]
+    assert asr["active"] is True and asr["engine_label"] == "Qwen3-ASR"
+    assert asr["healthy"] is False and asr["detail"]
+    assert asr["unit"]["active_state"] == "active" and asr["unit"]["main_pid"] == 4342
+    # Unit failed: the detail names it.
+    env.monkeypatch.setenv("FAKE_ASR_STATE", "failed")
+    r = env.ok("status")
+    assert r["asr"]["healthy"] is False and "server not running (failed" in r["asr"]["detail"]
+
+
+@needs_extra
+def test_status_reports_a_healthy_qwen3_server(env: Env):
+    import http.server
+    import threading
+
+    _activate_qwen3(env)
+    env.daemon(active=True)
+    port = env.sidecar_dict()["qwen3_asr"]["port"]
+
+    class Health(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            body = b'{"status": "ok"}'
+            self.send_response(200 if self.path == "/health" else 404)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", port), Health)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        r = env.ok("status")
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    assert r["asr"]["healthy"] is True and r["asr"]["endpoint"] == f"http://127.0.0.1:{port}"
+    calls = env.systemctl_calls()
+    assert calls.count(STATUS_SHOW) >= 1 and any("voxtype-asr.service" in c for c in calls)
+
+
+@needs_extra
+def test_status_without_qwen3_never_imports_asr_server(env: Env):
+    # A sidecar that once used Qwen3-ASR but no longer does stays fast.
+    _activate_qwen3(env)
+    env.ok("models.set_active", engine="whisper", name="base.en")
+    code = (
+        "import sys; sys.path.insert(0, %r); import bridge; r = bridge.handle({'op': 'status'}); "
+        "print(r['engine'], r['model']['name'], 'asr' in r, 'voxtype_tui.asr_server' in sys.modules)"
+        % str(REPO)
+    )
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                          env=env.subprocess_env())
+    assert proc.stdout.split() == ["whisper", "base.en", "False", "False"], proc.stderr
+
+
+@needs_extra
+def test_vocab_add_with_qwen3_updates_hotwords_and_asks_for_the_normal_restart(env: Env):
+    _activate_qwen3(env)
+    res = env.ok("vocab.add", phrase="Hyprland")
+    assert res["daemon_stale"] is True and res["restart_needed"]
+    assert "Hyprland" in _hotwords_file(env).read_text()
+    env.ok("vocab.remove", phrase="Hyprland")
+    assert "Hyprland" not in _hotwords_file(env).read_text()
+
+
+@needs_extra
+def test_switching_back_to_whisper_restores_settings_and_removes_the_unit(env: Env):
+    _activate_qwen3(env)
+    res = env.ok("models.set_active", engine="whisper", name="base.en")
+    cfg = env.config_dict()
+    assert cfg["whisper"]["model"] == "base.en"
+    assert "mode" not in cfg["whisper"] and "remote_endpoint" not in cfg["whisper"]
+    assert res["snapshot"]["settings"]["engine"] == "whisper"
+    assert not _asr_unit(env).exists() and not _hotwords_file(env).exists()
+    assert "--user disable --now voxtype-asr.service" in env.systemctl_calls()
+
+
+@needs_extra
+def test_engine_dropdown_switches_to_and_from_qwen3(env: Env):
+    res = env.fail("settings.set", path="engine", value="qwen3-asr")
+    assert res["needs_download"] is True and res["engine"] == "qwen3-asr"
+    assert env.config_dict().get("engine") is None, "nothing written"
+    _qwen3_ready(env)
+    res = env.ok("settings.set", path="engine", value="qwen3-asr")
+    assert res["snapshot"]["settings"]["engine"] == "qwen3-asr"
+    assert env.config_dict()["whisper"]["mode"] == "remote"
+    res = env.ok("settings.set", path="engine", value="whisper")
+    assert res["snapshot"]["settings"]["engine"] == "whisper"
+    assert "mode" not in env.config_dict()["whisper"]
+    # Settings > Model with the virtual qwen3-asr.model path.
+    res = env.ok("settings.set", path="qwen3-asr.model", value=Q4K)
+    assert res["snapshot"]["settings"]["qwen3-asr.model"] == Q4K
+    env.fail("settings.unset", path="qwen3-asr.model")
+
+
+@needs_extra
+def test_delete_qwen3_refuses_active_then_removes_model_and_engine(env: Env):
+    gguf = _qwen3_ready(env)
+    env.ok("models.set_active", engine="qwen3-asr", name=Q4K)
+    res = env.fail("models.delete", engine="qwen3-asr", name=Q4K)
+    assert "active" in res["error"]
+    res = env.fail("models.delete", engine="whisper", name="base.en")
+    assert "switch back" in res["error"], "the whisper model Qwen3-ASR returns to is kept"
+    env.ok("models.set_active", engine="whisper", name="base.en")
+    engines = env.home / ".local" / "share" / "voxtype-tui" / "engines"
+    assert any(engines.iterdir())
+    res = env.ok("models.delete", engine="qwen3-asr", name=Q4K)
+    assert res["freed_bytes"] == 4096 and res["restart_needed"] == []
+    assert not gguf.exists()
+    assert not any(p.name.startswith("crispasr-") for p in engines.iterdir()), "last model takes its engine"
+
+
+@needs_extra
+def test_quantized_whisper_round_trip_on_vulkan(env: Env):
+    env.monkeypatch.setenv("FAKE_VOXTYPE_VARIANT", "whisper-vulkan")
+    env.add_model("whisper", Q5, size=1234)
+    res = env.ok("models.set_active", engine="whisper", name=Q5)
+    assert env.config_dict()["whisper"]["model"] == "ggml-large-v3-turbo-q5_0.bin"
+    assert res["snapshot"]["settings"]["whisper.model"] == Q5
+    st = env.ok("status")
+    assert st["engine"] == "whisper" and st["model"]["name"] == Q5 and st["model"]["present"] is True
+    assert env.ok("models.list", engine="whisper")["active"] == Q5
+    assert env.fail("models.delete", engine="whisper", name=Q5)
+    env.ok("models.set_active", engine="whisper", name="base.en")
+    assert env.ok("models.delete", engine="whisper", name=Q5)["freed_bytes"] == 1234
+    # Settings > Model with an extra name goes through the same path.
+    env.add_model("whisper", Q5)
+    env.ok("settings.set", path="whisper.model", value=Q5)
+    assert env.config_dict()["whisper"]["model"] == "ggml-large-v3-turbo-q5_0.bin"
+
+
+@needs_extra
+def test_extra_model_ops_never_touch_the_real_home(env: Env):
+    _activate_qwen3(env)
+    env.ok("vocab.add", phrase="Omarchy")
+    env.ok("models.set_active", engine="whisper", name="base.en")
+    for p in (_asr_unit(env).parent, env.home / ".local" / "share" / "voxtype-tui"):
+        assert str(env.root) in str(p)
+
+
+def test_without_extra_models_the_bridge_behaves_as_before(env: Env, monkeypatch):
+    """An older voxtype-tui (no extra_models module): no new keys, no
+    Qwen3-ASR, native rows only. Also exercised for real by running this
+    suite against the released package."""
+    monkeypatch.setattr(bridge, "_has_extra_models", lambda: False)
+    opts = env.ok("options")
+    assert "qwen3-asr" not in opts["engines"] and "qwen3-asr" not in opts["model_paths"]
+    ml = env.ok("models.list", engine="whisper")
+    assert all("available" not in m for m in ml["models"])
+    st = env.ok("status")
+    assert "asr" not in st and st["engine"] == "whisper"
+    env.fail("settings.set", path="qwen3-asr.model", value="x")
+    env.fail("settings.set", path="engine", value="qwen3-asr")
+    r = env.run_cli(None, "--download", "whisper", "tiny")
+    assert r.returncode == 0 and r.stdout.splitlines()[0] == "LOG $ voxtype setup --download --model tiny"

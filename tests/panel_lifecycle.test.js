@@ -50,7 +50,7 @@ function panelHarness(overrides) {
   const root = Object.assign({
     Model,
     status: {voxtype_installed: true, config_exists: true, daemon: {active: true, state: 'idle', stale: false}, engine: 'whisper', model: {name: 'base', present: true}},
-    snapshot: {vocabulary: [], replacements: [], settings: {}}, options: null, modelRows: [], modelsEngine: '', gpu: null,
+    snapshot: {vocabulary: [], replacements: [], settings: {}}, options: null, modelRows: [], modelsEngine: '', browseEngine: '', gpu: null,
     restartNeeded: [], errorText: '', notice: '', tuiMissing: false, loaded: true, previewOutput: '',
     exportPreview: null, importPreview: null, importPath: '', attaching: false, popoutSwitchClosing: false,
     importAcceptDangerous: false,
@@ -508,7 +508,7 @@ test('an engine switch shows a neutral loading state until its catalog arrives',
   assert.equal(h.root.modelsLoading, true, 'stale whisper catalog is not shown as parakeet having no models');
   h.complete('models.list', {ok: true, engine: 'parakeet', models: []}, {op: 'models.list', engine: 'parakeet'});
   assert.equal(h.root.modelsLoading, false, 'now an honest empty state');
-  assert.match(panel, /title: root\.modelsLoading \? "Reading the model catalog…" : "No models known for " \+ root\.engine/);
+  assert.match(panel, /title: root\.modelsLoading \? "Reading the model catalog…" : "No models known for " \+ Model\.engineLabel\(root\.options, root\.modelsView\)/);
 });
 
 test('u resets the cursor setting to its default only when the key is actually set', () => {
@@ -840,4 +840,59 @@ test('without Omarchy\'s floating-terminal launcher the locked state falls back 
   h.root.activateCursor();
   assert.deepEqual(installs, []);
   assert.deepEqual(h.copies.slice(), ['omarchy pkg aur add voxtype-tui']);
+});
+
+
+// ---- extra models: Qwen3-ASR engine without a model yet, unavailable rows ----
+
+test('picking Qwen3-ASR with no model downloaded browses its catalog instead of failing', () => {
+  const h = panelHarness();
+  h.root.section = 'models';
+  h.root.options = {engines: ['whisper', 'qwen3-asr'], engine_labels: {'qwen3-asr': 'Qwen3-ASR'}};
+  h.root.pickModelsEngine('qwen3-asr');
+  const set = JSON.parse(JSON.stringify(h.requests.pop()));
+  assert.deepEqual(set, {op: 'settings.set', path: 'engine', value: 'qwen3-asr'});
+  h.requests.length = 0;
+  h.complete('settings.set', {ok: false, error: 'no Qwen3-ASR model is downloaded yet — download one first', needs_download: true, engine: 'qwen3-asr'}, set);
+  assert.equal(h.root.browseEngine, 'qwen3-asr');
+  assert.equal(h.root.modelsView, 'qwen3-asr');
+  assert.equal(h.root.errorText, '', 'not an error: the user just has to download one');
+  assert.match(h.root.notice, /No Qwen3-ASR model yet/);
+  const ops = JSON.parse(JSON.stringify(h.requests));
+  assert.ok(ops.some(r => r.op === 'load'), 'the optimistic engine echo is undone');
+  assert.ok(ops.some(r => r.op === 'models.list' && r.engine === 'qwen3-asr'), 'its catalog is listed');
+  // The reload restores the real engine; picking it again leaves browse mode.
+  h.complete('load', {ok: true, snapshot: {vocabulary: [], replacements: [], settings: {engine: 'whisper'}}}, {op: 'load'});
+  assert.equal(h.root.engine, 'whisper');
+  assert.equal(h.root.modelsView, 'qwen3-asr', 'still browsing after the reload');
+  h.root.pickModelsEngine('whisper');
+  assert.equal(h.root.browseEngine, '');
+});
+
+test('unavailable model rows explain themselves and never start a download', () => {
+  const h = panelHarness();
+  h.root.section = 'models';
+  h.root.modelsEngine = 'whisper';
+  h.root.modelRows = [{name: 'large-v3-turbo-q5_0', downloaded: false, available: false, disabled_reason: 'needs GPU acceleration'}];
+  let downloads = 0;
+  h.root.service.download = () => { downloads++; return true; };
+  h.root.setCursor('rows', 0);
+  h.root.downloadCursorModel();
+  h.root.activateCursor();
+  h.root.startDownload(h.root.modelRows[0]);
+  assert.equal(downloads, 0);
+  assert.equal(h.requests.length, 0);
+  assert.match(h.root.notice, /needs GPU acceleration/);
+  // An incomplete Qwen3 row (engine build missing) downloads on Enter.
+  h.root.modelRows = [{name: '0.6b-q4_k', downloaded: true, available: true, incomplete: true}];
+  h.root.activateCursor();
+  assert.equal(downloads, 1);
+  assert.match(panel, /visible: Model\.modelNeedsDownload\(modelRow\.modelData\) && !Model\.modelUnavailable\(modelRow\.modelData\); iconText: "󰇚"/);
+});
+
+test('a save whose Qwen3-ASR server update failed says so instead of a silent Saved', () => {
+  const h = panelHarness();
+  h.complete('vocab.add', {ok: true, snapshot: {vocabulary: [], replacements: [], settings: {}}, restart_needed: [], daemon_stale: true,
+    asr_problems: ['could not enable voxtype-asr.service: boom']}, {op: 'vocab.add', phrase: 'x'});
+  assert.match(h.root.errorText, /could not enable voxtype-asr\.service: boom/);
 });

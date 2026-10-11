@@ -20,6 +20,10 @@ Panel {
     property var options: null
     property var modelRows: []
     property string modelsEngine: ""
+    // Engine the Models section shows when it is not the live one yet: picking
+    // Qwen3-ASR before any of its models is downloaded lists its catalog so
+    // one can be downloaded (the download then makes it active).
+    property string browseEngine: ""
     property var gpu: null
     property var restartNeeded: []
     property string errorText: ""
@@ -66,9 +70,10 @@ Panel {
     readonly property var filteredReplacements: Model.filterReplacements(replacements, dictSearch.text)
     readonly property string daemonState: service.daemonState
     readonly property string engine: String(Model.settingValue(config, "engine", status && status.engine ? status.engine : "whisper"))
+    readonly property string modelsView: browseEngine !== "" ? browseEngine : engine
     // True until the catalog for the current engine has been read; an engine
     // switch shows a neutral loading state rather than a stale "no models".
-    readonly property bool modelsLoading: modelsEngine !== engine || !loaded
+    readonly property bool modelsLoading: modelsEngine !== modelsView || !loaded
     readonly property string modelPath: options && options.model_paths && options.model_paths[engine] ? options.model_paths[engine] : engine + ".model"
     // Off is not stale: the next start reads the saved config anyway.
     readonly property bool stale: Model.powerAction(status) !== "on" && ((status && status.daemon && status.daemon.stale) || restartNeeded.length > 0)
@@ -242,7 +247,11 @@ Panel {
     function loadModels() {
         if (service.downloading) return;
         service.cancelQueued("models.list");
-        service.run({op: "models.list", engine: engine});
+        service.run({op: "models.list", engine: modelsView});
+    }
+    function pickModelsEngine(value) {
+        if (value === engine) { if (browseEngine !== "") { browseEngine = ""; loadModels(); } return; }
+        setSetting("engine", value);
     }
     function toggleRecord() {
         if (locked) return;
@@ -391,11 +400,14 @@ Panel {
     }
     function setActiveModel(m) {
         if (!m || locked) return;
-        if (!m.downloaded) { startDownload(m); return; }
+        var why = Model.modelActionBlock(m, "activate");
+        if (why !== "") { showNotice(why); return; }
+        if (Model.modelNeedsDownload(m)) { startDownload(m); return; }
         service.run({op: "models.set_active", engine: modelsEngine, name: m.name});
     }
     function startDownload(m) {
         if (!m || locked || service.downloading) return;
+        if (Model.modelUnavailable(m)) { showNotice(Model.modelActionBlock(m, "download")); return; }
         if (!service.download(modelsEngine, m.name)) return;
         notice = "Downloading " + m.name + "…";
     }
@@ -587,7 +599,10 @@ Panel {
     onFilteredVocabularyChanged: clampCursor()
     onFilteredReplacementsChanged: clampCursor()
     onModelRowsChanged: clampCursor()
-    onEngineChanged: if (opened && (section === "models" || section === "settings")) loadModels()
+    onEngineChanged: {
+        if (browseEngine === engine) browseEngine = "";
+        if (opened && (section === "models" || section === "settings")) loadModels();
+    }
 
     Service {
         id: service
@@ -600,6 +615,17 @@ Panel {
                 // what was acknowledged (the file changed between preview and
                 // apply, or the dangerous set grew). Say what to do instead of
                 // dumping the protocol error.
+                // Qwen3-ASR picked before any of its models is downloaded:
+                // undo the optimistic engine echo and show its catalog so one
+                // can be downloaded.
+                if (op === "settings.set" && req.path === "engine" && result.needs_download === true) {
+                    root.browseEngine = String(result.engine || req.value);
+                    root.errorText = "";
+                    root.showNotice("No " + Model.engineLabel(root.options, root.browseEngine) + " model yet · pick one and press d to download");
+                    service.run({op: "load"});
+                    root.loadModels();
+                    return;
+                }
                 if (op === "import.apply" && result.error === "dangerous-changes") {
                     root.importPreview = null;
                     root.importAcceptDangerous = false;
@@ -645,6 +671,9 @@ Panel {
                 root.restartNeeded = needed;
                 root.notice = "Saved";
                 noticeTimer.restart();
+                // The save worked, but the Qwen3-ASR server unit could not be
+                // updated (newer voxtype-tui only): say so instead of "Saved".
+                if (result.asr_problems && result.asr_problems.length) root.errorText = Model.sanitize(result.asr_problems.join("; "), 200);
                 if (op === "import.apply") { root.importPreview = null; root.notice = "Imported"; }
                 if (op === "models.set_active" || op === "models.delete") root.loadModels();
                 if (op === "gpu.set_device") service.run({op: "gpu.status"});
@@ -656,6 +685,8 @@ Panel {
             if (!ok) root.errorText = "Download of " + name + " failed: " + Model.sanitize(reason, 160);
             noticeTimer.restart();
             root.loadModels();
+            // A download makes the model active (config.toml changed).
+            service.run({op: "load"});
             service.run({op: "status"});
         }
         onRecordFinished: function(ok) {
@@ -852,7 +883,7 @@ Panel {
                                         columnSpacing: Style.space(16)
                                         rowSpacing: Style.space(10)
                                         StatusCell { width: (statusGrid.width - statusGrid.columnSpacing) / 2; label: "STATE"; value: Model.stateLabel(root.status); accent: root.daemonState === "recording" }
-                                        StatusCell { width: (statusGrid.width - statusGrid.columnSpacing) / 2; label: "ENGINE"; value: root.status ? root.engine + " · " + Model.sanitize(root.status.model ? root.status.model.name : "", 60) : "…" }
+                                        StatusCell { width: (statusGrid.width - statusGrid.columnSpacing) / 2; label: "ENGINE"; value: root.status ? Model.engineLabel(root.options, root.engine) + " · " + Model.sanitize(root.status.model ? root.status.model.name : "", 60) : "…" }
                                         StatusCell { width: (statusGrid.width - statusGrid.columnSpacing) / 2; label: "HOTKEY"; value: root.status ? Model.hotkeyLabel(root.status.hotkey) : "…" }
                                         StatusCell { width: (statusGrid.width - statusGrid.columnSpacing) / 2; label: "OUTPUT"; value: root.status ? String(root.status.output_mode || "") + (root.status.hotkey && root.status.hotkey.mode ? " · " + String(root.status.hotkey.mode).replace(/_/g, " ") : "") : "…" }
                                     }
@@ -1173,7 +1204,7 @@ Panel {
                                     width: parent.width
                                     spacing: Style.space(10)
                                     SettingDropdown { settingKey: "engine"; label: "Engine"; width: (parent.width - parent.spacing) / 2; fallback: "whisper"
-                                        options: Model.plainOptions(root.options ? root.options.engines : [root.engine]) }
+                                        options: Model.engineOptions(root.options, root.engine) }
                                     SettingDropdown { settingKey: root.modelPath; label: "Model"; width: (parent.width - parent.spacing) / 2; fallback: root.status && root.status.model ? root.status.model.name : ""
                                         options: Model.modelOptions(root.modelsEngine === root.engine ? root.modelRows : [], String(Model.settingValue(root.config, root.modelPath, ""))) }
                                 }
@@ -1377,20 +1408,20 @@ Panel {
                                         id: engineDropdown
                                         width: Style.spacing.dropdownWidth
                                         label: "Engine"
-                                        value: root.engine
-                                        options: Model.plainOptions(root.options ? root.options.engines : [root.engine])
+                                        value: root.modelsView
+                                        options: Model.engineOptions(root.options, root.modelsView)
                                         foreground: root.foreground; fontFamily: root.fontFamily
                                         hasCursor: root.cursorIs("engine")
                                         onHovered: function(h) { if (h) root.setCursor("engine", -1) }
                                         onHasCursorChanged: if (hasCursor) root.ensureVisible(engineDropdown)
                                         onPopupOpenChanged: root.notePopup(popupOpen)
-                                        onChanged: function(v) { root.setSetting("engine", v) }
+                                        onChanged: function(v) { root.pickModelsEngine(v) }
                                     }
                                     Text {
                                         anchors.bottom: parent.bottom; anchors.bottomMargin: Style.space(8)
                                         textFormat: Text.PlainText
-                                        text: root.options && root.options.compiled_engines && root.options.compiled_engines.indexOf(root.engine) < 0 ? "󰀦 not compiled into this voxtype build" : (root.modelsLoading ? "" : root.modelRows.length + " models in catalog")
-                                        color: root.options && root.options.compiled_engines && root.options.compiled_engines.indexOf(root.engine) < 0 ? root.urgent : root.muted
+                                        text: root.options && root.options.compiled_engines && root.options.compiled_engines.indexOf(root.modelsView) < 0 ? "󰀦 not compiled into this voxtype build" : (root.modelsLoading ? "" : root.modelRows.length + " models in catalog")
+                                        color: root.options && root.options.compiled_engines && root.options.compiled_engines.indexOf(root.modelsView) < 0 ? root.urgent : root.muted
                                         font.family: root.fontFamily; font.pixelSize: Style.font.caption
                                     }
                                 }
@@ -1433,7 +1464,7 @@ Panel {
                                 }
 
                                 Repeater {
-                                    model: root.modelsEngine === root.engine ? root.modelRows : []
+                                    model: root.modelsEngine === root.modelsView ? root.modelRows : []
                                     delegate: CursorSurface {
                                         id: modelRow
                                         required property var modelData
@@ -1450,7 +1481,7 @@ Panel {
                                             anchors.leftMargin: Style.space(12); anchors.rightMargin: Style.space(8)
                                             spacing: Style.space(2)
                                             Text { width: parent.width; text: Model.sanitize(modelRow.modelData.name, 120); textFormat: Text.PlainText; elide: Text.ElideRight
-                                                color: modelRow.modelData.downloaded ? root.foreground : root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.subtitle; font.bold: modelRow.modelData.active === true }
+                                                color: modelRow.modelData.downloaded && !Model.modelUnavailable(modelRow.modelData) ? root.foreground : root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.subtitle; font.bold: modelRow.modelData.active === true }
                                             Text { width: parent.width; text: Model.modelLine(modelRow.modelData); textFormat: Text.PlainText; elide: Text.ElideRight
                                                 color: modelRow.modelData.active ? Commons.Color.accent : root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
                                         }
@@ -1460,16 +1491,16 @@ Panel {
                                             spacing: Style.space(4)
                                             opacity: modelRow.hasCursor ? 1 : 0
                                             enabled: modelRow.hasCursor && !service.mutating
-                                            PanelActionButton { visible: modelRow.modelData.downloaded && !modelRow.modelData.active; iconText: "󰄬"; foreground: root.foreground; tooltipText: "Enter · set active"; onClicked: root.setActiveModel(modelRow.modelData) }
-                                            PanelActionButton { visible: !modelRow.modelData.downloaded; iconText: "󰇚"; foreground: root.foreground; tooltipText: "d · download"; enabled: !service.downloading; onClicked: root.startDownload(modelRow.modelData) }
+                                            PanelActionButton { visible: !Model.modelNeedsDownload(modelRow.modelData) && !Model.modelUnavailable(modelRow.modelData) && !modelRow.modelData.active; iconText: "󰄬"; foreground: root.foreground; tooltipText: "Enter · set active"; onClicked: root.setActiveModel(modelRow.modelData) }
+                                            PanelActionButton { visible: Model.modelNeedsDownload(modelRow.modelData) && !Model.modelUnavailable(modelRow.modelData); iconText: "󰇚"; foreground: root.foreground; tooltipText: "d · download"; enabled: !service.downloading; onClicked: root.startDownload(modelRow.modelData) }
                                             PanelActionButton { visible: modelRow.modelData.downloaded && !modelRow.modelData.active; iconText: "󰆴"; foreground: root.foreground; hoverColor: root.urgent; tooltipText: "x · delete from disk"; onClicked: { root.setCursor("rows", modelRow.index); root.deleteSelected() } }
                                         }
                                     }
                                 }
                                 EmptyState {
-                                    visible: root.modelsEngine !== root.engine || root.modelRows.length === 0
+                                    visible: root.modelsEngine !== root.modelsView || root.modelRows.length === 0
                                     glyph: root.modelsLoading ? "󰔟" : "󰆼"
-                                    title: root.modelsLoading ? "Reading the model catalog…" : "No models known for " + root.engine
+                                    title: root.modelsLoading ? "Reading the model catalog…" : "No models known for " + Model.engineLabel(root.options, root.modelsView)
                                     hint: root.modelsLoading ? "" : "Models live under the voxtype data directory."
                                 }
 
