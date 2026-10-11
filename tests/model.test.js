@@ -453,3 +453,55 @@ test('every locked state offers a concrete install command that exists', () => {
   assert.ok(routes.includes('omarchy pkg aur add <packages...>'), 'omarchy pkg aur add exists');
   assert.ok(routes.includes('omarchy install dictation voxtype'), 'omarchy install dictation voxtype exists');
 });
+
+
+// ---- extra models (newer voxtype-tui): unavailable rows, Qwen3-ASR ----
+
+test('extra model rows: unavailable ones say why and cannot be downloaded or activated', () => {
+  const gpuOnly = {name: 'large-v3-turbo-q5_0', size_mb: 547, downloaded: false, available: false, disabled_reason: 'needs GPU acceleration'};
+  assert.equal(Model.modelLine(gpuOnly), '547 MB · needs GPU acceleration');
+  assert.equal(Model.modelActionBlock(gpuOnly, 'download'), "Can't download: needs GPU acceleration");
+  assert.equal(Model.modelActionBlock(gpuOnly, 'activate'), "Can't use it: needs GPU acceleration");
+  assert.equal(Model.modelUnavailable(gpuOnly), true);
+  same(Model.modelOptions([gpuOnly], ''), [{value: 'large-v3-turbo-q5_0', label: 'large-v3-turbo-q5_0  (needs GPU acceleration)'}]);
+  // Already on disk but the GPU went away: still listed honestly.
+  assert.equal(Model.modelLine(Object.assign({}, gpuOnly, {downloaded: true, on_disk_bytes: 574041195})), '574 MB · downloaded · needs GPU acceleration');
+  // Engine build missing: Download is the action, not Set active.
+  const incomplete = {name: '0.6b-q4_k', size_mb: 602, downloaded: true, on_disk_bytes: 631026336, available: true, incomplete: true};
+  assert.equal(Model.modelNeedsDownload(incomplete), true);
+  assert.equal(Model.modelActionBlock(incomplete, 'download'), '');
+  assert.equal(Model.modelLine(incomplete), '631 MB · engine not downloaded');
+  // A hostile reason is sanitized.
+  assert.equal(Model.modelLine({size_mb: 1, available: false, disabled_reason: 'a\u202eb\nc'}), '1 MB · ab c');
+  // Rows from an older bridge (no new keys) behave exactly as before.
+  assert.equal(Model.modelActionBlock({downloaded: false}, 'download'), '');
+  assert.equal(Model.modelActionBlock({downloaded: true}, 'activate'), '');
+  assert.equal(Model.modelNeedsDownload({downloaded: true}), false);
+});
+
+test('engine labels come from the bridge, falling back to the key', () => {
+  const opts = {engines: ['whisper', 'qwen3-asr'], engine_labels: {whisper: 'whisper', 'qwen3-asr': 'Qwen3-ASR'}};
+  same(Model.engineOptions(opts, 'whisper'), [{value: 'whisper', label: 'whisper'}, {value: 'qwen3-asr', label: 'Qwen3-ASR'}]);
+  assert.equal(Model.engineLabel(opts, 'qwen3-asr'), 'Qwen3-ASR');
+  assert.equal(Model.engineLabel({engines: ['whisper']}, 'parakeet'), 'parakeet', 'old bridge: no labels');
+  same(Model.engineOptions(null, 'whisper'), [{value: 'whisper', label: 'whisper'}]);
+});
+
+test('a down Qwen3-ASR server is a warning only while voxtype runs', () => {
+  const up = {daemon: {active: true, state: 'idle', stale: false}, engine: 'qwen3-asr', model: {name: '0.6b-q4_k'}, hotkey: {key: 'X'},
+              asr: {active: true, healthy: true, detail: 'ok'}};
+  assert.equal(Model.asrDown(up), false);
+  assert.equal(Model.heroMeta(up, ''), 'Listening · 0.6b-q4_k · X');
+  const down = Object.assign({}, up, {asr: {active: true, healthy: false, detail: 'not running'}});
+  assert.equal(Model.asrDown(down), true);
+  assert.equal(Model.heroMeta(down, ''), 'Qwen3-ASR server down');
+  const n = Model.notices(down, {});
+  assert.equal(n[0].kind, 'warn');
+  assert.equal(n[0].text, 'Qwen3-ASR server is down (not running). Restart to fix it.');
+  const noisy = Object.assign({}, up, {asr: {active: true, healthy: false, detail: 'server not running (inactive); port 44999 is in use (another process, or the server is still shutting down)'}});
+  assert.equal(Model.notices(noisy, {})[0].text, 'Qwen3-ASR server is down. Restart to fix it.', 'long technical details are not shown');
+  const off = Object.assign({}, down, {daemon: {active: false, state: 'stopped'}});
+  assert.equal(Model.asrDown(off), false, 'turned off: the server is off too, by design');
+  assert.equal(Model.notices(off, {}).length, 0);
+  assert.equal(Model.asrDown({daemon: {active: true}}), false, 'older bridge: no asr block');
+});

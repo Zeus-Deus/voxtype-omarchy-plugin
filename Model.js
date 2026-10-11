@@ -155,6 +155,7 @@ function heroMeta(status, error) {
     if (state === "recording") return "Recording…";
     if (state === "transcribing") return "Transcribing…";
     if (status.daemon.stale) return "Restart to apply changes";
+    if (asrDown(status)) return "Qwen3-ASR server down";
     var model = status.model && status.model.name ? status.model.name : (status.engine || "");
     return "Listening · " + model + " · " + hotkeyLabel(status.hotkey);
 }
@@ -314,20 +315,34 @@ function gpuLines(gpu) {
     return lines;
 }
 
-// Why `x` / Enter on a model row does nothing, in words for the footer.
+// Rows from a newer voxtype-tui may carry `available:false` plus a
+// `disabled_reason` (e.g. a GPU-only model on a CPU build), and
+// `incomplete:true` when the file is there but the engine it runs on is not
+// (Download fetches the rest). Older bridges send neither: same as before.
+function modelUnavailable(m) { return !!m && m.available === false; }
+function modelNeedsDownload(m) { return !!m && (!m.downloaded || m.incomplete === true); }
+function modelReason(m) { return sanitize(m && m.disabled_reason ? m.disabled_reason : "not available on this machine", 80); }
+
+// Why `x` / `d` / Enter on a model row does nothing, in words for the footer.
 function modelActionBlock(m, action) {
     if (!m) return "";
     if (action === "delete") {
         if (m.active) return "Set another model active first";
         if (!m.downloaded) return "Not downloaded";
     }
-    if (action === "download" && m.downloaded) return "Already downloaded";
+    if (action === "download") {
+        if (modelUnavailable(m)) return "Can't download: " + modelReason(m);
+        if (!modelNeedsDownload(m)) return "Already downloaded";
+    }
+    if (action === "activate" && modelUnavailable(m)) return "Can't use it: " + modelReason(m);
     return "";
 }
 
 function modelStatus(m) {
     if (!m) return "";
     if (m.active) return "active";
+    if (modelUnavailable(m)) return (m.downloaded ? "downloaded · " : "") + modelReason(m);
+    if (m.incomplete === true) return "engine not downloaded";
     if (m.downloaded) return "downloaded";
     if (m.unknown) return "on disk";
     return "not downloaded";
@@ -389,10 +404,43 @@ function modelOptions(models, current) {
         var m = models[i];
         if (!m || !m.name) continue;
         if (m.name === current) seen = true;
-        out.push({value: m.name, label: sanitize(m.name, 80) + (m.downloaded ? "" : "  (not downloaded)")});
+        var note = modelUnavailable(m) ? "  (" + modelReason(m) + ")" : (modelNeedsDownload(m) ? "  (not downloaded)" : "");
+        out.push({value: m.name, label: sanitize(m.name, 80) + note});
     }
     if (current && !seen) out.push({value: current, label: sanitize(current, 80)});
     return out;
+}
+
+// Engine dropdown: the bridge's display labels (`Qwen3-ASR` for the engine
+// key `qwen3-asr`) when it sends them, else the key itself.
+function engineLabel(options, engine) {
+    var e = String(engine || "");
+    var labels = options && options.engine_labels ? options.engine_labels : null;
+    return labels && typeof labels[e] === "string" && labels[e] !== "" ? labels[e] : e;
+}
+
+function engineOptions(options, fallback) {
+    var list = options && options.engines ? options.engines : [fallback];
+    var out = [];
+    for (var i = 0; i < list.length; i++) out.push({value: String(list[i]), label: engineLabel(options, list[i])});
+    return out;
+}
+
+// Qwen3-ASR runs as a local server next to the daemon (status.asr, newer
+// voxtype-tui only). It starts and stops with voxtype, so it is only news
+// when voxtype is up and the server is not answering.
+function asrDown(status) {
+    return !!status && !!status.asr && status.asr.healthy === false && !!status.daemon && status.daemon.active === true;
+}
+
+function asrNotice(status) {
+    if (!asrDown(status)) return "";
+    // voxtype-tui sends a short human reason ("not running", "still starting",
+    // "port taken by another program"); older builds sent a long technical
+    // string, so only show reasons that fit on one line.
+    var d = status.asr.detail ? sanitize(status.asr.detail, 60) : "";
+    var why = (d && d.length <= 40 && d !== "ok") ? " (" + d + ")" : "";
+    return "Qwen3-ASR server is down" + why + ". Restart to fix it.";
 }
 
 function plainOptions(list) {
@@ -636,6 +684,8 @@ function wheelContentY(contentY, contentHeight, viewHeight, pixelDeltaY, angleDe
 // and Syncthing conflict files. Pure so the panel can list them.
 function notices(status, snapshot) {
     var out = [];
+    var asr = asrNotice(status);
+    if (asr) out.push({kind: "warn", text: asr});
     var pid = status ? status.tui_open_pid : null;
     if (pid !== null && pid !== undefined)
         out.push({kind: "warn", text: "voxtype-tui is open" + (pid > 0 ? " (pid " + pid + ")" : "") + " — save and close it before editing here, or its next save overwrites these changes"});

@@ -49,6 +49,8 @@ It is a native shell plugin built against the official Quattro plugin contract. 
 
 The panel is a thin QML front end over the installed **voxtype-tui** Python package. Every write goes through `voxtype_tui` (validated, atomic, comment-preserving saves; sidecar reconcile; sync bundle), so the panel and the TUI never disagree.
 
+Some models in the list are added by newer voxtype-tui releases rather than shipped by Voxtype: quantized Whisper files that Voxtype loads directly (offered only with GPU acceleration, which they need), and **Qwen3-ASR**, which runs as a small local CrispASR server that Voxtype reaches through its remote mode and that starts and stops together with Voxtype. With an older voxtype-tui the panel simply lists Voxtype's own models.
+
 Installing from a local checkout instead: `omarchy plugin add "$PWD" --yes --enable`.
 
 ## Security
@@ -56,10 +58,11 @@ Installing from a local checkout instead: `omarchy plugin add "$PWD" --yes --ena
 Plugins run unsandboxed inside `omarchy-shell`, so:
 
 - **This plugin makes no network connections of its own: no telemetry, no
-  analytics, no version check.** The only thing that touches the network is the
-  `voxtype` binary when you ask for a model download; the plugin just spawns it
+  analytics, no version check.** The only thing that touches the network is a
+  model download you ask for: the `voxtype` binary, or voxtype-tui's own
+  checksum-pinned downloader for the extra models. The plugin just spawns it
   with a fixed argv and relays its progress output. Nothing else leaves your
-  machine.
+  machine (the Qwen3-ASR server listens on 127.0.0.1 only).
 - It never touches your audio or your transcripts. It edits configuration,
   vocabulary and dictionary rules, and reads the daemon's state file.
 - Every process is a fixed argv array. Untrusted strings travel over stdin as
