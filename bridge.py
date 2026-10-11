@@ -1549,7 +1549,7 @@ def _settings_set_extra(path: str, value: Any, paths: Paths, x) -> dict[str, Any
         return op_models_set_active({"engine": ENGINE_QWEN3, "name": value.strip()}, paths)
     if path == "whisper.model" and isinstance(value, str) and xm.is_extra_model("whisper", value):
         return op_models_set_active({"engine": "whisper", "name": value}, paths)
-    if path != "engine" or not isinstance(value, str):
+    if path != "engine" or not isinstance(value, str) or value == "":
         return None
     if value == ENGINE_QWEN3:
         st = _load_state(paths)
@@ -1596,6 +1596,12 @@ def op_settings_unset(args: dict, paths: Paths) -> dict[str, Any]:
     if path not in SETTING_TYPES:
         raise BridgeError(f"'{path}' is not a settable path")
     st = _load_state(paths)
+    if path == "engine":
+        x = _extra()
+        if x is not None:
+            # Reset means voxtype's default engine, not Qwen3's remembered
+            # engine; restore its whisper settings before removing the key.
+            x[1].deactivate_qwen3(st, restore_engine=False)
     changed = st.unset_setting(path)
     if not changed and not st.dirty:
         return {
@@ -1711,7 +1717,7 @@ def op_gpu_set_device(args: dict, paths: Paths) -> dict[str, Any]:
         raise BridgeError(f"could not write {paths.dropin}: {e}") from e
     ran, msg = gpu.daemon_reload()
     st = _load_state(paths)
-    return {
+    out = {
         "ok": True,
         "snapshot": _snapshot(st),
         "restart_needed": ["gpu.device"],
@@ -1720,6 +1726,14 @@ def op_gpu_set_device(args: dict, paths: Paths) -> dict[str, Any]:
         "dropin_path": str(paths.dropin),
         "daemon_reload": {"ok": ran, "message": msg},
     }
+    x = _extra()
+    if x is not None:
+        # The Qwen3 unit embeds the GPU environment too. Reconcile it
+        # without saving an unchanged config.toml or sidecar.
+        result = x[1].apply_after_save(st.doc, st.sc, models_dir=paths.models_dir)
+        if result.problems:
+            out["asr_problems"] = [str(p) for p in result.problems]
+    return out
 
 
 def _export_target(raw_path: str) -> Path:

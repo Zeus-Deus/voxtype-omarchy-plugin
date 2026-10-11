@@ -305,6 +305,12 @@ Panel {
     }
     function setSetting(path, value) {
         if (locked) return;
+        // Explicit engine picks leave failure-only catalog browsing. A reload
+        // after needs_download still keeps that browse target until a pick.
+        if (path === "engine" && browseEngine !== "") {
+            browseEngine = "";
+            if (!Model.settingChanged(config, path, value)) loadModels();
+        }
         if (!Model.settingChanged(config, path, value)) return;
         // Optimistic local echo so a slider or toggle never snaps back while
         // the bridge validates; the response snapshot is the truth.

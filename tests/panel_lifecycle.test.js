@@ -101,6 +101,7 @@ function panelHarness(overrides) {
     picked(p) { root.service.picking = false; on('onPicked')(p); },
     pickCanceled() { root.service.picking = false; on('onPickCanceled')(); },
     pickFailed() { root.service.picking = false; on('onPickFailed')(); },
+    engineChanged() { handler(panel, 'onEngineChanged', context)(); },
     setInside(code) { return vm.runInContext(code, context); },
     flush() { while (deferred.length) deferred.shift()(); },
   };
@@ -869,6 +870,39 @@ test('picking Qwen3-ASR with no model downloaded browses its catalog instead of 
   assert.equal(h.root.browseEngine, '');
 });
 
+for (const selector of ['models', 'settings']) {
+  test(`explicit ${selector} engine selection leaves failed Qwen3 catalog browsing`, () => {
+    const h = panelHarness();
+    h.root.section = selector;
+    h.root.pickModelsEngine('qwen3-asr');
+    h.engineChanged();
+    const req = {op: 'settings.set', path: 'engine', value: 'qwen3-asr'};
+    h.complete('settings.set', {ok: false, needs_download: true, engine: 'qwen3-asr'}, req);
+    h.complete('load', {ok: true, snapshot: {settings: {engine: 'whisper'}}});
+    h.engineChanged();
+    assert.equal(h.root.modelsView, 'qwen3-asr', 'reload preserves legitimate failure browsing');
+    h.requests.length = 0;
+    if (selector === 'models') h.root.pickModelsEngine('parakeet');
+    else h.root.setSetting('engine', 'parakeet');
+    h.engineChanged();
+    h.complete('settings.set', {ok: true, snapshot: {settings: {engine: 'parakeet'}}},
+      {op: 'settings.set', path: 'engine', value: 'parakeet'});
+    assert.equal(h.root.modelsView, 'parakeet');
+    assert.equal(h.root.browseEngine, '');
+    assert.equal(h.requests.at(-1).engine, 'parakeet');
+  });
+}
+
+test('settings selecting the already active engine also leaves failed catalog browsing', () => {
+  const h = panelHarness({browseEngine: 'qwen3-asr', section: 'settings', snapshot: {settings: {engine: 'whisper'}}});
+  h.root.setSetting('engine', 'whisper');
+  assert.equal(h.root.modelsView, 'whisper');
+  assert.equal(h.root.browseEngine, '');
+  assert.equal(h.requests.at(-1).op, 'models.list');
+  assert.equal(h.requests.at(-1).engine, 'whisper');
+  assert.ok(!h.requests.some(r => r.op === 'settings.set'), 'no unnecessary config write');
+});
+
 test('unavailable model rows explain themselves and never start a download', () => {
   const h = panelHarness();
   h.root.section = 'models';
@@ -895,6 +929,17 @@ test('a save whose Qwen3-ASR server update failed says so instead of a silent Sa
   h.complete('vocab.add', {ok: true, snapshot: {vocabulary: [], replacements: [], settings: {}}, restart_needed: [], daemon_stale: true,
     asr_problems: ['could not enable voxtype-asr.service: boom']}, {op: 'vocab.add', phrase: 'x'});
   assert.match(h.root.errorText, /could not enable voxtype-asr\.service: boom/);
+});
+
+test('GPU reconciliation problems use the existing save warning instead of silent Saved', () => {
+  const h = panelHarness();
+  h.complete('gpu.set_device', {ok: true, snapshot: {settings: {engine: 'qwen3-asr'}},
+    restart_needed: ['gpu.device'], daemon_stale: true,
+    asr_problems: ['could not enable voxtype-asr.service: fixture enable denied']},
+    {op: 'gpu.set_device', vendor: 'nvidia'});
+  assert.match(h.root.errorText, /could not enable voxtype-asr\.service: fixture enable denied/);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.root.restartNeeded)), ['gpu.device']);
+  assert.ok(h.requests.some(r => r.op === 'gpu.status'));
 });
 
 test('loadModels derives the engine itself: inside onEngineChanged the modelsView binding may still be stale', () => {

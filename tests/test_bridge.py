@@ -216,6 +216,9 @@ if verb == "show" and "voxtype-asr.service" in a:
     ]))
     sys.exit(0)
 if verb in ("enable", "disable"):
+    if verb == "enable" and "voxtype-asr.service" in a and os.environ.get("FAKE_ASR_ENABLE_ERROR"):
+        print(os.environ["FAKE_ASR_ENABLE_ERROR"], file=sys.stderr)
+        sys.exit(1)
     sys.exit(0)
 if verb == "show":
     active = "active" if st["active"] else "inactive"
@@ -1306,6 +1309,22 @@ def test_settings_unset(env: Env):
     assert "vad" not in env.config_dict()  # empty parent table cleaned up
     res = env.ok("settings.unset", path="vad.threshold")
     assert res["changed"] is False and res["restart_needed"] == []
+
+
+@pytest.mark.parametrize("reset_payload", [
+    {"op": "settings.unset", "path": "engine"},
+    {"op": "settings.set", "path": "engine", "value": None},
+    {"op": "settings.set", "path": "engine", "value": ""},
+])
+def test_engine_reset_without_qwen3_keeps_normal_unset_semantics(env: Env, reset_payload: dict):
+    env.ok("settings.set", path="engine", value="parakeet")
+    res = env.ok(**reset_payload)
+    assert res["changed"] is True and "engine" not in res["snapshot"]["settings"]
+    assert "engine" not in env.config_dict()
+    before = (env.config.read_bytes(), env.config.stat().st_mtime_ns)
+    again = env.ok(**reset_payload)
+    assert again["changed"] is False and again["restart_needed"] == []
+    assert (env.config.read_bytes(), env.config.stat().st_mtime_ns) == before
 
 
 def test_settings_set_is_idempotent(env: Env):
@@ -2722,6 +2741,45 @@ def test_set_active_qwen3_wires_remote_mode_and_the_server_unit(env: Env):
 
 
 @needs_extra
+@pytest.mark.parametrize("vendor", ["nvidia", "amd", "auto"])
+def test_gpu_set_device_reconciles_qwen3_unit_without_config_save(env: Env, vendor: str):
+    from voxtype_tui import gpu
+
+    env.monkeypatch.setenv("FAKE_VOXTYPE_VARIANT", "whisper-vulkan")
+    gpu.write_gpu_device(env.dropin, "intel")
+    _activate_qwen3(env)
+    assert 'Environment="VOXTYPE_VULKAN_DEVICE=intel"' in _asr_unit(env).read_text()
+    before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in (env.config, env.sidecar)}
+    env.systemctl_log.write_text("")
+    res = env.ok("gpu.set_device", vendor=vendor)
+    unit = _asr_unit(env).read_text()
+    if vendor == "auto":
+        assert "VOXTYPE_VULKAN_DEVICE=" not in unit
+        assert "VK_LOADER_DRIVERS_SELECT=" not in unit
+    else:
+        assert f'Environment="VOXTYPE_VULKAN_DEVICE={vendor}"' in unit
+        assert f'Environment="VK_LOADER_DRIVERS_SELECT={gpu.VENDOR_LOADER_PATTERNS[vendor]}"' in unit
+    assert res["device"] == vendor and res["restart_needed"] == ["gpu.device"]
+    assert res["daemon_stale"] is True and "asr_problems" not in res
+    assert "--user enable voxtype-asr.service" in env.systemctl_calls()
+    assert not any("restart" in c or " start " in c for c in env.systemctl_calls())
+    assert {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in before} == before
+
+
+@needs_extra
+def test_gpu_set_device_reports_qwen3_reconcile_errors(env: Env):
+    env.monkeypatch.setenv("FAKE_VOXTYPE_VARIANT", "whisper-vulkan")
+    _activate_qwen3(env)
+    before = (env.config.read_bytes(), env.config.stat().st_mtime_ns)
+    env.monkeypatch.setenv("FAKE_ASR_ENABLE_ERROR", "fixture enable denied")
+    res = env.ok("gpu.set_device", vendor="nvidia")
+    assert res["asr_problems"] == ["could not enable voxtype-asr.service: fixture enable denied"]
+    assert res["device"] == "nvidia" and res["daemon_stale"] is True
+    assert 'Environment="VOXTYPE_VULKAN_DEVICE=nvidia"' in _asr_unit(env).read_text()
+    assert (env.config.read_bytes(), env.config.stat().st_mtime_ns) == before
+
+
+@needs_extra
 def test_set_active_refusals_are_readable(env: Env):
     res = env.fail("models.set_active", engine="qwen3-asr", name=Q4K)
     assert "download it first" in res["error"]
@@ -2827,6 +2885,40 @@ def test_switching_back_to_whisper_restores_settings_and_removes_the_unit(env: E
     assert res["snapshot"]["settings"]["engine"] == "whisper"
     assert not _asr_unit(env).exists() and not _hotwords_file(env).exists()
     assert "--user disable --now voxtype-asr.service" in env.systemctl_calls()
+
+
+@needs_extra
+@pytest.mark.parametrize("reset_payload", [
+    {"op": "settings.unset", "path": "engine"},
+    {"op": "settings.set", "path": "engine", "value": None},
+    {"op": "settings.set", "path": "engine", "value": ""},
+    {"op": "settings.set", "path": "engine", "value": "whisper"},
+], ids=["unset", "null", "empty", "explicit-whisper"])
+@pytest.mark.parametrize("previous_mode", ["native", "remote"])
+def test_qwen3_engine_reset_restores_whisper_and_removes_server(env: Env, reset_payload: dict, previous_mode: str):
+    text = 'engine = "parakeet"\n' + BASE_CONFIG
+    if previous_mode == "remote":
+        text = text.replace('language = "en"', 'language = "en"\nmode = "remote"\nbackend = "remote"\nremote_endpoint = "http://127.0.0.1:9999"\nremote_model = "previous-model"\nremote_timeout_secs = 17')
+    env.write_config(text)
+    previous_whisper = env.config_dict()["whisper"]
+    _activate_qwen3(env)
+    assert _asr_unit(env).exists() and _hotwords_file(env).exists()
+    res = env.ok(**reset_payload)
+    assert env.config_dict()["whisper"] == previous_whisper
+    explicit = reset_payload.get("value") == "whisper"
+    assert env.config_dict().get("engine") == ("whisper" if explicit else None)
+    assert res["snapshot"]["settings"].get("engine", "whisper") == "whisper"
+    block = env.sidecar_dict()["qwen3_asr"]
+    assert block["active"] is False and "previous_whisper" not in block
+    assert not _asr_unit(env).exists() and not _hotwords_file(env).exists()
+    assert "--user disable --now voxtype-asr.service" in env.systemctl_calls()
+    assert res["daemon_stale"] is True and "asr_problems" not in res
+    if not explicit:
+        assert res["changed"] is True
+        before = (env.config.read_bytes(), env.config.stat().st_mtime_ns)
+        again = env.ok(**reset_payload)
+        assert again["changed"] is False and again["restart_needed"] == []
+        assert (env.config.read_bytes(), env.config.stat().st_mtime_ns) == before
 
 
 @needs_extra
