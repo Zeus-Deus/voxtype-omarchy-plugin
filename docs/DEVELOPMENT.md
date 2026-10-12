@@ -45,6 +45,49 @@ with a fake `voxtype` on `PATH`. They never touch `~/.config/voxtype`. The fixtu
 points `XDG_CONFIG_HOME` / `XDG_DATA_HOME` into the temp HOME, because voxtype-tui writes
 the Qwen3-ASR unit, its hotwords file and the CrispASR build there.
 
+## Startup sync acceptance boundary
+
+`AppState.load` in both voxtype-tui v0.1.8 and v0.1.9 calls
+`sync.reconcile_sync_on_startup`: a newer cross-device bundle is not covered
+by the same-device drift guard, and an unrelated save persists the resulting
+in-memory settings. Never call it unguarded from a bridge operation.
+`_load_state` temporarily wraps the public `sync.read_sync_bundle`, deep-copies
+its result, filters every path in `_dangerous_setting_paths()` union
+`REDACTED_IMPORT_PATHS`, and excludes the entire secrets block. Safe siblings,
+vocabulary, replacement rules and upstream reconciliation guards remain intact.
+Filter before reconciliation, not after: upstream formats proposed values
+and may regenerate the sync cache during same-device drift handling.
+
+The reader is restored in `finally`, including reader/reconciler exceptions.
+This is a synchronous, one-request-per-process bridge, not a concurrent
+in-process dependency API. Explicit Import uses `sync.load_bundle_file` and
+must see the original bundle, including when the selected file is `sync.json`.
+Ignored dangerous peer settings are never queued for later acceptance: a save
+regenerates sync.json from local accepted state. The dependency's fixed trusted
+postprocessor remains available; tests never execute fixture commands.
+
+Security regressions cover load plus unrelated settings/vocabulary saves,
+fresh JSON-over-stdio subprocesses, every dangerous path present/absent locally,
+parent/subtree replacement, upstream path-set growth, secrets-block injection,
+failed/refused/accepted imports, hook restoration and post-download activation
+with synthetic already-present model bytes. This is bridge/protocol proof,
+not native shell, real daemon, network download or transcription E2E.
+
+For v0.1.9, isolated test configs/sidecars must use default-shaped paths under
+the fixture HOME and cached `CONFIG_PATH` / `SIDECAR_PATH` must be repointed:
+alternate files intentionally cannot manage the default Qwen3 helper service.
+The synthetic health server identifies `backend: qwen3`; helper teardown tests
+assert files remain until a fake verified restart, matching the released API.
+Run against immutable `git archive` extractions of both tags with command-local
+`PYTHONPATH`, private HOME/XDG/TMP roots, and an owned copied uv cache:
+
+```bash
+uv run --offline --python /usr/bin/python3 --with pytest \
+  --with 'textual>=8.0,<9' --with 'tomlkit>=0.13' \
+  pytest -q -p no:cacheprovider tests/test_bridge.py
+node --test tests/*.test.js
+```
+
 ## Live verification
 
 Install from the checkout with `omarchy plugin add "$PWD" --yes --enable`; later

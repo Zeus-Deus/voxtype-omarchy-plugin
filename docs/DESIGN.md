@@ -232,6 +232,24 @@ while the panel is open; the bar button polls the state file
   `output.file_mode` (where every transcription is written, and whether
   it truncates), and `meeting.enabled` / `meeting.retain_audio` /
   `meeting.storage_path` (arming long-form capture and keeping the audio).
+- Automatic startup sync is not dangerous-setting consent. Before
+  `AppState.load` reconciles `sync.json`, the bridge filters a private copy
+  of its settings using `_dangerous_setting_paths()` plus
+  `REDACTED_IMPORT_PATHS`. Dangerous leaves/subtrees and scalar overwrites
+  of their parent tables are omitted; existing local values (including
+  absence) stay unchanged. The entire optional secrets block is excluded
+  from startup. Safe settings, vocabulary and replacement rules retain
+  upstream timestamp/conflict/drift/model-install guards and merge semantics.
+  A path-only warning directs users to explicit Import; peer commands and
+  secrets never enter startup warning values. Every state-loading save,
+  including extra-model activation after download, uses this guard.
+  Import still reads the original file through `load_bundle_file`, so
+  importing `sync.json` itself requires the existing dangerous-change
+  acknowledgement. A normal later save regenerates sync.json from accepted
+  local state, dropping ignored peer values; import those values before a
+  save, or retain a separate source bundle. Trusted dependency migrations
+  and its dictionary/vocabulary postprocessor may still install their own
+  fixed command; no peer command is accepted by that mechanism.
 - Only `whisper.remote_api_key` is **never** emitted in any response: the
   snapshot reports `whisper.remote_api_key_set: bool` and nothing else,
   and `settings.set` refuses to write it. The other three

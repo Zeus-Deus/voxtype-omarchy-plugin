@@ -41,15 +41,15 @@ You need Voxtype itself and the `voxtype-tui` package (AUR: `voxtype-tui`) insta
 
 An installed Omarchy Quattro shell (`qs.Ui` / `qs.Commons`), `voxtype`, `/usr/bin/python3` with the `voxtype-tui` package (AUR: `voxtype-tui`), `zenity` for the import file chooser, `wl-copy` (wl-clipboard) for the copy buttons, and `omarchy-launch-terminal` for the GPU sudo hand-off. The locked-state Install buttons use Omarchy's `omarchy-launch-floating-terminal-with-presentation`; without it they fall back to a copyable command. The panel says so in place when zenity or the terminal launcher is missing. Git is needed for plugin-manager installation. Node.js and pytest are only needed for the development tests.
 
-No npm/pip packages, background service, build step or vendored binaries. Nothing runs at install time, and the plugin itself never runs as root — the privileged actions (GPU enable/disable, and installing a missing Voxtype or voxtype-tui) open a terminal where *you* confirm and type any password, so the shell never handles one.
+No plugin-specific npm/pip packages, build step or vendored binaries. Nothing runs at install time, and the plugin itself never runs as root — the privileged actions (GPU enable/disable, and installing a missing Voxtype or voxtype-tui) open a terminal where *you* confirm and type any password, so the shell never handles one. Selecting Qwen3-ASR additionally uses voxtype-tui's managed local server and user service.
 
 ## How it works
 
-It is a native shell plugin built against the official Quattro plugin contract. It does not start another Quickshell instance and is not a first-party Omarchy product or an approved marketplace listing.
+It is an independently maintained native shell plugin built against the official Quattro plugin contract. It does not start another Quickshell instance and is not a first-party Omarchy product. Marketplace verification applies only to the approved source snapshot, not every newer upstream commit.
 
 The panel is a thin QML front end over the installed **voxtype-tui** Python package. Every write goes through `voxtype_tui` (validated, atomic, comment-preserving saves; sidecar reconcile; sync bundle), so the panel and the TUI never disagree.
 
-Some models in the list are added by newer voxtype-tui releases rather than shipped by Voxtype: quantized Whisper files that Voxtype loads directly (offered only with GPU acceleration, which they need), and **Qwen3-ASR**, which runs as a small local CrispASR server that Voxtype reaches through its remote mode and that starts and stops together with Voxtype. With an older voxtype-tui the panel simply lists Voxtype's own models.
+Some models in the list are added by **voxtype-tui 0.1.9 or newer** rather than shipped by Voxtype: quantized Whisper files that Voxtype loads directly (offered only with GPU acceleration, which they need), and **Qwen3-ASR**, which runs as a small local CrispASR server that Voxtype reaches through its remote mode and that starts and stops together with Voxtype. With an older voxtype-tui the panel simply lists Voxtype's own models.
 
 Installing from a local checkout instead: `omarchy plugin add "$PWD" --yes --enable`.
 
@@ -58,11 +58,12 @@ Installing from a local checkout instead: `omarchy plugin add "$PWD" --yes --ena
 Plugins run unsandboxed inside `omarchy-shell`, so:
 
 - **This plugin makes no network connections of its own: no telemetry, no
-  analytics, no version check.** The only thing that touches the network is a
-  model download you ask for: the `voxtype` binary, or voxtype-tui's own
-  checksum-pinned downloader for the extra models. The plugin just spawns it
-  with a fixed argv and relays its progress output. Nothing else leaves your
-  machine (the Qwen3-ASR server listens on 127.0.0.1 only).
+  analytics, no version check.** User-requested model downloads are delegated
+  to the `voxtype` binary or voxtype-tui's checksum-pinned downloader for
+  extra models, with fixed argv and relayed progress output. While Qwen3-ASR
+  is active, voxtype-tui also checks its local server's health on 127.0.0.1.
+  Transcription itself belongs to Voxtype: Qwen3-ASR is local, while a remote
+  Whisper endpoint you configure can send audio to that chosen server.
 - It never touches your audio or your transcripts. It edits configuration,
   vocabulary and dictionary rules, and reads the daemon's state file.
 - Every process is a fixed argv array. Untrusted strings travel over stdin as
@@ -84,6 +85,13 @@ Plugins run unsandboxed inside `omarchy-shell`, so:
   moves where audio and text are written) must be accepted explicitly. The
   plugin keeps its own dangerous-path list as a superset of upstream's, so a
   gap there cannot silently widen the hole here.
+- Automatic sync uses the same dangerous-path boundary before loading peer
+  settings. Commands, remote transcription destinations, capture/output paths
+  and the entire secrets block are not accepted automatically; vocabulary,
+  dictionary rules and safe settings still sync. A warning names ignored
+  paths. To accept them, use Import with settings enabled and confirm the
+  dangerous changes. A later ordinary save regenerates `sync.json` from
+  accepted local state, so import first or retain a separate source bundle.
 - Destructive actions confirm with **Cancel** selected by default.
 
 ### What a reviewer will flag
@@ -101,14 +109,19 @@ intentional and visible in the source:
   a read-only `systemctl --user show voxtype`. The verb is chosen from a fixed
   set in `bridge.py`; it is never taken from the request JSON. This is how the
   panel starts, stops and restarts the voice daemon, which is the plugin's
-  purpose. **Turn off / Turn on** is exactly `stop` / `start`; the plugin never
-  runs `enable`, `disable` or `mask`, so it cannot change whether Voxtype
-  starts at login.
+  purpose. **Turn off / Turn on** is exactly `stop` / `start`; it does not
+  enable, disable or mask the Voxtype service, so its start-at-login setting
+  is unchanged. Selecting Qwen3-ASR delegates creation and enabling of
+  `voxtype-asr.service` to voxtype-tui. Switching away queues teardown;
+  voxtype-tui 0.1.9 disables and removes that managed unit after a verified
+  Voxtype restart, keeping the old daemon's helper available until then.
+  Its lifecycle follows Voxtype.
 
-There are no bundled binaries, no installer script, and no remote build or
-download-and-execute path. Everything the plugin runs is either
-`/usr/bin/python3` against the file in this repository or a binary already
-installed on the system.
+There are no bundled binaries or installer scripts in this repository.
+Extra-model downloads and the digest-pinned CrispASR server build are managed
+by voxtype-tui 0.1.9 or newer, not by a plugin install hook. The bridge itself
+runs as `/usr/bin/python3` against this repository; ordinary operations call
+binaries already installed on the system.
 
 **Missing-dependency install button.** When Voxtype or `voxtype-tui` is not
 installed, the locked panel offers an Install button (`Service.qml:221`). It

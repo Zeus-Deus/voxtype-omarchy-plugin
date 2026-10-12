@@ -518,10 +518,67 @@ def _load_state(paths: Paths):
             f"voxtype config not found at {paths.config} — run `voxtype setup` first"
         )
     state = _import_state(paths)
+    from copy import deepcopy
+    from voxtype_tui import sync
+
+    # Both supported releases have no startup acceptance-policy parameter.
+    # Filter the public reader only for this synchronous load, BEFORE the
+    # reconciler formats warnings or applies anything. Explicit Import uses
+    # load_bundle_file and must continue to see the original bundle.
+    read_sync_bundle = sync.read_sync_bundle
+    blocked: set[str] = set()
+    dangerous = _dangerous_setting_paths() | REDACTED_IMPORT_PATHS
+
+    def read_safe_bundle(*args, **kwargs):
+        bundle = read_sync_bundle(*args, **kwargs)
+        if bundle is None:
+            return None
+        bundle = deepcopy(bundle)  # never mutate the reader's object/file
+        bundle.sync["settings"] = _safe_startup_settings(
+            bundle.sync.get("settings", {}), dangerous, blocked,
+        )
+        # An export bundle can carry secrets even when include_local is
+        # false. No startup secret-block import is ever implicitly approved.
+        if bundle.secrets:
+            blocked.add("secrets")
+        bundle.secrets = None
+        return bundle
+
+    sync.read_sync_bundle = read_safe_bundle
     try:
-        return state.AppState.load(paths.config, paths.sidecar)
+        st = state.AppState.load(paths.config, paths.sidecar)
+        if blocked:
+            st.sync_reconcile.warnings.append(
+                "Ignored automatic sync settings: " + ", ".join(sorted(blocked))
+                + ". Use Import with settings enabled and confirm dangerous changes."
+            )
+        return st
     except Exception as e:  # tomlkit parse errors, unreadable files
         raise BridgeError(f"could not load config: {e}") from e
+    finally:
+        sync.read_sync_bundle = read_sync_bundle
+
+
+def _safe_startup_settings(settings: dict, dangerous: frozenset[str],
+                           blocked: set[str], prefix: str = "") -> dict:
+    """Drop dangerous leaves/subtrees and scalar overwrites of their parents.
+
+    Keep safe siblings; never show peer-supplied values in the warning.
+    """
+    out = {}
+    for key, value in settings.items():
+        path = f"{prefix}.{key}" if prefix else key
+        if any(path == p or path.startswith(p + ".")
+               or (not isinstance(value, dict) and p.startswith(path + "."))
+               for p in dangerous):
+            blocked.add(path)
+        elif isinstance(value, dict):
+            child = _safe_startup_settings(value, dangerous, blocked, path)
+            if child:
+                out[key] = child
+        else:
+            out[key] = value
+    return out
 
 
 def _snapshot(st) -> dict[str, Any]:

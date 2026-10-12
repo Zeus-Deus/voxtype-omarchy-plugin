@@ -286,8 +286,8 @@ class Env:
         self.root = root
         self.monkeypatch = monkeypatch
         self.home = root / "home"
-        self.config = root / "cfg" / "config.toml"
-        self.sidecar = root / "tui" / "metadata.json"
+        self.config = self.home / ".config" / "voxtype" / "config.toml"
+        self.sidecar = self.home / ".config" / "voxtype-tui" / "metadata.json"
         self.models_dir = root / "models"
         self.runtime = root / "run"
         self.fakebin = root / "bin"
@@ -422,6 +422,13 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Env:
     monkeypatch.setenv("VOXTYPE_CONFIG", str(e.config))
     monkeypatch.setenv("VOXTYPE_TUI_SIDECAR", str(e.sidecar))
     monkeypatch.setenv("VOXTYPE_MODELS_DIR", str(e.models_dir))
+    # v0.1.9 only manages Qwen3's service for canonical default paths.
+    # Imports are cached between in-process tests; children resolve the same
+    # defaults from their isolated HOME on first import.
+    from voxtype_tui import config, sidecar
+
+    monkeypatch.setattr(config, "CONFIG_PATH", e.config)
+    monkeypatch.setattr(sidecar, "SIDECAR_PATH", e.sidecar)
     monkeypatch.setenv("PATH", f"{e.fakebin}{os.pathsep}{os.environ.get('PATH', '')}")
     monkeypatch.setenv("FAKE_VOXTYPE_LOG", str(e.voxtype_log))
     monkeypatch.setenv("FAKE_SYSTEMCTL_LOG", str(e.systemctl_log))
@@ -1537,6 +1544,248 @@ def _bundle(env: Env, *, settings: dict | None = None, local: dict | None = None
     return p
 
 
+def _newer_peer_sync(env: Env, *, settings: dict, secrets: dict | None = None) -> bytes:
+    """Synthetic foreign-device bundle; no command here is ever executed."""
+    from voxtype_tui import sync
+
+    p = _bundle(env, settings=settings, secrets=secrets)
+    b = sync.from_json(p.read_text())
+    b.generated_at = "2099-01-01T00:00:00Z"
+    env.sync_path.parent.mkdir(parents=True, exist_ok=True)
+    raw = sync.to_json(b).encode()
+    env.sync_path.write_bytes(raw)
+    return raw
+
+
+@pytest.mark.parametrize("local_command", [None, "LOCAL_COMMAND_FIXTURE_NEVER_EXECUTE"])
+@pytest.mark.parametrize("save_op", ["settings.set", "vocab.add"])
+def test_startup_sync_cannot_smuggle_command_into_unrelated_save(
+    env: Env, local_command: str | None, save_op: str,
+):
+    if local_command is not None:
+        env.write_config(BASE_CONFIG + '\n[output.post_process]\ncommand = "' + local_command + '"\n')
+    before = env.config.read_bytes()
+    planted = "PEER_COMMAND_FIXTURE_NEVER_EXECUTE"
+    raw = _newer_peer_sync(env, settings={
+        "output": {"post_process": {"command": planted}, "mode": "clipboard"},
+    })
+    st = bridge._load_state(bridge._paths())
+    assert bridge._get_path(st.doc, "output.post_process.command") == local_command
+    assert str(st.doc["output"]["mode"]) == "clipboard"
+    assert [v.phrase for v in st.sc.vocabulary] == ["Hyprland"]
+    assert str(st.doc["text"]["replacements"]["hyper land"]) == "Hyprland"
+    assert env.config.read_bytes() == before  # load is not consent to save
+    assert env.sync_path.read_bytes() == raw
+    loaded = env.ok("load")
+    assert planted not in json.dumps(loaded)
+    assert any("output.post_process.command" in w for w in loaded["snapshot"]["warnings"])
+    if save_op == "settings.set":
+        env.ok(save_op, path="audio.max_duration_secs", value=90)
+    else:
+        env.ok(save_op, phrase="Omarchy")
+    cfg = env.config_dict()
+    command = bridge._get_path(cfg, "output.post_process.command")
+    from voxtype_tui import config
+
+    # Harmless dictionary sync may install the dependency's trusted processor.
+    assert command == (local_command or config.POSTPROCESS_COMMAND)
+    assert cfg["output"]["mode"] == "clipboard"
+    assert planted not in env.read_config()
+    assert planted not in env.sync_path.read_text()
+    assert all(planted not in argv for argv in env.voxtype_calls())
+
+
+def test_startup_sync_cli_unrelated_save_does_not_persist_peer_command(env: Env):
+    planted = "CLI_PEER_COMMAND_FIXTURE_NEVER_EXECUTE"
+    _newer_peer_sync(env, settings={
+        "output": {"post_process": {"command": planted}, "mode": "clipboard"},
+    })
+    before = env.config.read_bytes()
+    load = env.run_cli({"op": "load"})
+    assert load.returncode == 0, load.stderr
+    loaded = json.loads(load.stdout)
+    assert loaded["ok"] is True
+    assert env.config.read_bytes() == before
+    save = env.run_cli({"op": "settings.set", "path": "audio.max_duration_secs", "value": 90})
+    assert save.returncode == 0, save.stderr
+    saved = json.loads(save.stdout)
+    assert saved["ok"] is True
+    assert planted not in env.read_config()
+    assert planted not in load.stdout + save.stdout
+    assert env.config_dict()["output"]["mode"] == "clipboard"
+    assert env.config_dict()["audio"]["max_duration_secs"] == 90
+    assert all(planted not in argv for argv in env.voxtype_calls())
+
+
+def test_startup_sync_cannot_smuggle_secrets_block(env: Env):
+    planted = "SECRETS_COMMAND_FIXTURE_NEVER_EXECUTE"
+    key = "SYNTHETIC_PEER_KEY_NOT_A_CREDENTIAL"
+    _newer_peer_sync(env, settings={"output": {"mode": "clipboard"}}, secrets={
+        "output": {"post_process": {"command": planted}},
+        "whisper": {"remote_api_key": key},
+    })
+    st = bridge._load_state(bridge._paths())
+    assert bridge._get_path(st.doc, "output.post_process.command") is None
+    assert bridge._get_path(st.doc, "whisper.remote_api_key") is None
+    res = env.ok("settings.set", path="audio.max_duration_secs", value=90)
+    assert planted not in env.read_config() + json.dumps(res)
+    assert key not in env.read_config() + json.dumps(res)
+    assert env.config_dict()["output"]["mode"] == "clipboard"
+
+
+def _put_fixture_setting(settings: dict, path: str, value) -> None:
+    node = settings
+    parts = path.split(".")
+    for part in parts[:-1]:
+        node = node.setdefault(part, {})
+    node[parts[-1]] = value
+
+
+@pytest.mark.parametrize("local_present", [False, True])
+def test_startup_sync_preserves_all_dangerous_paths_with_safe_siblings(env: Env, local_present):
+    import tomlkit
+
+    dangerous = bridge._dangerous_setting_paths() | bridge.REDACTED_IMPORT_PATHS
+    local = env.config_dict()
+    incoming = {}
+    for path in sorted(dangerous):
+        value = True if path in {"meeting.enabled", "meeting.retain_audio"} else "PEER_VALUE_NEVER_EXECUTE"
+        _put_fixture_setting(incoming, path, value)
+        if local_present:
+            old = False if isinstance(value, bool) else "LOCAL_VALUE_NEVER_EXECUTE"
+            _put_fixture_setting(local, path, old)
+    env.write_config(tomlkit.dumps(local))
+    _put_fixture_setting(incoming, "output.mode", "clipboard")
+    _put_fixture_setting(incoming, "audio.max_duration_secs", 80)
+    _newer_peer_sync(env, settings=incoming)
+    st = bridge._load_state(bridge._paths())
+    for path in dangerous:
+        assert bridge._plain(bridge._get_path(st.doc, path)) == bridge._get_path(local, path), path
+    assert str(st.doc["output"]["mode"]) == "clipboard"
+    assert int(st.doc["audio"]["max_duration_secs"]) == 80
+    result = env.ok("vocab.add", phrase="Omarchy")
+    persisted = env.config_dict()
+    from voxtype_tui import config
+
+    for path in dangerous:
+        want = bridge._get_path(local, path)
+        if path == "output.post_process.command" and want is None:
+            want = config.POSTPROCESS_COMMAND
+        assert bridge._get_path(persisted, path) == want, path
+    assert "PEER_VALUE_NEVER_EXECUTE" not in env.read_config() + json.dumps(result)
+
+
+@pytest.mark.parametrize("settings", [
+    {"output": "PARENT_SCALAR_NEVER_EXECUTE"},
+    {"output": {"post_process": "PARENT_SCALAR_NEVER_EXECUTE"}},
+    {"output": {"post_process": {"command": {"nested": "SUBTREE_NEVER_EXECUTE"}}}},
+])
+def test_startup_sync_cannot_overwrite_dangerous_parent_or_subtree(env: Env, settings):
+    before = env.config_dict()["output"]
+    _newer_peer_sync(env, settings=settings)
+    st = bridge._load_state(bridge._paths())
+    assert bridge._plain(st.doc["output"]) == before
+    env.ok("settings.set", path="audio.max_duration_secs", value=90)
+    assert "PARENT_SCALAR_NEVER_EXECUTE" not in env.read_config()
+    assert "SUBTREE_NEVER_EXECUTE" not in env.read_config()
+
+
+def test_startup_sync_tracks_new_upstream_dangerous_paths(env: Env, monkeypatch):
+    from voxtype_tui import sync
+
+    monkeypatch.setattr(sync, "DANGEROUS_PATHS", sync.DANGEROUS_PATHS + (("audio", "device"),))
+    _newer_peer_sync(env, settings={"audio": {"device": "PEER_DEVICE", "max_duration_secs": 80}})
+    st = bridge._load_state(bridge._paths())
+    assert str(st.doc["audio"]["device"]) == "default"
+    assert int(st.doc["audio"]["max_duration_secs"]) == 80
+
+
+@pytest.mark.parametrize("failure", [None, "reader", "after_reconcile"])
+def test_startup_sync_restores_reader_without_mutating_original_bundle(env: Env, monkeypatch, failure):
+    from voxtype_tui import state, sync
+
+    planted = "READER_COMMAND_FIXTURE_NEVER_EXECUTE"
+    _newer_peer_sync(env, settings={"output": {"post_process": {"command": planted}}})
+    original_reader = sync.read_sync_bundle
+    original_load = state.AppState.load
+    original_bundle = original_reader(env.sync_path)
+    original_json = sync.to_json(original_bundle)
+
+    def reader(*args, **kwargs):
+        if failure == "reader":
+            raise RuntimeError("synthetic reader failure")
+        return original_bundle
+
+    def load(*args, **kwargs):
+        st = original_load(*args, **kwargs)
+        if failure == "after_reconcile":
+            raise RuntimeError("synthetic post-reconcile failure")
+        return st
+
+    with monkeypatch.context() as m:
+        m.setattr(sync, "read_sync_bundle", reader)
+        m.setattr(state.AppState, "load", load)
+        res = env.call("load")
+        assert res["ok"] is (failure is None), res
+        assert sync.read_sync_bundle is reader
+        assert sync.to_json(original_bundle) == original_json
+    assert sync.read_sync_bundle is original_reader
+    assert planted in sync.to_json(original_reader(env.sync_path))
+    # Next load is independently guarded; explicit Import still sees the source.
+    assert planted not in json.dumps(env.ok("load"))
+    preview = env.ok("import.preview", path=str(env.sync_path), include_settings=True)
+    assert "output.post_process.command" in preview["dangerous"]
+
+
+@pytest.mark.parametrize("source", ["sync", "separate"])
+@pytest.mark.parametrize("action", ["skip", "refuse", "accept", "validation_failure"])
+def test_startup_sync_does_not_bypass_explicit_import_consent(env: Env, source, action):
+    planted = "REJECTME" if action == "validation_failure" else "IMPORT_COMMAND_FIXTURE_NEVER_EXECUTE"
+    _newer_peer_sync(env, settings={
+        "output": {"post_process": {"command": planted}, "mode": "clipboard"},
+        "whisper": {"remote_endpoint": "https://synthetic.invalid/asr"},
+    })
+    path = env.sync_path if source == "sync" else env.root / "import.json"
+    before = env.config.read_bytes()
+    preview = env.ok("import.preview", path=str(path), include_settings=True)
+    assert set(preview["dangerous"]) == {"output.post_process.command", "whisper.remote_endpoint"}
+    assert env.config.read_bytes() == before
+    args = {"path": str(path), "include_settings": action != "skip",
+            "accept_dangerous": action in {"accept", "validation_failure"}}
+    result = env.call("import.apply", **args)
+    if action == "accept":
+        assert result["ok"] is True, result
+        assert bridge._get_path(env.config_dict(), "output.post_process.command") == planted
+        assert env.config_dict()["whisper"]["remote_endpoint"] == "https://synthetic.invalid/asr"
+        env.ok("settings.set", path="audio.max_duration_secs", value=90)
+        assert bridge._get_path(env.config_dict(), "output.post_process.command") == planted
+    else:
+        if action != "skip":
+            assert result["ok"] is False, result
+            assert env.config.read_bytes() == before
+            if action == "refuse":
+                assert result["error"] == "dangerous-changes"
+            else:
+                assert "rejected by fake" in result["error"]
+        else:
+            assert result["ok"] is True, result
+        env.ok("settings.set", path="audio.max_duration_secs", value=90)
+        assert planted not in env.read_config()
+        assert bridge._get_path(env.config_dict(), "whisper.remote_endpoint") is None
+    assert all(planted not in argv for argv in env.voxtype_calls())
+
+
+def test_startup_sync_failed_import_cannot_smuggle_settings(env: Env):
+    _newer_peer_sync(env, settings={"output": {"post_process": {"command": "FAILED_IMPORT_NEVER_EXECUTE"}}})
+    bad = env.root / "bad.json"
+    bad.write_text("{not json")
+    before = env.config.read_bytes()
+    env.fail("import.apply", path=str(bad), include_settings=True, accept_dangerous=True)
+    assert env.config.read_bytes() == before
+    env.ok("vocab.add", phrase="Omarchy")
+    assert "FAILED_IMPORT_NEVER_EXECUTE" not in env.read_config()
+
+
 def test_import_preview_diff(env: Env):
     env.ok("vocab.add", phrase="Omarchy")
     p = _bundle(env, settings={"output": {"mode": "clipboard"}, "whisper": {"remote_endpoint": "http://evil:8080"}},
@@ -2560,6 +2809,24 @@ def _hotwords_file(env: Env) -> Path:
 
 
 @needs_extra
+def test_startup_sync_autoactivate_cannot_smuggle_settings(env: Env):
+    env.monkeypatch.setenv("FAKE_VOXTYPE_VARIANT", "whisper-vulkan")
+    # Already-downloaded synthetic bytes: exercise activation, never download.
+    env.add_model("whisper", Q5)
+    _newer_peer_sync(env, settings={
+        "output": {"post_process": {"command": "ACTIVATE_COMMAND_NEVER_EXECUTE"}},
+        "whisper": {"mode": "remote", "remote_endpoint": "https://synthetic.invalid/asr"},
+    })
+    message = bridge._activate_after_download("whisper", Q5, bridge._paths())
+    assert message == f"set {Q5} active", message
+    cfg = env.config_dict()
+    assert cfg["whisper"]["model"] == f"ggml-{Q5}.bin"
+    assert bridge._get_path(cfg, "whisper.mode") is None
+    assert bridge._get_path(cfg, "whisper.remote_endpoint") is None
+    assert "ACTIVATE_COMMAND_NEVER_EXECUTE" not in env.read_config()
+
+
+@needs_extra
 def test_extra_constants_match_tui():
     xm = _xm()
     assert bridge.ENGINE_QWEN3 == xm.ENGINE_QWEN3
@@ -2828,7 +3095,7 @@ def test_status_reports_a_healthy_qwen3_server(env: Env):
 
     class Health(http.server.BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
-            body = b'{"status": "ok"}'
+            body = b'{"status": "ok", "backend": "qwen3"}'
             self.send_response(200 if self.path == "/health" else 404)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -2875,6 +3142,22 @@ def test_vocab_add_with_qwen3_updates_hotwords_and_asks_for_the_normal_restart(e
     assert "Hyprland" not in _hotwords_file(env).read_text()
 
 
+def _finish_pending_asr_teardown(env: Env) -> None:
+    from voxtype_tui import asr_server
+
+    if not hasattr(asr_server, "teardown_pending"):
+        return  # older extra-model APIs retired the unit immediately
+    assert asr_server.teardown_pending()
+    assert _asr_unit(env).exists() and _hotwords_file(env).exists()
+    assert "--user disable --now voxtype-asr.service" not in env.systemctl_calls()
+    # v0.1.9 retains the old daemon's helper until identity changes. All
+    # systemctl/daemon state here is fake, not a native restart.
+    env.daemon(active=True)
+    restart = env.ok("daemon.restart", timeout=1)
+    assert restart["changed"] is True and restart["ready"] is True
+    assert not asr_server.teardown_pending()
+
+
 @needs_extra
 def test_switching_back_to_whisper_restores_settings_and_removes_the_unit(env: Env):
     _activate_qwen3(env)
@@ -2883,6 +3166,7 @@ def test_switching_back_to_whisper_restores_settings_and_removes_the_unit(env: E
     assert cfg["whisper"]["model"] == "base.en"
     assert "mode" not in cfg["whisper"] and "remote_endpoint" not in cfg["whisper"]
     assert res["snapshot"]["settings"]["engine"] == "whisper"
+    _finish_pending_asr_teardown(env)
     assert not _asr_unit(env).exists() and not _hotwords_file(env).exists()
     assert "--user disable --now voxtype-asr.service" in env.systemctl_calls()
 
@@ -2910,6 +3194,7 @@ def test_qwen3_engine_reset_restores_whisper_and_removes_server(env: Env, reset_
     assert res["snapshot"]["settings"].get("engine", "whisper") == "whisper"
     block = env.sidecar_dict()["qwen3_asr"]
     assert block["active"] is False and "previous_whisper" not in block
+    _finish_pending_asr_teardown(env)
     assert not _asr_unit(env).exists() and not _hotwords_file(env).exists()
     assert "--user disable --now voxtype-asr.service" in env.systemctl_calls()
     assert res["daemon_stale"] is True and "asr_problems" not in res
@@ -2950,6 +3235,12 @@ def test_delete_qwen3_refuses_active_then_removes_model_and_engine(env: Env):
     env.ok("models.set_active", engine="whisper", name="base.en")
     engines = env.home / ".local" / "share" / "voxtype-tui" / "engines"
     assert any(engines.iterdir())
+    from voxtype_tui import asr_server
+
+    if hasattr(asr_server, "teardown_pending"):
+        refusal = env.fail("models.delete", engine="qwen3-asr", name=Q4K)
+        assert "teardown is pending" in refusal["error"]
+    _finish_pending_asr_teardown(env)
     res = env.ok("models.delete", engine="qwen3-asr", name=Q4K)
     assert res["freed_bytes"] == 4096 and res["restart_needed"] == []
     assert not gguf.exists()
