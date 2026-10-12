@@ -33,6 +33,17 @@ You need Voxtype itself and the `voxtype-tui` package (AUR: `voxtype-tui`) insta
 - **Models** — per-engine catalog with size and state, set active, download with progress and log tail (cancellable), delete (confirmed; refuses the active model). **Export…** writes a voxtype-tui bundle (secrets off by default); **Import…** opens a file chooser, previews the diff with dangerous rows highlighted, and asks before applying.
 - Honest states: Voxtype not installed, voxtype-tui missing, installed but not set up (copyable `voxtype setup` hint — never run for you), daemon stopped, stale config, model missing, empty lists, bridge errors in the footer.
 
+## Which model?
+
+| You have | Pick | Custom words right | Word errors | Time per dictation |
+|---|---|---:|---:|---:|
+| A GPU | whisper `large-v3-turbo-q5_0` | 26/27 | 5.2% | 0.2 s |
+| CPU only | Qwen3-ASR `0.6b-q8_0` | 24/27 | 5.6% | 1.2 s |
+| A slower CPU | Qwen3-ASR `0.6b-q4_k` | 23/27 | 6.5% | 0.8 s |
+
+Measured on one voice with a mid-range CPU and a high-end GPU, vocabulary and
+dictionary on. Your results will vary.
+
 ## Keyboard
 
 `1`–`5` jump to a section, `Tab`/`Shift+Tab` cycle, `↑↓`/`j k` move the cursor, `Enter`/`Space` activate, `←→` nudge sliders, `/` or `Ctrl+F` focus search, `a` add, `c` cycle category, `d` download, `u` reset a setting to its default, `x` delete, `r` toggle recording, `o` turn Voxtype off/on (Dictate), `Ctrl+R` restart the daemon, `Esc` leaves a field, then closes the panel.
