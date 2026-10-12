@@ -35,19 +35,14 @@ You need Voxtype itself and the `voxtype-tui` package (AUR: `voxtype-tui`) insta
 
 ## Which model?
 
-Measured on one person's voice with a mid-range desktop CPU (6 cores) and a
-high-end desktop GPU, using the panel's vocabulary and dictionary. "Your words"
-counts custom vocabulary terms and dictionary commands spelled right, out of 27.
-Time is per 5–19 s dictation.
-
-| You have | Model | Your words | Word errors | Time |
+| You have | Pick | Custom words right | Word errors | Time per dictation |
 |---|---|---:|---:|---:|
-| A GPU (GPU acceleration on) | whisper `large-v3-turbo-q5_0` | 26/27 | 5.2% | 0.2 s |
+| A GPU | whisper `large-v3-turbo-q5_0` | 26/27 | 5.2% | 0.2 s |
 | CPU only | Qwen3-ASR `0.6b-q8_0` | 24/27 | 5.6% | 1.2 s |
 | A slower CPU | Qwen3-ASR `0.6b-q4_k` | 23/27 | 6.5% | 0.8 s |
 
-Your numbers will differ with your voice, microphone and hardware. Fewer CPU
-cores slow whisper down a lot more than Qwen3-ASR.
+Measured on one voice with a mid-range CPU and a high-end GPU, vocabulary and
+dictionary on. Your results will vary.
 
 ## Keyboard
 
