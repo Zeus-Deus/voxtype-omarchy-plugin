@@ -48,6 +48,10 @@ Item {
     property string copyText: ""
     property int copyGeneration: 0
 
+    property bool pasting: false
+    property bool pasteTimedOut: false
+    property int pasteGeneration: 0
+
     property string daemonState: "unknown"
     property bool pollState: false
     property int pollIntervalMs: 1500
@@ -59,6 +63,8 @@ Item {
     signal pickCanceled()
     signal pickFailed()
     signal copyFinished(bool ok)
+    signal pasted(string text)
+    signal pasteFailed(string reason)
 
     // One bridge call at a time. Later requests queue in order so a write
     // never races a status poll for the same config file; status polls are
@@ -202,6 +208,34 @@ Item {
         copying = false;
         copyText = "";
         copyFinished(code === 0);
+    }
+
+    // Clipboard reads never happen in the shell. `bridge.py --paste` runs
+    // wl-paste in a child, keeps at most Model.PASTE_MAX_BYTES and gives up
+    // after Model.PASTE_TIMEOUT_MS; this deadline is the backstop that kills
+    // the bridge itself, so a stalled clipboard owner costs a child process.
+    function paste() {
+        if (pasting) return false;
+        pasting = true;
+        pasteTimedOut = false;
+        pasteGeneration++;
+        paster.running = true;
+        pasteDeadline.restart();
+        return true;
+    }
+    function cancelPaste() {
+        if (!pasting) return;
+        pasteDeadline.stop();
+        pasting = false;
+        if (paster.running) paster.signal(9);
+    }
+    function finishPaste(code) {
+        if (!pasting) return;
+        pasteDeadline.stop();
+        pasting = false;
+        var text = Model.pasteResult(pasteOutput.text, code, pasteTimedOut);
+        if (text === null) pasteFailed(Model.pasteError(code, pasteTimedOut));
+        else pasted(text);
     }
 
     // Privileged GPU toggles are handed to the user's own terminal; the shell
@@ -359,6 +393,35 @@ Item {
             if (!root.copying) return;
             if (clipboard.running) clipboard.signal(9);
             else root.finishClipboard(-1);
+        }
+    }
+
+    Process {
+        id: paster
+        command: [root.pythonBinary, root.bridgePath, "--paste"]
+        stdout: StdioCollector { id: pasteOutput; waitForEnd: true }
+        stderr: StdioCollector { waitForEnd: true }
+        onRunningChanged: {
+            if (!running) {
+                var generation = root.pasteGeneration;
+                Qt.callLater(function() {
+                    if (generation === root.pasteGeneration && !paster.running && root.pasting)
+                        root.finishPaste(-1);
+                });
+            }
+        }
+        onExited: function(code) { root.finishPaste(code) }
+    }
+    Timer {
+        id: pasteDeadline
+        // The bridge gives up after PASTE_TIMEOUT_MS; this also covers a
+        // slow interpreter start.
+        interval: Model.PASTE_TIMEOUT_MS + 2000
+        onTriggered: {
+            if (!root.pasting) return;
+            root.pasteTimedOut = true;
+            if (paster.running) paster.signal(9);
+            else root.finishPaste(-1);
         }
     }
 

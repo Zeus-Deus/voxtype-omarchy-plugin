@@ -46,6 +46,8 @@ Panel {
     property int cursorIndex: -1
     property bool cursorActive: false
     property var focusedEditor: null
+    // The field a pending paste belongs to (see requestPaste).
+    property var pasteTarget: null
     property int openPopups: 0
     property string confirmAction: ""
     property var confirmPayload: null
@@ -228,6 +230,8 @@ Panel {
             importAcceptDangerous = false;
             focusedEditor = null;
             openPopups = 0;
+            pasteTarget = null;
+            service.cancelPaste();
             testField.text = "";
             previewOutput = "";
             vocabSearch.text = "";
@@ -550,6 +554,21 @@ Panel {
         importAcceptDangerous = confirmation.accept;
         ask("import.apply", null, confirmation.message, confirmation.confirmText);
     }
+    // Ctrl+V / Shift+Insert in a field. The clipboard is read by a bounded
+    // child (Service.paste), never by Qt inside the shell; the text lands
+    // only in the field that asked, and only if it still has focus.
+    function requestPaste(field) {
+        // One read at a time; a second Ctrl+V never re-targets a running one.
+        if (!field || service.pasting) return;
+        pasteTarget = field;
+        service.paste();
+    }
+    function finishPaste(text) {
+        var field = pasteTarget;
+        pasteTarget = null;
+        if (!field || !opened || focusedEditor === null || !field.activeFocus) return;
+        field.insertText(text);
+    }
     function noteEditor(item, focused) {
         if (focused) focusedEditor = item;
         else if (focusedEditor === item) focusedEditor = null;
@@ -710,6 +729,8 @@ Panel {
         onPickCanceled: root.resumeAfterPick()
         onCopyFinished: function(ok) { if (!ok) { root.notice = ""; root.errorText = "Could not copy: is wl-copy installed?" } }
         onPickFailed: { root.resumeAfterPick(); root.errorText = Model.ERROR_PICKER_MISSING }
+        onPasted: function(text) { root.finishPaste(text) }
+        onPasteFailed: function(reason) { root.pasteTarget = null; root.showNotice(reason) }
     }
     Timer {
         id: statusPoll
@@ -992,8 +1013,9 @@ Panel {
                                 }
 
                                 PanelSectionHeader { text: "TEST A PHRASE"; foreground: root.foreground; fontFamily: root.fontFamily }
-                                TextField {
+                                EditField {
                                     id: testField
+                                    onPasteRequested: root.requestPaste(testField)
                                     width: parent.width
                                     placeholderText: "Type what you would say…"
                                     foreground: root.foreground
@@ -1021,8 +1043,9 @@ Panel {
                                 Row {
                                     width: parent.width
                                     spacing: Style.space(10)
-                                    TextField {
+                                    EditField {
                                         id: vocabSearch
+                                        onPasteRequested: root.requestPaste(vocabSearch)
                                         width: parent.width - tokenMeter.width - parent.spacing
                                         placeholderText: "Search or add a word · Enter adds"
                                         foreground: root.foreground
@@ -1086,8 +1109,9 @@ Panel {
                                 Row {
                                     width: parent.width
                                     spacing: Style.space(8)
-                                    TextField {
+                                    EditField {
                                         id: dictFrom
+                                        onPasteRequested: root.requestPaste(dictFrom)
                                         width: (parent.width - categoryChip.width - addRule.width - parent.spacing * 3) * 0.5
                                         placeholderText: "spoken phrase"
                                         foreground: root.foreground
@@ -1095,8 +1119,9 @@ Panel {
                                         Keys.onReturnPressed: { if (dictTo.text.trim() === "") dictTo.forceActiveFocus(); else root.upsertRule() }
                                         Keys.onEscapePressed: function(event) { keyCatcher.forceActiveFocus(); event.accepted = true }
                                     }
-                                    TextField {
+                                    EditField {
                                         id: dictTo
+                                        onPasteRequested: root.requestPaste(dictTo)
                                         width: dictFrom.width
                                         placeholderText: "→ replacement"
                                         foreground: root.foreground
@@ -1126,8 +1151,9 @@ Panel {
                                         onClicked: root.upsertRule()
                                     }
                                 }
-                                TextField {
+                                EditField {
                                     id: dictSearch
+                                    onPasteRequested: root.requestPaste(dictSearch)
                                     width: parent.width
                                     placeholderText: "Search rules · /"
                                     foreground: root.foreground
@@ -1560,8 +1586,9 @@ Panel {
                                     Row {
                                         width: parent.width
                                         spacing: Style.space(8)
-                                        TextField {
+                                        EditField {
                                             id: exportPath
+                                            onPasteRequested: root.requestPaste(exportPath)
                                             width: parent.width - exportButton.width - parent.spacing
                                             placeholderText: "Export path"
                                             foreground: root.foreground
@@ -1793,6 +1820,10 @@ Panel {
             onChanged: function(v) { root.setSetting(dropdownRow.settingKey, v) }
         }
     }
+    // A whole-number setting. Not qs.Ui NumberField: its SpinBox edits through
+    // a Qt TextInput, which reads the clipboard inside the shell (see
+    // EditField.qml). Typing, ↑↓ and the step arrows all commit through
+    // Model.clampNumber, so a value outside [from, to] never reaches the bridge.
     component SettingNumber: Column {
         id: numberRow
         required property string settingKey
@@ -1802,23 +1833,62 @@ Panel {
         property int to: 100
         property int stepSize: 1
         readonly property bool isSet: Model.settingIsSet(root.config, settingKey)
-        function activate() { number.field.forceActiveFocus() }
-        width: Math.max(number.implicitWidth, Style.space(150))
+        readonly property int current: Model.clampNumber(Model.settingValue(root.config, settingKey, fallback), from, to, fallback)
+        function activate() { number.forceActiveFocus(); number.selectAll() }
+        function sync() { if (!number.activeFocus) number.text = String(current) }
+        function commit(value) {
+            var next = Model.clampNumber(value, from, to, current);
+            number.text = String(next);
+            if (next !== current) root.setSetting(settingKey, next);
+        }
+        function step(direction) { commit(Model.clampNumber(number.text, from, to, current) + direction * stepSize) }
+        width: Style.space(150)
         spacing: Style.spacing.labelGap
+        Component.onCompleted: sync()
+        onCurrentChanged: sync()
         SettingLabel { settingKey: numberRow.settingKey; label: numberRow.label; hasCursor: root.cursorIs(numberRow.settingKey); isSet: numberRow.isSet }
-        NumberField {
+        EditField {
             id: number
-            from: numberRow.from; to: numberRow.to; stepSize: numberRow.stepSize
-            value: Number(Model.settingValue(root.config, numberRow.settingKey, numberRow.fallback))
+            onPasteRequested: root.requestPaste(number)
+            width: Style.spacing.numberFieldWidth
+            horizontalAlignment: TextEdit.AlignHCenter
+            allowedChars: numberRow.from < 0 ? /[-0-9]/ : /[0-9]/
+            maximumLength: Math.max(String(numberRow.from).length, String(numberRow.to).length)
+            rightInset: stepper.width
             foreground: root.foreground
-            fontFamily: root.fontFamily
+            placeholderColor: root.muted
             hasCursor: root.cursorIs(numberRow.settingKey)
-            onHovered: function(h) { if (h) root.setCursor(numberRow.settingKey, -1) }
+            onHoveredChanged: if (hovered) root.setCursor(numberRow.settingKey, -1)
             onHasCursorChanged: if (hasCursor) root.ensureVisible(numberRow)
-            onModified: function(v) { root.setSetting(numberRow.settingKey, v) }
-            Connections {
-                target: number.field
-                function onActiveFocusChanged() { root.noteEditor(numberRow, number.field.activeFocus) }
+            onActiveFocusChanged: { root.noteEditor(numberRow, activeFocus); if (!activeFocus) numberRow.commit(text) }
+            Keys.onReturnPressed: { numberRow.commit(text); keyCatcher.forceActiveFocus() }
+            Keys.onEnterPressed: { numberRow.commit(text); keyCatcher.forceActiveFocus() }
+            Keys.onUpPressed: numberRow.step(1)
+            Keys.onDownPressed: numberRow.step(-1)
+            Keys.onEscapePressed: function(event) { number.text = String(numberRow.current); keyCatcher.forceActiveFocus(); event.accepted = true }
+            Column {
+                id: stepper
+                anchors.right: parent.right
+                anchors.rightMargin: Style.spacing.controlPaddingX
+                anchors.verticalCenter: parent.verticalCenter
+                Repeater {
+                    model: [1, -1]
+                    delegate: Text {
+                        required property int modelData
+                        textFormat: Text.PlainText
+                        text: modelData > 0 ? "▴" : "▾"
+                        color: stepArea.containsMouse ? root.foreground : root.muted
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                        MouseArea {
+                            id: stepArea
+                            anchors.fill: parent
+                            anchors.margins: -Style.space(2)
+                            hoverEnabled: true
+                            onClicked: numberRow.step(parent.modelData)
+                        }
+                    }
+                }
             }
         }
     }
@@ -1841,8 +1911,9 @@ Panel {
         Component.onCompleted: sync()
         Connections { target: root; function onConfigChanged() { textRow.sync() } }
         SettingLabel { settingKey: textRow.settingKey; label: textRow.label; hasCursor: root.cursorIs(textRow.settingKey); isSet: textRow.isSet }
-        TextField {
+        EditField {
             id: input
+            onPasteRequested: root.requestPaste(input)
             width: parent.width
             placeholderText: textRow.placeholderText
             foreground: root.foreground

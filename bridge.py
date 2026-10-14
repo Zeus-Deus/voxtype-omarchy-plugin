@@ -4,6 +4,7 @@ the installed ``voxtype_tui`` package.
 
     printf '{"op":"status"}' | python3 bridge.py        # one JSON object out
     python3 bridge.py --download whisper large-v3       # streaming lines
+    python3 bridge.py --paste                           # bounded clipboard text
 
 Every hard part (comment-preserving atomic config saves validated by
 ``voxtype -c <tmp> config``, sidecar reconcile, migrations, sync bundle,
@@ -43,6 +44,7 @@ which ``asr_server`` wires up on every ``AppState.save``.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import fcntl
 import os
@@ -2249,6 +2251,93 @@ def _activate_after_download(engine: str, name: str, paths: Paths) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Bounded clipboard read (`bridge.py --paste`)
+# ---------------------------------------------------------------------------
+
+# The panel's text fields (EditField.qml) never let Qt read the Wayland
+# clipboard inside the shell (Qt's TextInput would, unbounded and with no
+# total deadline, on every clipboard change and on paste). A paste reads it
+# here instead: one
+# child `wl-paste`, at most PASTE_MAX_BYTES + 1 bytes kept, the whole read
+# bounded by PASTE_TIMEOUT_SECONDS, the child's process group killed on the
+# way out. Model.js PASTE_MAX_BYTES / PASTE_TIMEOUT_MS / PASTE_EXIT_* mirror
+# these; tests pin both sides.
+PASTE_MAX_BYTES = 16384
+PASTE_TIMEOUT_SECONDS = 2.0
+PASTE_EXIT_NO_TEXT = 1
+PASTE_EXIT_TOO_LARGE = 4
+PASTE_EXIT_TIMEOUT = 5
+PASTE_ARGV = ("wl-paste", "--no-newline", "--type", "text")
+
+
+def run_paste(out=None) -> int:
+    """Print the clipboard's text (UTF-8, at most PASTE_MAX_BYTES) and exit 0.
+
+    Exit 1 when there is no text, PASTE_EXIT_TOO_LARGE when it is larger than
+    the cap and PASTE_EXIT_TIMEOUT when the clipboard owner does not finish in
+    time; nothing is printed then. The reader never buffers more than the cap
+    plus one chunk, however much the clipboard owner sends.
+    """
+    import select
+
+    out = out or sys.stdout
+    if shutil.which(PASTE_ARGV[0]) is None:
+        return PASTE_EXIT_NO_TEXT
+    try:
+        child = subprocess.Popen(
+            list(PASTE_ARGV),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        return PASTE_EXIT_NO_TEXT
+    assert child.stdout is not None
+    pipe = child.stdout
+    data = bytearray()
+    result = PASTE_EXIT_NO_TEXT
+    deadline = time.monotonic() + PASTE_TIMEOUT_SECONDS
+    fd = pipe.fileno()
+    try:
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                result = PASTE_EXIT_TIMEOUT
+                break
+            ready, _, _ = select.select([fd], [], [], left)
+            if not ready:
+                result = PASTE_EXIT_TIMEOUT
+                break
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                result = 0
+                break
+            data += chunk
+            if len(data) > PASTE_MAX_BYTES:
+                result = PASTE_EXIT_TOO_LARGE
+                break
+    finally:
+        # wl-paste may have handed the pipe to a child of its own; end the
+        # whole group so nothing keeps streaming after we return.
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(child.pid, signal.SIGKILL)
+        pipe.close()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            child.wait(timeout=1)
+    if result != 0:
+        return result
+    if child.returncode not in (0, -signal.SIGKILL):
+        return PASTE_EXIT_NO_TEXT
+    text = bytes(data).decode("utf-8", errors="replace")
+    if not text:
+        return PASTE_EXIT_NO_TEXT
+    out.write(text)
+    out.flush()
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -2257,6 +2346,9 @@ def main(argv: list[str] | None = None, stdin=None, stdout=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     stdin = stdin or sys.stdin
     stdout = stdout or sys.stdout
+
+    if argv == ["--paste"]:
+        return run_paste(out=stdout)
 
     if argv and argv[0] == "--download":
         if len(argv) != 3:

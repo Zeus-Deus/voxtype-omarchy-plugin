@@ -152,17 +152,29 @@ overrides, `U+2028/2029`) is stripped and each line is capped at
 `MAX_DOWNLOAD_LOG_CHARS` (200) before it reaches the panel's log tail. The QML
 side sanitizes again on the way in; neither half is load-bearing alone.
 
+### Clipboard read (not JSON; used by a dedicated QML Process)
+
+`python3 bridge.py --paste` is the only way the panel reads the clipboard. It
+runs `wl-paste --no-newline --type text` in its own process group, keeps at
+most `PASTE_MAX_BYTES` (16384) and stops after `PASTE_TIMEOUT_SECONDS` (2) in
+total, then kills the group. Exit 0 prints the UTF-8 text (invalid bytes
+replaced); exit 1 = no text, 4 = larger than the cap, 5 = deadline; nothing is
+printed on failure. `Service.paste()` adds a backstop deadline that SIGKILLs
+the bridge itself. It takes no other argument and needs no voxtype-tui.
+
 ## UI
 
 One `KeyboardPanel` anchored to the bar button, `contentWidth ≈ Style.space(560)`,
 `contentHeight ≈ Style.space(520)`, content in a `Flickable` (KeyboardPanel
 does not scroll). Everything from the shipped kit: `PanelHero`,
 `ButtonGroup` (section tabs), `PanelSectionHeader`, `PanelSeparator`,
-`Toggle`/`ToggleSwitch`, `Dropdown`/`SearchableDropdown`, `TextField`,
-`NumberField`, `PanelSlider`, `Button`, `PanelActionButton`, `CursorSurface`
-rows, `ConfirmDialog` (always `selectedIndex = 0` on open; block the key
+`Toggle`/`ToggleSwitch`, `Dropdown`, `PanelSlider`, `Button`,
+`PanelActionButton`, `CursorSurface` rows, `ConfirmDialog` (always
+`selectedIndex = 0` on open; block the key
 catcher while open). No hard-coded colours/fonts/radii — `Color.*`,
-`Style.*`, `bar ? bar.foreground : Color.foreground`.
+`Style.*`, `bar ? bar.foreground : Color.foreground`. Text and number inputs
+are the plugin's own `EditField.qml`, styled with the same kit tokens (see
+Security rules: the kit's `TextField`/`NumberField` read the clipboard).
 
 **Hero**: mic glyph (accent while recording), title "Voxtype", meta = daemon
 line ("Listening · large-v3 · Super+Ctrl+X" / "Transcribing…" / "Off · model unloaded" /
@@ -210,6 +222,16 @@ while the panel is open; the bar button polls the state file
 
 ## Security rules (unsandboxed shell plugin)
 
+- No Qt text input that reads the clipboard by itself. Qt's TextInput
+  (kit `TextField`, the SpinBox in `NumberField`, `SearchableDropdown`,
+  `MultiSelect`) fetches the full clipboard text in the shell process on
+  every clipboard change and on paste, without a byte limit or total
+  deadline; the bar keeps this panel loaded, so that would apply even while
+  it is closed. Every editable field is `EditField.qml` (plain-text
+  `TextEdit`: format check only on change; paste keys, middle/right click and
+  context menu closed). Paste goes through `bridge.py --paste` and lands only
+  in the requesting field while it still has focus.
+  `tests/clipboard.test.js` pins this for every shipped QML file.
 - Only argv arrays; untrusted strings go through stdin JSON, never
   interpolated into shell. `bash -c` is not used.
 - The remote API key is never read back to QML; the bridge reports only

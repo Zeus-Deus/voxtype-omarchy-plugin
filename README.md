@@ -104,13 +104,25 @@ Plugins run unsandboxed inside `omarchy-shell`, so:
   dangerous changes. A later ordinary save regenerates `sync.json` from
   accepted local state, so import first or retain a separate source bundle.
 - Destructive actions confirm with **Cancel** selected by default.
+- **The shell never reads your clipboard.** Qt's editable text inputs (the
+  kit's `TextField` and the spin box inside `NumberField`) fetch the whole
+  clipboard text inside the shell on every clipboard change and on paste,
+  with no size limit and no overall deadline, so a program owning the
+  clipboard could stall or fill the shared shell. Every field in this panel
+  is `EditField.qml` instead: a plain-text `TextEdit` that only checks which
+  formats are offered, with Ctrl+V, Shift+Insert, middle-click and the
+  context menu closed. A paste runs `bridge.py --paste` in a child process
+  (`wl-paste`, at most 16 KB, 2 s in total, its process group killed
+  afterwards) and inserts the text only into the field that asked, if it
+  still has focus. Anything larger, slower or not text is refused with a
+  notice and nothing is inserted.
 
 ### What a reviewer will flag
 
 An automated baseline scan will detect two capabilities in this plugin. Both are
 intentional and visible in the source:
 
-- **`privilege`** — one `sudo` reference, at `Service.qml:210`. It is a fixed
+- **`privilege`** — one `sudo` reference, at `Service.qml:244`. It is a fixed
   argv (`omarchy-launch-terminal sudo voxtype setup gpu --enable|--disable`)
   in which no element comes from user input or a config file. It is detached
   into your terminal so the credential is typed by you, to `sudo`, outside
@@ -135,7 +147,7 @@ runs as `/usr/bin/python3` against this repository; ordinary operations call
 binaries already installed on the system.
 
 **Missing-dependency install button.** When Voxtype or `voxtype-tui` is not
-installed, the locked panel offers an Install button (`Service.qml:221`). It
+installed, the locked panel offers an Install button (`Service.qml:255`). It
 opens Omarchy's own floating terminal
 (`omarchy-launch-floating-terminal-with-presentation`, the launcher Omarchy's
 first-run "Install Dictation" notification uses) with one of two fixed scripts
@@ -162,8 +174,8 @@ right-click-records).
 
 ```bash
 node --test tests/*.test.js
-uv run --python /usr/bin/python3 --with pytest pytest -q tests/test_bridge.py
-qmllint -I /usr/share/omarchy/shell BarWidget.qml Panel.qml Service.qml VoxtypeIcon.qml
+uv run --python /usr/bin/python3 --with pytest pytest -q tests/
+qmllint -I /usr/share/omarchy/shell BarWidget.qml Panel.qml Service.qml VoxtypeIcon.qml EditField.qml
 omarchy plugin validate .
 omarchy-restart-shell && qs log -p /usr/share/omarchy/shell --tail 60
 ```

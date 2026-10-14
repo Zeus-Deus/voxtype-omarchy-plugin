@@ -8,6 +8,7 @@ const read = name => fs.readFileSync(path.join(__dirname, '..', name), 'utf8');
 const service = read('Service.qml');
 const panel = read('Panel.qml');
 const widget = read('BarWidget.qml');
+const editField = read('EditField.qml');
 const stripComments = s => s.replace(/^\s*\/\/.*$/gm, '');
 const same = (actual, expected, message) =>
   assert.deepEqual(JSON.parse(JSON.stringify(actual)), expected, message);
@@ -51,15 +52,17 @@ function timer() {
 function process() { return {running: false, signals: [], signal(code) { this.signals.push(code); }}; }
 
 function serviceHarness() {
-  const deferred = [], completions = [], downloads = [], records = [], picks = [], copies = [];
+  const deferred = [], completions = [], downloads = [], records = [], picks = [], copies = [], pastes = [];
   const Model = {};
   vm.runInNewContext(read('Model.js'), Model);
   const root = {
     Model, busy: false, request: {}, timedOut: false, workerGeneration: 0, queue: [],
     downloading: false, downloadEngine: '', downloadName: '', downloadProgress: 0, downloadLog: [], downloadFinished: false, downloadGeneration: 0,
     recording: false, recordGeneration: 0, picking: false, pickerGeneration: 0, pickerStarted: false, pickCancelRequested: false, daemonState: 'unknown',
-    worker: process(), downloader: process(), recorder: process(), picker: process(), clipboard: process(),
+    worker: process(), downloader: process(), recorder: process(), picker: process(), clipboard: process(), paster: process(),
     copying: false, copyText: '', copyGeneration: 0, clipboardDeadline: timer(), copyFinished: ok => copies.push(ok),
+    pasting: false, pasteTimedOut: false, pasteGeneration: 0, pasteDeadline: timer(), pasteOutput: {text: ''},
+    pasted: text => pastes.push({text}), pasteFailed: reason => pastes.push({reason}),
     output: {text: ''}, pickerOutput: {text: ''}, status: null, stateFilePath: '/run/user/1000/voxtype/state',
     deadline: timer(), recordDeadline: timer(), pickerDeadline: timer(),
     stateFile: {reloads: 0, reload() { this.reloads++; }},
@@ -79,7 +82,7 @@ function serviceHarness() {
       write: text => { object.written = text; }, stdinEnabled: true});
     handler(objectSource(service, id), event, scope)(...args);
   };
-  return {root, completions, downloads, records, picks, copies, fire, flush() { while (deferred.length) deferred.shift()(); }};
+  return {root, completions, downloads, records, picks, copies, pastes, fire, flush() { while (deferred.length) deferred.shift()(); }};
 }
 
 test('a bridge call writes the request on stdin and completes once from a normal exit', () => {
@@ -352,9 +355,10 @@ test('every spawned command is an argv array against a fixed binary; the bridge 
   assert.match(code, /readonly property string pythonBinary: "\/usr\/bin\/python3"/);
   assert.match(code, /Qt\.resolvedUrl\("bridge\.py"\)/);
   const spawns = code.match(/command: \[[^\]]*\]/g) || [];
-  assert.equal(spawns.length, 5);
+  assert.equal(spawns.length, 6);
   for (const spawn of spawns) assert.match(spawn, /^command: \[(root\.pythonBinary|"voxtype"|"zenity"|"wl-copy")/);
   assert.match(code, /command: \["wl-copy", "--type", "text\/plain;charset=utf-8"\]/, 'clipboard text travels over stdin, never argv');
+  assert.match(code, /command: \[root\.pythonBinary, root\.bridgePath, "--paste"\]/, 'clipboard reads go through the bounded bridge reader');
   assert.doesNotMatch(stripComments(panel + service + widget), /bash", "-c|sh", "-c|bash -c/);
   assert.doesNotMatch(code, /stdinEnabled: true[\s\S]*?output\.text = /, 'StdioCollector.text is read-only');
 });
@@ -430,7 +434,7 @@ test('the remote API key is never rendered or requested; only its presence and a
 });
 
 test('the panel is built from the shipped kit with no hard-coded colours, fonts or pixel sizes', () => {
-  const code = stripComments(panel + widget + read('VoxtypeIcon.qml'));
+  const code = stripComments(panel + widget + editField + read('VoxtypeIcon.qml'));
   assert.doesNotMatch(code, /"#[0-9a-fA-F]{3,8}"/);
   assert.doesNotMatch(code, /font\.family: "/);
   assert.doesNotMatch(code, /font\.pixelSize: \d/);
@@ -440,7 +444,7 @@ test('the panel is built from the shipped kit with no hard-coded colours, fonts 
   // Use Commons.Color.muted / bar.muted instead.
   assert.doesNotMatch(code, /Qt\.(darker|lighter|tint)\s*\(/, 'derive muted from the theme token, not arithmetic');
   assert.match(panel, /readonly property color muted: bar && bar\.muted \? bar\.muted : Commons\.Color\.muted/);
-  for (const kit of ['KeyboardPanel', 'PanelKeyCatcher', 'PanelHero', 'ButtonGroup', 'PanelSectionHeader', 'PanelSeparator', 'Toggle', 'Dropdown', 'TextField', 'NumberField', 'PanelSlider', 'Button', 'PanelActionButton', 'CursorSurface', 'ConfirmDialog', 'Flickable'])
+  for (const kit of ['KeyboardPanel', 'PanelKeyCatcher', 'PanelHero', 'ButtonGroup', 'PanelSectionHeader', 'PanelSeparator', 'Toggle', 'Dropdown', 'PanelSlider', 'Button', 'PanelActionButton', 'CursorSurface', 'ConfirmDialog', 'Flickable'])
     assert.match(panel, new RegExp('\\b' + kit + ' \\{'), kit);
   assert.match(panel, /bar \? bar\.foreground : Commons\.Color\.foreground/);
 });
@@ -449,7 +453,7 @@ test('theme colours are module-qualified (Qt 6.12 QtQuick Color shadows qs.Commo
   // Qt 6.12 added a built-in QtQuick `Color` singleton. In a file importing
   // QtQuick a bare `Color.accent` resolves to it, every theme colour is
   // undefined and text renders black. Same fix as omarchy #14553.
-  for (const name of ['BarWidget.qml', 'Panel.qml', 'Service.qml', 'VoxtypeIcon.qml']) {
+  for (const name of ['BarWidget.qml', 'Panel.qml', 'Service.qml', 'VoxtypeIcon.qml', 'EditField.qml']) {
     const code = read(name).split('\n').filter(l => !/^\s*\/\//.test(l)).join('\n');
     assert.doesNotMatch(code, /(^|[^.A-Za-z0-9_"'])Color\./m, `${name} uses an unqualified Color.`);
     if (/Commons\.Color\./.test(code))
@@ -518,6 +522,7 @@ test('every QML import is used, so the Qt6 semantic linter reports only expected
     ['Panel.qml', panel],
     ['Service.qml', service],
     ['VoxtypeIcon.qml', read('VoxtypeIcon.qml')],
+    ['EditField.qml', editField],
   ];
   const builtin = {
     'Quickshell.Io': /\b(Process|StdioCollector|SplitParser|FileView)\b/,
@@ -560,7 +565,7 @@ test('manifest matches the design', () => {
 });
 
 test('no home paths or usernames leak into shipped code', () => {
-  for (const f of ['Panel.qml', 'Service.qml', 'BarWidget.qml', 'VoxtypeIcon.qml', 'Model.js', 'manifest.json', 'README.md'])
+  for (const f of ['Panel.qml', 'Service.qml', 'BarWidget.qml', 'VoxtypeIcon.qml', 'EditField.qml', 'Model.js', 'manifest.json', 'README.md'])
     assert.doesNotMatch(read(f), /\/home\/[a-z]/, f);
 });
 
@@ -568,7 +573,7 @@ test('the plugin opens no network connection of its own', () => {
   // The README tells users nothing leaves their machine except a model
   // download run by the voxtype binary. Keep that claim honest: no QML
   // or Python file here may construct a network client or name a URL.
-  const shipped = ['Panel.qml', 'Service.qml', 'BarWidget.qml', 'VoxtypeIcon.qml', 'Model.js', 'bridge.py'];
+  const shipped = ['Panel.qml', 'Service.qml', 'BarWidget.qml', 'VoxtypeIcon.qml', 'EditField.qml', 'Model.js', 'bridge.py'];
   const forbidden = [
     /\bimport\s+(?:urllib|http\.client|socket|requests|httpx|aiohttp)\b/,
     /\bfrom\s+(?:urllib|http|socket|requests|httpx|aiohttp)\b/,

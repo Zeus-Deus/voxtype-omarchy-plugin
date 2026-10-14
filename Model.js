@@ -654,6 +654,76 @@ function sanitize(text, max) {
     return s.length > lim ? s.slice(0, lim - 1) + "…" : s;
 }
 
+// ---- clipboard-safe text editing -------------------------------------------
+//
+// Qt's TextInput (qs.Ui TextField, and the SpinBox inside qs.Ui NumberField)
+// reads the Wayland clipboard inside the shell process on its own: the whole
+// text on every clipboard change, to decide whether Paste applies, and again
+// on Ctrl+V, Shift+Insert, the context menu and middle-click. Those reads
+// have no byte limit and no overall deadline. EditField.qml replaces both:
+// its TextEdit only checks offered formats on a clipboard change, its paste
+// paths are closed, and a paste goes through `bridge.py --paste` (at most
+// PASTE_MAX_BYTES, PASTE_TIMEOUT_MS in total, in a child process).
+var EDIT_MAX_CHARS = 4096;
+var PASTE_MAX_BYTES = 16384;
+var PASTE_TIMEOUT_MS = 2000;
+
+// One edit: replace [start, end) of `text` with `insert`. The insert is
+// flattened to one line with the same unsafe-character class sanitize()
+// drops, and clipped so the result stays within `max` characters.
+function spliceText(text, start, end, insert, max) {
+    var s = String(text === null || text === undefined ? "" : text);
+    var lim = max || EDIT_MAX_CHARS;
+    var a = clamp(Math.min(start, end) | 0, 0, s.length);
+    var b = clamp(Math.max(start, end) | 0, 0, s.length);
+    var add = String(insert === null || insert === undefined ? "" : insert)
+        .replace(/[\r\n\t]+/g, " ")
+        .replace(UNSAFE_CHARS, "");
+    var room = Math.max(0, lim - (s.length - (b - a)));
+    if (add.length > room) {
+        add = add.slice(0, room);
+        // Never leave half of a surrogate pair at the cut.
+        if (add.length && /[\ud800-\udbff]$/.test(add)) add = add.slice(0, -1);
+    }
+    return {text: s.slice(0, a) + add + s.slice(b), cursor: a + add.length};
+}
+
+// Text a key press would type: printable, no Ctrl/Alt/Meta (AltGr arrives
+// as Ctrl+Alt and is allowed through), no control characters.
+function typedText(text, modifiers, ctrl, alt, meta) {
+    var t = String(text || "");
+    if (t === "" || /[\u0000-\u001f\u007f]/.test(t) || t.replace(UNSAFE_CHARS, "") !== t) return "";
+    var m = modifiers | 0;
+    var altGr = (m & ctrl) && (m & alt);
+    if (!altGr && (m & (ctrl | alt | meta))) return "";
+    return t;
+}
+
+// A number field's text (or a stepped number) as a value inside [lo, hi];
+// anything unreadable keeps `fallback`.
+function clampNumber(value, lo, hi, fallback) {
+    var n = typeof value === "number" ? value : parseInt(String(value === null || value === undefined ? "" : value).trim(), 10);
+    if (!isFinite(n)) return fallback;
+    return clamp(Math.round(n), lo, hi);
+}
+
+// The bridge's --paste result: the text the bounded reader produced, or null
+// for anything the panel must not insert (a failed, killed or oversized read).
+function pasteResult(text, code, timedOut) {
+    if (timedOut || code !== 0) return null;
+    var s = String(text === null || text === undefined ? "" : text);
+    return s.length > PASTE_MAX_BYTES ? null : s;
+}
+
+// Exit codes of `bridge.py --paste` (bridge.py PASTE_EXIT_*).
+var PASTE_EXIT_TOO_LARGE = 4;
+var PASTE_EXIT_TIMEOUT = 5;
+function pasteError(code, timedOut) {
+    if (timedOut || code === PASTE_EXIT_TIMEOUT) return "The clipboard did not answer in time · nothing pasted";
+    if (code === PASTE_EXIT_TOO_LARGE) return "Clipboard text is over " + (PASTE_MAX_BYTES / 1024) + " KB · nothing pasted";
+    return "Nothing to paste: the clipboard holds no text";
+}
+
 // Defence in depth for an ALREADY-assembled dialog message: strip the same
 // unsafe characters and cap, but keep "\n" because the panel's own static
 // copy uses it deliberately. Every untrusted fragment inside the message has

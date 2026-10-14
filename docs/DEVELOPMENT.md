@@ -9,6 +9,7 @@ and nothing here is executed by the plugin.
 - `BarWidget.qml` — bar button + nested panel loader (same pattern as the sibling Drafts plugin). Polls the daemon state file only; never runs the bridge.
 - `Panel.qml` — one `KeyboardPanel`: hero, five sections (Dictate, Vocabulary, Dictionary, Settings, Models), key-hint footer, `ConfirmDialog`. Content lives in a `Flickable` because `KeyboardPanel` does not scroll.
 - `Service.qml` — every external process: the bridge worker (JSON on stdin), the download streamer, `voxtype record toggle`, the zenity picker, and the detached terminal for the GPU sudo hand-off. All argv arrays; no `bash -c`.
+- `EditField.qml` — the only editable input. Never use the kit `TextField`/`NumberField` (or any TextInput-based control) here: see Hard rule 10.
 - `Model.js` — pure helpers, no Qt imports (Node-testable): response parsing with the 2 MB cap, sanitising, diff summaries, hints, byte formatting.
 - `bridge.py` — stateless JSON-over-stdio CLI that imports the installed `voxtype_tui` package. It never re-implements TOML writes, sidecar reconcile, migrations, sync/export/import, GPU drop-ins or the model catalog. Protocol: `docs/DESIGN.md` (kept in sync with the code — update it in the same commit as any shape change).
 
@@ -23,16 +24,17 @@ and nothing here is executed by the plugin.
 7. `status` must stay fast (<150 ms, Textual-free, no `voxtype setup` calls); it is polled every 2 s while the panel is open.
 8. Write ops are refused while the TUI holds `~/.config/voxtype-tui/.lock` (`bridge.WRITE_OPS`, `tui_lock_holder`): the TUI buffers edits until Ctrl+S and then rewrites the whole config, so a concurrent panel write would be lost. `status.tui_open_pid` drives the Dictate notice.
 9. Recording toggles through the direct `voxtype record toggle` Process for latency; the bridge `record.toggle` op stays as the error-reporting fallback.
+10. The shell never reads the clipboard. Editable fields are `EditField.qml`; paste is `Service.paste()` → `bridge.py --paste` (16 KB, 2 s total, process group killed). `tests/clipboard.test.js` fails on any TextInput-based control in shipped QML.
 
 ## Gates
 
 ```bash
 node --test tests/*.test.js
-uv run --python /usr/bin/python3 --with pytest pytest -q tests/test_bridge.py   # /usr/bin/python3 has no pytest module
+uv run --python /usr/bin/python3 --with pytest pytest -q tests/   # /usr/bin/python3 has no pytest module
 # Extra models (Qwen3-ASR, quantized whisper) need a voxtype-tui that has them; run the suite
 # against both the released package (those tests skip) and a checkout:
 #   env PYTHONPATH=<voxtype-tui checkout> uv run --python /usr/bin/python3 --with pytest pytest -q tests/test_bridge.py
-qmllint -I /usr/share/omarchy/shell BarWidget.qml Panel.qml Service.qml VoxtypeIcon.qml   # exit 0, empty output (syntax only)
+qmllint -I /usr/share/omarchy/shell BarWidget.qml Panel.qml Service.qml VoxtypeIcon.qml EditField.qml   # exit 0, empty output (syntax only)
 # Semantic lint: the Qt 6 linter with the shell importable as `qs`:
 #   d=$(mktemp -d) && ln -s /usr/share/omarchy/shell "$d/qs" && /usr/lib/qt6/bin/qmllint -I "$d" -I /usr/lib/qt6/qml Panel.qml
 # Expected noise only: unqualified access inside inline components, Style.font.* / bar.* missing-property, onExited handler parameters.
