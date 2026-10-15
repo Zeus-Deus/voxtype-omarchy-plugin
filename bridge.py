@@ -47,6 +47,7 @@ from __future__ import annotations
 import contextlib
 import json
 import fcntl
+import hashlib
 import os
 import re
 import shutil
@@ -54,6 +55,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -1436,10 +1438,10 @@ def _import_load(args: dict, paths: Paths):
     except ValueError:
         parsed = None
     fmt = sync.detect_format(parsed) if parsed is not None else sync.UNKNOWN_FORMAT
-    try:
-        bundle, warnings = sync.load_bundle_file(path)
-    except sync.BundleError as e:
-        raise BridgeError(str(e)) from e
+    # Parse the bytes just read, never the path again: a sync peer can
+    # replace the file at any moment, and the review token below is a hash
+    # of exactly these bytes.
+    bundle, warnings = _parse_bundle_bytes(sync, raw)
     st = _load_state(paths)
     if not include_settings and bundle.sync.get("settings"):
         bundle = _tui_private(sync, "_bundle_with_stripped_settings")(bundle)
@@ -1454,14 +1456,60 @@ def _import_load(args: dict, paths: Paths):
     preview = sync.diff_bundle_against_state(
         bundle, st.doc, st.sc, include_local=include_local,
     )
-    return st, bundle, warnings, fmt, include_local, preview
+    return st, bundle, warnings, fmt, include_local, include_settings, preview, raw
+
+
+def _parse_bundle_bytes(sync: Any, raw: bytes):
+    """``sync.load_bundle_file`` over bytes already in memory.
+
+    The upstream reader only takes a path, so the bytes go to a fresh
+    private file (0700 directory, O_EXCL, 0600) that nothing else can
+    replace, and are parsed from there. Same three formats, same
+    validation, no second read of the user-chosen path.
+    """
+    try:
+        with tempfile.TemporaryDirectory(prefix="voxtype-import-") as tmp:
+            copy = Path(tmp) / "bundle.json"
+            fd = os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(raw)
+            return sync.load_bundle_file(copy)
+    except sync.BundleError as e:
+        raise BridgeError(str(e)) from e
+    except OSError as e:
+        raise BridgeError(f"could not stage the bundle for parsing: {e}") from e
+
+
+IMPORT_REVIEW_DOMAIN = b"voxtype-omarchy-import-review-v1\0"
+
+
+def _review_token(raw: bytes, include_local: bool, include_settings: bool,
+                  diff: dict[str, Any]) -> str:
+    """What the user approves: these exact bundle bytes, these flags, and
+    the diff they produced against the local state shown in the preview.
+
+    import.apply recomputes it from its own single read and refuses on any
+    difference, so a file replaced after the preview (a sync peer adding a
+    hook, say) is never applied under the old confirmation. Redacted rows
+    hide hook/secret values from the panel, but those values are still in
+    ``raw``, so changing only a command still changes the token.
+    """
+    h = hashlib.sha256(IMPORT_REVIEW_DOMAIN)
+    h.update(hashlib.sha256(raw).digest())
+    h.update(json.dumps(
+        {"include_local": include_local, "include_settings": include_settings, "diff": diff},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode("ascii"))
+    return h.hexdigest()
 
 
 def op_import_preview(args: dict, paths: Paths) -> dict[str, Any]:
-    _st, bundle, warnings, fmt, include_local, preview = _import_load(args, paths)
+    _st, bundle, warnings, fmt, include_local, include_settings, preview, raw = _import_load(args, paths)
     diff = _diff_to_json(preview)
     return {
         "ok": True,
+        # Opaque; import.apply must echo it back unchanged.
+        "review": _review_token(raw, include_local, include_settings, diff),
         "format": fmt,
         "source": preview.source,
         "has_local": bool(bundle.local),
@@ -1859,11 +1907,24 @@ def op_import_apply(args: dict, paths: Paths) -> dict[str, Any]:
     from voxtype_tui import sync
 
     accept_dangerous = bool(args.get("accept_dangerous", False))
-    st, bundle, warnings, fmt, include_local, preview = _import_load(args, paths)
+    reviewed = args.get("review")
+    st, bundle, warnings, fmt, include_local, include_settings, preview, raw = _import_load(args, paths)
     diff = _diff_to_json(preview)
     # Same union as import.preview, so what the user confirmed in the
     # preview is exactly what is gated here.
     dangerous = _dangerous_from_diff(diff)
+    # The confirmation covers one preview, not a path. Apply only the bytes
+    # and diff that preview showed; anything else (file replaced, flags
+    # changed, local state moved, no preview at all) needs a new review.
+    current = _review_token(raw, include_local, include_settings, diff)
+    if not isinstance(reviewed, str) or reviewed != current:
+        return {
+            "ok": False,
+            "error": "review-mismatch",
+            "dangerous": dangerous,
+            "diff": diff,
+            "warnings": warnings,
+        }
     if dangerous and not accept_dangerous:
         # Refuse BEFORE apply_bundle_to_state: nothing is written.
         return {

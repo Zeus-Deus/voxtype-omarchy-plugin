@@ -25,6 +25,7 @@ and nothing here is executed by the plugin.
 8. Write ops are refused while the TUI holds `~/.config/voxtype-tui/.lock` (`bridge.WRITE_OPS`, `tui_lock_holder`): the TUI buffers edits until Ctrl+S and then rewrites the whole config, so a concurrent panel write would be lost. `status.tui_open_pid` drives the Dictate notice.
 9. Recording toggles through the direct `voxtype record toggle` Process for latency; the bridge `record.toggle` op stays as the error-reporting fallback.
 10. The shell never reads the clipboard. Editable fields are `EditField.qml`; paste is `Service.paste()` → `bridge.py --paste` (16 KB, 2 s total, process group killed). `tests/clipboard.test.js` fails on any TextInput-based control in shipped QML.
+11. An import confirmation is bound to one preview. The bridge reads the bundle once and parses those bytes (never `load_bundle_file(<user path>)`); `import.apply` requires the preview's `review` token and refuses `review-mismatch` when bytes, flags or diff differ. The panel sets `importReview` only in `askImport` and clears it everywhere `importAcceptDangerous` is cleared.
 
 ## Gates
 

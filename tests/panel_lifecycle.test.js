@@ -53,7 +53,7 @@ function panelHarness(overrides) {
     snapshot: {vocabulary: [], replacements: [], settings: {}}, options: null, modelRows: [], modelsEngine: '', browseEngine: '', gpu: null,
     restartNeeded: [], errorText: '', notice: '', tuiMissing: false, loaded: true, previewOutput: '',
     exportPreview: null, importPreview: null, importPath: '', attaching: false, popoutSwitchClosing: false,
-    importAcceptDangerous: false,
+    importAcceptDangerous: false, importReview: '', importChanged: false,
     section: 'dictate', cursorKey: '', cursorIndex: -1, cursorActive: false, focusedEditor: null, openPopups: 0,
     confirmAction: '', confirmPayload: null, dictCategory: 'Replacement', exportOpen: false, exportScope: 'sync',
     exportSecrets: false, importLocal: false, importSettings: false, hostWidget: {id: 'widget'}, bar: {activePopout: null},
@@ -197,7 +197,7 @@ test('every row text binding for bridge strings goes through Model.sanitize', ()
 test('redacted import rows never reach a value formatter, in the card or the confirmation', () => {
   const h = panelHarness();
   h.root.importPath = '/tmp/b.json';
-  h.root.importPreview = {format: 'v2', warnings: [], diff: {settings_change: [
+  h.root.importPreview = {review: 'r'.repeat(64), format: 'v2', warnings: [], diff: {settings_change: [
     {path: 'whisper.remote_api_key', dangerous: true, redacted: true, old_set: true, new_set: true},
     {path: 'output.post_process.command', dangerous: true, old: 'a', new: 'rm -rf'},
   ]}};
@@ -218,7 +218,7 @@ test('the import card renders every settings_change row, dangerous ones distingu
   // The Repeater model expression, taken from the QML rather than re-implemented.
   const expr = panel.match(/model: root\.importPreview \? (Model\.settingsRows\([^\n]*?)\s*:\s*\[\]/)[1];
   h.root.importPath = '/tmp/b.json';
-  h.root.importPreview = {format: 'v2', warnings: [], diff: {settings_change: [
+  h.root.importPreview = {review: 'r'.repeat(64), format: 'v2', warnings: [], diff: {settings_change: [
     {path: 'audio.device', old: 'default', new: 'yeti', dangerous: false},
     {path: 'engine', old: 'whisper', new: 'parakeet', dangerous: true},
     {path: 'whisper.remote_api_key', dangerous: true, redacted: true, old_set: true, new_set: true},
@@ -233,7 +233,7 @@ test('the import card renders every settings_change row, dangerous ones distingu
   // No cap-free rendering: a long bridge list ends in one overflow line.
   const many = [];
   for (let i = 0; i < 40; i++) many.push({path: 'meeting.hook' + i, old: 'a', new: 'b', dangerous: false});
-  h.root.importPreview = {format: 'v2', warnings: [], diff: {settings_change: many}};
+  h.root.importPreview = {review: 'r'.repeat(64), format: 'v2', warnings: [], diff: {settings_change: many}};
   const capped = JSON.parse(JSON.stringify(h.setInside('(' + expr + ')')));
   assert.ok(capped.length <= Model.IMPORT_CARD_ROWS + 1, 'capped at ' + Model.IMPORT_CARD_ROWS + ' rows + overflow');
   assert.equal(capped[capped.length - 1].overflow, true);
@@ -253,7 +253,7 @@ test('accept_dangerous is false for a clean diff and true only when the dialog n
   const h = panelHarness();
   h.root.importPath = '/tmp/b.json';
   // No dangerous rows: the bridge gate must stay live.
-  h.root.importPreview = {format: 'v2', warnings: [], diff: {settings_change: [{path: 'audio.device', old: 'a', new: 'b', dangerous: false}]}};
+  h.root.importPreview = {review: 'r'.repeat(64), format: 'v2', warnings: [], diff: {settings_change: [{path: 'audio.device', old: 'a', new: 'b', dangerous: false}]}};
   h.root.askImport();
   assert.equal(h.root.importAcceptDangerous, false);
   assert.equal(h.root.confirmation.confirmText, 'Import', 'no dangerous rows: plain Import');
@@ -263,7 +263,7 @@ test('accept_dangerous is false for a clean diff and true only when the dialog n
   assert.equal(clean.accept_dangerous, false, 'a clean import never pre-waives the bridge refusal');
 
   // Dangerous rows the dialog fully enumerates: acknowledged.
-  h.root.importPreview = {format: 'v2', warnings: [], diff: {settings_change: [
+  h.root.importPreview = {review: 'r'.repeat(64), format: 'v2', warnings: [], diff: {settings_change: [
     {path: 'output.pre_recording_command', old: '', new: 'curl evil', dangerous: true},
     {path: 'engine', old: 'whisper', new: 'parakeet', dangerous: true},
   ]}};
@@ -284,7 +284,7 @@ test('an unreviewable dangerous list is not acknowledged, so the bridge refuses 
   h.root.importPath = '/tmp/huge.json';
   const rows = [];
   for (let i = 0; i < 40; i++) rows.push({path: 'meeting.hook' + i, old: 'a', new: 'b', dangerous: true});
-  h.root.importPreview = {format: 'v2', warnings: [], diff: {settings_change: rows}};
+  h.root.importPreview = {review: 'r'.repeat(64), format: 'v2', warnings: [], diff: {settings_change: rows}};
   h.root.askImport();
   assert.equal(h.root.importAcceptDangerous, false, 'nothing the user could read = nothing acknowledged');
   assert.match(h.root.confirmation.message, /40 dangerous changes/);
@@ -301,7 +301,7 @@ test('an unreviewable dangerous list is not acknowledged, so the bridge refuses 
 test('a dangerous-changes refusal from the bridge asks for a fresh preview instead of dumping the protocol error', () => {
   const h = panelHarness();
   h.root.importPath = '/tmp/b.json';
-  h.root.importPreview = {format: 'v2', warnings: [], diff: {settings_change: [{path: 'engine', old: 'a', new: 'b', dangerous: true}]}};
+  h.root.importPreview = {review: 'r'.repeat(64), format: 'v2', warnings: [], diff: {settings_change: [{path: 'engine', old: 'a', new: 'b', dangerous: true}]}};
   h.root.importAcceptDangerous = true;
   h.complete('import.apply', {ok: false, error: 'dangerous-changes', dangerous: ['engine'], diff: {}, warnings: []}, {op: 'import.apply'});
   assert.doesNotMatch(h.root.errorText, /dangerous-changes/, 'no raw protocol string in the UI');
@@ -310,10 +310,64 @@ test('a dangerous-changes refusal from the bridge asks for a fresh preview inste
   assert.equal(h.root.importAcceptDangerous, false, 'the stale acknowledgement is dropped too');
 });
 
+// ---- Review binding: a confirmation covers one preview, not a path ---------
+
+test('import.apply carries the review token of the preview the dialog was built from, once', () => {
+  const h = panelHarness();
+  h.root.importPath = '/tmp/b.json';
+  const token = 'a'.repeat(64);
+  h.root.importPreview = {review: token, format: 'v2', warnings: [], diff: {settings_change: [{path: 'engine', old: 'a', new: 'b', dangerous: true}]}};
+  h.root.askImport();
+  assert.equal(h.root.importReview, token);
+  // A newer preview arriving while the dialog is open does not re-bind it.
+  h.root.importPreview = {review: 'b'.repeat(64), format: 'v2', warnings: [], diff: {settings_change: []}};
+  h.root.applyConfirmed();
+  const apply = h.requests.pop();
+  assert.equal(apply.op, 'import.apply');
+  assert.equal(apply.review, token, 'the token of what the dialog showed');
+  assert.equal(h.root.importReview, '', 'consumed, never sticky');
+});
+
+test('a preview without a review token cannot open the import confirmation', () => {
+  const h = panelHarness();
+  h.root.importPath = '/tmp/b.json';
+  for (const review of [undefined, '', 7]) {
+    h.root.importPreview = {review, format: 'v2', warnings: [], diff: {settings_change: []}};
+    h.root.askImport();
+    assert.notEqual(h.root.confirmAction, 'import.apply');
+    assert.equal(h.root.importReview, '');
+  }
+});
+
+test('review-mismatch (file changed after preview) drops the confirmation and loads a fresh preview', () => {
+  const h = panelHarness();
+  h.root.importPath = '/tmp/b.json';
+  h.root.importSettings = true;
+  h.root.importPreview = {review: 'a'.repeat(64), format: 'v2', warnings: [], diff: {settings_change: [{path: 'engine', old: 'a', new: 'b', dangerous: true}]}};
+  h.root.askImport();
+  assert.equal(h.root.confirmation.opened, true);
+  // What the dialog's onConfirmed does: close, then applyConfirmed().
+  h.root.confirmation.opened = false;
+  h.root.applyConfirmed();
+  h.requests.length = 0;
+  h.complete('import.apply', {ok: false, error: 'review-mismatch', dangerous: ['output.post_process.command'], diff: {}, warnings: []}, {op: 'import.apply'});
+  assert.equal(h.root.importPreview, null, 'the stale preview is gone');
+  assert.equal(h.root.importAcceptDangerous, false);
+  assert.equal(h.root.importReview, '');
+  const again = h.requests.pop();
+  assert.equal(again.op, 'import.preview', 'the new bytes are shown before anything is applied');
+  assert.equal(again.include_settings, true, 'same flags as the confirmed preview');
+  assert.ok(!h.requests.some(r => r.op === 'import.apply'), 'nothing is re-applied automatically');
+  assert.doesNotMatch(h.root.errorText, /review-mismatch/);
+  h.complete('import.preview', {ok: true, review: 'c'.repeat(64), format: 'v2', warnings: [], diff: {settings_change: []}}, {op: 'import.preview'});
+  assert.match(h.root.errorText, /changed after you reviewed it/);
+  assert.equal(h.root.confirmation.opened, false, 'the user must confirm again');
+});
+
 test('cancelling the import confirmation drops the acknowledgement', () => {
   const h = panelHarness();
   h.root.importPath = '/tmp/b.json';
-  h.root.importPreview = {format: 'v2', warnings: [], diff: {settings_change: [{path: 'engine', old: 'a', new: 'b', dangerous: true}]}};
+  h.root.importPreview = {review: 'r'.repeat(64), format: 'v2', warnings: [], diff: {settings_change: [{path: 'engine', old: 'a', new: 'b', dangerous: true}]}};
   h.root.askImport();
   assert.equal(h.root.importAcceptDangerous, true);
   h.root.closeForPopoutSwitch();
@@ -335,7 +389,7 @@ test('both import ops send include_settings explicitly, defaulting OFF like voxt
   assert.equal(preview.include_settings, false, 'voxtype-tui ships this OFF');
   assert.equal(preview.include_local, false);
 
-  h.root.importPreview = {format: 'v2', warnings: [], diff: {settings_change: []}};
+  h.root.importPreview = {review: 'r'.repeat(64), format: 'v2', warnings: [], diff: {settings_change: []}};
   h.root.askImport();
   h.root.applyConfirmed();
   const apply = h.requests.pop();
@@ -347,7 +401,7 @@ test('both import ops send include_settings explicitly, defaulting OFF like voxt
 test('toggling Include settings re-previews with the new flag so the reviewed diff is the applied diff', () => {
   const h = panelHarness();
   h.root.importPath = '/tmp/bundle.json';
-  h.root.importPreview = {format: 'v2', warnings: [], diff: {settings_change: [{path: 'engine', old: 'a', new: 'b', dangerous: true}]}};
+  h.root.importPreview = {review: 'r'.repeat(64), format: 'v2', warnings: [], diff: {settings_change: [{path: 'engine', old: 'a', new: 'b', dangerous: true}]}};
   h.root.askImport();
   assert.equal(h.root.importAcceptDangerous, true);
   h.requests.length = 0;
@@ -423,7 +477,7 @@ test('no untrusted value can inject a line break into a confirmation, on any ask
   // The import confirmation builds from bundle path, diff rows and warnings.
   h.root.confirmation.opened = false;
   h.root.importPath = '/tmp/' + evil + '.json';
-  h.root.importPreview = {format: 'v2', warnings: [], diff: {settings_change: [
+  h.root.importPreview = {review: 'r'.repeat(64), format: 'v2', warnings: [], diff: {settings_change: [
     {path: evil, old: evil, new: evil, dangerous: true},
   ]}};
   h.root.askImport();

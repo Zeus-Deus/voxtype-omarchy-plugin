@@ -397,6 +397,17 @@ test('ConfirmDialog defaults to Cancel on every open and blocks the key catcher'
   assert.match(stripComments(panel), /accept_dangerous: accept/);
   assert.equal((stripComments(panel).match(/importAcceptDangerous = confirmation\.accept/g) || []).length, 1);
   assert.match(panel, /function applyConfirmed\(\)[\s\S]{0,200}action === "import\.apply"/);
+  // The confirmation is bound to the preview it showed: every import.apply
+  // sends that preview's review token, and the token is only ever set from
+  // importPreview.review inside askImport (anything else clears it).
+  const code = stripComments(panel);
+  const applies = code.match(/service\.run\(\{op: "import\.apply"[^}]*\}/g) || [];
+  assert.equal(applies.length, 1);
+  assert.match(applies[0], /review: review\b/);
+  const writes = code.match(/importReview = [^;\n]+/g) || [];
+  assert.ok(writes.length > 1);
+  for (const w of writes) assert.ok(w === 'importReview = importPreview.review' || /= ""$/.test(w), w);
+  assert.equal(writes.filter(w => w === 'importReview = importPreview.review').length, 1);
 });
 
 test('no panel shortcut depends on a key PanelKeyCatcher swallows (h, l, j, k, x, Tab)', () => {

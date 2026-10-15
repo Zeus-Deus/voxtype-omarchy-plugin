@@ -39,6 +39,13 @@ Panel {
     // applyConfirmed sends it verbatim as accept_dangerous, so nothing else
     // may raise it: a stale true would make the bridge's refusal dead code.
     property bool importAcceptDangerous: false
+    // The bridge's token for the exact preview the confirmation was built
+    // from (bundle bytes + flags + diff). Set and consumed together with
+    // importAcceptDangerous; import.apply refuses anything else.
+    property string importReview: ""
+    // Set when import.apply found the file changed since its preview; the
+    // fresh preview then says so instead of silently replacing the card.
+    property bool importChanged: false
 
     // Cursor / navigation
     property string section: "dictate"
@@ -211,6 +218,7 @@ Panel {
         confirmation.opened = false;
         confirmAction = "";
         importAcceptDangerous = false;
+        importReview = "";
         attaching = false;
         openPopups = 0;
         service.cancelPick();
@@ -228,6 +236,7 @@ Panel {
             confirmation.opened = false;
             confirmAction = "";
             importAcceptDangerous = false;
+            importReview = "";
             focusedEditor = null;
             openPopups = 0;
             pasteTarget = null;
@@ -402,8 +411,13 @@ Panel {
             // With no dangerous rows it is false, so the bridge's own gate
             // stays live rather than being pre-waived on every import.
             var accept = importAcceptDangerous;
+            var review = importReview;
             importAcceptDangerous = false;
-            service.run({op: "import.apply", path: importPath, include_local: importLocal, include_settings: importSettings, accept_dangerous: accept});
+            importReview = "";
+            // `review` binds this confirmation to the preview it showed: if
+            // the file, the flags or the local state changed since, the
+            // bridge computes a different token and writes nothing.
+            service.run({op: "import.apply", path: importPath, include_local: importLocal, include_settings: importSettings, accept_dangerous: accept, review: review});
             return;
         }
         if (action === "") return;
@@ -519,6 +533,7 @@ Panel {
         if (importSettings === value) return;
         importSettings = value;
         importAcceptDangerous = false;
+        importReview = "";
         requestImportPreview();
     }
     function writeExport() {
@@ -534,6 +549,8 @@ Panel {
         // previous bundle must not carry into the next one.
         importSettings = false;
         importAcceptDangerous = false;
+        importReview = "";
+        importChanged = false;
         controller.hide();
         if (!service.pick()) { attaching = false; controller.show(); }
     }
@@ -547,11 +564,13 @@ Panel {
         Qt.callLater(function() { keyCatcher.forceActiveFocus() });
     }
     function askImport() {
-        if (!importPreview) return;
+        if (!importPreview || typeof importPreview.review !== "string" || importPreview.review === "") return;
         var confirmation = Model.importConfirmation(importPath.split("/").pop(), importPreview.diff);
         // The dialog is the acknowledgement: accept_dangerous is whatever
-        // this message could actually show, never a constant.
+        // this message could actually show, never a constant, and it only
+        // covers the preview it was built from.
         importAcceptDangerous = confirmation.accept;
+        importReview = importPreview.review;
         ask("import.apply", null, confirmation.message, confirmation.confirmText);
     }
     // Ctrl+V / Shift+Insert in a field. The clipboard is read by a bounded
@@ -657,7 +676,20 @@ Panel {
                 if (op === "import.apply" && result.error === "dangerous-changes") {
                     root.importPreview = null;
                     root.importAcceptDangerous = false;
+                    root.importReview = "";
                     root.errorText = "Import refused: the bundle's dangerous changes no longer match what you reviewed. Preview it again.";
+                    return;
+                }
+                // The file (or the flags, or local state) changed after the
+                // preview. Nothing was written; load the new preview and say
+                // why, so the user confirms what would actually be applied.
+                if (op === "import.apply" && result.error === "review-mismatch") {
+                    root.importPreview = null;
+                    root.importAcceptDangerous = false;
+                    root.importReview = "";
+                    root.importChanged = true;
+                    root.errorText = "";
+                    root.requestImportPreview();
                     return;
                 }
                 if (op !== "status" || !root.status) root.errorText = Model.sanitize(result.error, 200);
@@ -676,7 +708,14 @@ Panel {
             else if (op === "dictionary.preview") root.previewOutput = Model.sanitize(result.output, 400);
             else if (op === "export.preview") { root.exportPreview = result; if (exportPath.text === "") exportPath.text = result.default_path || ""; }
             else if (op === "export.write") { root.notice = "Exported " + Model.formatBytes(result.bytes) + " to " + Model.sanitize(result.path, 80); noticeTimer.restart(); root.exportOpen = false; }
-            else if (op === "import.preview") { root.importPreview = result; Qt.callLater(function() { root.revealForm(importCard) }); }
+            else if (op === "import.preview") {
+                root.importPreview = result;
+                if (root.importChanged) {
+                    root.importChanged = false;
+                    root.errorText = "Nothing imported: the file changed after you reviewed it. Check this preview and apply again.";
+                }
+                Qt.callLater(function() { root.revealForm(importCard) });
+            }
             else if (op === "daemon.restart") {
                 root.notice = result.ready ? "Daemon restarted" : Model.sanitize(result.message || "Daemon restarting…", 120);
                 root.restartNeeded = [];
@@ -1700,7 +1739,7 @@ Panel {
                 selectedIndex: 0
                 foreground: root.foreground
                 fontFamily: root.fontFamily
-                onCanceled: { opened = false; root.confirmAction = ""; root.confirmPayload = null; root.importAcceptDangerous = false; keyCatcher.forceActiveFocus() }
+                onCanceled: { opened = false; root.confirmAction = ""; root.confirmPayload = null; root.importAcceptDangerous = false; root.importReview = ""; keyCatcher.forceActiveFocus() }
                 onConfirmed: { opened = false; root.applyConfirmed(); keyCatcher.forceActiveFocus() }
             }
         }

@@ -315,6 +315,16 @@ class Env:
         assert "Traceback" not in res["error"]
         return res
 
+    def apply(self, kind: str, **args):
+        """import.apply the way the panel does: preview with the same
+        path/flags first, then send that preview's review token."""
+        preview = self.call("import.preview", **{
+            k: v for k, v in args.items() if k in ("path", "include_local", "include_settings")
+        })
+        if preview.get("ok"):
+            args = {"review": preview["review"], **args}
+        return getattr(self, kind)("import.apply", **args)
+
     # --- fixtures on disk ------------------------------------------------
 
     def write_config(self, text: str = BASE_CONFIG) -> None:
@@ -1752,7 +1762,7 @@ def test_startup_sync_does_not_bypass_explicit_import_consent(env: Env, source, 
     assert env.config.read_bytes() == before
     args = {"path": str(path), "include_settings": action != "skip",
             "accept_dangerous": action in {"accept", "validation_failure"}}
-    result = env.call("import.apply", **args)
+    result = env.apply("call", **args)
     if action == "accept":
         assert result["ok"] is True, result
         assert bridge._get_path(env.config_dict(), "output.post_process.command") == planted
@@ -1780,7 +1790,7 @@ def test_startup_sync_failed_import_cannot_smuggle_settings(env: Env):
     bad = env.root / "bad.json"
     bad.write_text("{not json")
     before = env.config.read_bytes()
-    env.fail("import.apply", path=str(bad), include_settings=True, accept_dangerous=True)
+    env.apply("fail", path=str(bad), include_settings=True, accept_dangerous=True)
     assert env.config.read_bytes() == before
     env.ok("vocab.add", phrase="Omarchy")
     assert "FAILED_IMPORT_NEVER_EXECUTE" not in env.read_config()
@@ -1847,7 +1857,7 @@ def test_import_preview_refuses_oversize_file_without_reading_it(env: Env, monke
     monkeypatch.setattr(Path, "read_text", no_read)
     res = env.fail("import.preview", path=str(big))
     assert "limit" in res["error"] and str(sync.MAX_BUNDLE_BYTES) in res["error"]
-    res = env.fail("import.apply", path=str(big), accept_dangerous=True)
+    res = env.apply("fail", path=str(big), accept_dangerous=True)
     assert "limit" in res["error"]
 
 
@@ -1867,7 +1877,7 @@ def test_import_refuses_non_regular_files(env: Env):
         assert "regular file" in res["error"]
         with memory_ceiling(512, f"import.apply on {candidate}"):
             with deadline(20, f"import.apply on {candidate}"):
-                res = env.fail("import.apply", path=candidate, accept_dangerous=True)
+                res = env.apply("fail", path=candidate, accept_dangerous=True)
         assert "regular file" in res["error"]
 
 
@@ -1879,7 +1889,7 @@ def test_import_refuses_a_fifo_without_hanging(env: Env):
         res = env.fail("import.preview", path=str(fifo))
     assert "regular file" in res["error"]
     with deadline(20, "import.apply on a FIFO"):
-        res = env.fail("import.apply", path=str(fifo), accept_dangerous=True)
+        res = env.apply("fail", path=str(fifo), accept_dangerous=True)
     assert "regular file" in res["error"]
 
 
@@ -1928,11 +1938,11 @@ def test_import_read_is_bounded_not_just_stat_gated(env: Env, monkeypatch):
 def test_import_apply_refuses_dangerous_unless_accepted(env: Env):
     p = _bundle(env, settings={"whisper": {"remote_endpoint": "http://evil:8080"}})
     before = env.read_config()
-    res = env.fail("import.apply", path=str(p), include_settings=True)
+    res = env.apply("fail", path=str(p), include_settings=True)
     assert res["error"] == "dangerous-changes"
     assert res["dangerous"] == ["whisper.remote_endpoint"]
     assert env.read_config() == before
-    res = env.ok("import.apply", path=str(p), include_settings=True, accept_dangerous=True)
+    res = env.apply("ok", path=str(p), include_settings=True, accept_dangerous=True)
     assert env.config_dict()["whisper"]["remote_endpoint"] == "http://evil:8080"
     assert "whisper.remote_endpoint" in res["restart_needed"]
 
@@ -1940,7 +1950,7 @@ def test_import_apply_refuses_dangerous_unless_accepted(env: Env):
 def test_import_apply_merges(env: Env):
     env.ok("vocab.add", phrase="Omarchy")
     p = _bundle(env, settings={"output": {"mode": "clipboard"}}, local={"hotkey": {"key": "F24"}})
-    res = env.ok("import.apply", path=str(p), include_settings=True)
+    res = env.apply("ok", path=str(p), include_settings=True)
     snap = res["snapshot"]
     assert [v["phrase"] for v in snap["vocabulary"]] == ["Omarchy", "Hyprland"]
     assert snap["replacements"] == [{"from": "hyper land", "to": "Hyprland", "category": "Capitalization"}]
@@ -1950,13 +1960,13 @@ def test_import_apply_merges(env: Env):
     cfg = env.config_dict()
     assert cfg["whisper"]["initial_prompt"] == "Omarchy, Hyprland"
     assert cfg["text"]["replacements"] == {"hyper land": "Hyprland"}
-    res = env.ok("import.apply", path=str(p), include_local=True, include_settings=True)
+    res = env.apply("ok", path=str(p), include_local=True, include_settings=True)
     assert res["snapshot"]["settings"]["hotkey.key"] == "F24"
 
 
 def test_import_apply_can_skip_settings(env: Env):
     p = _bundle(env, settings={"output": {"mode": "clipboard"}})
-    res = env.ok("import.apply", path=str(p), include_settings=False)
+    res = env.apply("ok", path=str(p), include_settings=False)
     assert res["snapshot"]["settings"]["output.mode"] == "type"
     assert res["applied"]["settings_change"] == []
 
@@ -1977,7 +1987,7 @@ def test_import_include_settings_defaults_to_false(env: Env):
     assert pv["diff"]["settings_change"] == []
 
     # Default (flag absent): apply writes no settings.
-    res = env.ok("import.apply", path=str(p))
+    res = env.apply("ok", path=str(p))
     assert res["applied"]["settings_change"] == []
     assert res["snapshot"]["settings"]["output.mode"] == "type"
     assert 'mode = "type"' in env.read_config()
@@ -1990,7 +2000,7 @@ def test_import_include_settings_defaults_to_false(env: Env):
     env.write_config(before)
     pv = env.ok("import.preview", path=str(p), include_settings=True)
     assert [c["path"] for c in pv["diff"]["settings_change"]] == ["output.mode"]
-    res = env.ok("import.apply", path=str(p), include_settings=True)
+    res = env.apply("ok", path=str(p), include_settings=True)
     assert res["snapshot"]["settings"]["output.mode"] == "clipboard"
 
 
@@ -2057,7 +2067,7 @@ def test_import_flags_bridge_dangerous_paths(env: Env, planted: dict, expected: 
             assert "old" in row and "new" in row
 
     # C3: refusal is live and writes NOTHING.
-    res = env.fail("import.apply", path=str(p), include_settings=True)
+    res = env.apply("fail", path=str(p), include_settings=True)
     assert res["error"] == "dangerous-changes"
     assert set(expected) <= set(res["dangerous"])
     assert "diff" in res and "warnings" in res
@@ -2065,14 +2075,130 @@ def test_import_flags_bridge_dangerous_paths(env: Env, planted: dict, expected: 
     assert not env.sidecar.exists() or "pre_recording_command" not in env.sidecar.read_text()
 
     # Only an explicit accept_dangerous lets it through.
-    ok = env.ok("import.apply", path=str(p), include_settings=True, accept_dangerous=True)
+    ok = env.apply("ok", path=str(p), include_settings=True, accept_dangerous=True)
     assert set(expected) <= {c["path"] for c in ok["applied"]["settings_change"]}
+
+
+def _swap_after_preview(env: Env, path: Path, settings: dict) -> None:
+    """A sync peer replacing the reviewed file: same path, new bytes."""
+    from voxtype_tui import sync
+
+    b = sync.from_json(path.read_text())
+    b.sync["settings"] = settings
+    tmp = path.with_name(path.name + ".peer")
+    tmp.write_text(sync.to_json(b))
+    os.replace(tmp, path)
+
+
+@pytest.mark.parametrize("source", ["sync", "separate"])
+def test_import_apply_is_bound_to_the_reviewed_bundle(env: Env, source):
+    """Review finding: the confirmation carried only a path, and apply
+    re-read that path. A peer replacing sync.json after the preview could
+    add an unconfirmed output.post_process.command, which Voxtype runs
+    after restart + transcription. Apply must use only what was reviewed.
+    """
+    if source == "sync":
+        _newer_peer_sync(env, settings={"whisper": {"remote_endpoint": "https://synthetic.invalid/asr"}})
+        path = env.sync_path
+    else:
+        path = _bundle(env, settings={"whisper": {"remote_endpoint": "https://synthetic.invalid/asr"}})
+    before = env.config.read_bytes()
+    pv = env.ok("import.preview", path=str(path), include_settings=True)
+    assert pv["dangerous"] == ["whisper.remote_endpoint"]
+    assert re.fullmatch(r"[0-9a-f]{64}", pv["review"])
+
+    planted = "PEER_SWAP_COMMAND_FIXTURE_NEVER_EXECUTE"
+    _swap_after_preview(env, path, {
+        "whisper": {"remote_endpoint": "https://synthetic.invalid/asr"},
+        "output": {"post_process": {"command": planted}},
+    })
+    # The user confirms the dialog built from the OLD preview.
+    res = env.fail("import.apply", path=str(path), include_settings=True,
+                   accept_dangerous=True, review=pv["review"])
+    assert res["error"] == "review-mismatch"
+    assert "output.post_process.command" in res["dangerous"]
+    assert planted not in json.dumps(res)
+    assert env.config.read_bytes() == before
+    assert planted not in env.read_config()
+
+    assert all(planted not in argv for argv in env.voxtype_calls())
+
+    # Only a confirmed preview of exactly the new bytes applies them.
+    pv2 = env.ok("import.preview", path=str(path), include_settings=True)
+    assert pv2["review"] != pv["review"]
+    assert "output.post_process.command" in pv2["dangerous"]
+    env.ok("import.apply", path=str(path), include_settings=True,
+           accept_dangerous=True, review=pv2["review"])
+    assert bridge._get_path(env.config_dict(), "output.post_process.command") == planted
+
+
+def test_import_review_covers_redacted_values(env: Env):
+    """Hook values are redacted from the diff, so a swap that changes ONLY
+    the command text leaves the rendered rows identical. The token is over
+    the bundle bytes, so it still differs."""
+    p = _bundle(env, settings={"output": {"post_process": {"command": "REVIEWED_FIXTURE"}}})
+    pv = env.ok("import.preview", path=str(p), include_settings=True)
+    _swap_after_preview(env, p, {"output": {"post_process": {"command": "SWAPPED_FIXTURE"}}})
+    pv_swapped = env.ok("import.preview", path=str(p), include_settings=True)
+    assert pv_swapped["diff"] == pv["diff"], "redaction makes the rows identical"
+    assert pv_swapped["review"] != pv["review"]
+    res = env.fail("import.apply", path=str(p), include_settings=True,
+                   accept_dangerous=True, review=pv["review"])
+    assert res["error"] == "review-mismatch"
+    assert "SWAPPED_FIXTURE" not in env.read_config()
+
+
+@pytest.mark.parametrize("change", ["include_settings", "include_local", "local_state"])
+def test_import_review_covers_flags_and_local_state(env: Env, change):
+    p = _bundle(env, settings={"output": {"mode": "clipboard"}}, local={"hotkey": {"key": "F24"}})
+    pv = env.ok("import.preview", path=str(p), include_settings=True)
+    args = {"path": str(p), "include_settings": True, "review": pv["review"]}
+    if change == "include_settings":
+        args["include_settings"] = False
+    elif change == "include_local":
+        args["include_local"] = True
+    else:
+        env.ok("settings.set", path="output.mode", value="clipboard")
+    before = env.config.read_bytes()
+    assert env.fail("import.apply", **args)["error"] == "review-mismatch"
+    assert env.config.read_bytes() == before
+
+
+@pytest.mark.parametrize("review", [None, "", 7, "0" * 64])
+def test_import_apply_without_a_matching_review_writes_nothing(env: Env, review):
+    p = _bundle(env, settings={"output": {"mode": "clipboard"}})
+    before = env.config.read_bytes()
+    args = {"path": str(p), "include_settings": True}
+    if review is not None:
+        args["review"] = review
+    assert env.fail("import.apply", **args)["error"] == "review-mismatch"
+    assert env.config.read_bytes() == before
+
+
+def test_import_reads_the_chosen_file_once(env: Env, monkeypatch):
+    """The bytes hashed for the token are the bytes parsed: the upstream
+    loader never re-opens the user's path."""
+    from voxtype_tui import sync
+
+    p = _bundle(env, settings={"output": {"mode": "clipboard"}})
+    seen = []
+    real = sync.load_bundle_file
+
+    def spy(path):
+        seen.append(Path(path))
+        return real(path)
+
+    monkeypatch.setattr(sync, "load_bundle_file", spy)
+    env.ok("import.preview", path=str(p), include_settings=True)
+    env.apply("ok", path=str(p), include_settings=True)
+    assert seen and all(s != p and s.resolve() != p.resolve() for s in seen)
+    assert all(not s.exists() for s in seen), "private copy is removed"
 
 
 def test_import_apply_refusal_shape(env: Env):
     """C3: the refusal payload the QML lane renders."""
     p = _bundle(env, settings={"output": {"pre_recording_command": "evil"}})
-    res = env.fail("import.apply", path=str(p), include_settings=True)
+    res = env.apply("fail", path=str(p), include_settings=True)
     assert set(res) == {"ok", "error", "dangerous", "diff", "warnings"}
     assert res["ok"] is False and res["error"] == "dangerous-changes"
     assert res["dangerous"] == ["output.pre_recording_command"]
@@ -2080,7 +2206,7 @@ def test_import_apply_refusal_shape(env: Env):
     assert isinstance(res["warnings"], list)
     # accept_dangerous still defaults to False (C3): an explicit false
     # and an absent flag behave identically.
-    assert env.fail("import.apply", path=str(p), include_settings=True,
+    assert env.apply("fail", path=str(p), include_settings=True,
                     accept_dangerous=False)["error"] == "dangerous-changes"
 
 
@@ -2170,12 +2296,12 @@ def test_import_preview_and_apply_never_leak_secret_values(env: Env):
     }
     assert set(res["dangerous"]) == set(rows)
 
-    refused = env.fail("import.apply", path=str(p))
+    refused = env.apply("fail", path=str(p))
     assert refused["error"] == "dangerous-changes"
     for s in diff_leaks:
         assert s not in json.dumps(refused), s
 
-    applied = env.ok("import.apply", path=str(p), accept_dangerous=True)
+    applied = env.apply("ok", path=str(p), accept_dangerous=True)
     for s in key_leaks:
         assert s not in json.dumps(applied), s
     for s in diff_leaks:

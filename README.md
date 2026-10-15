@@ -96,6 +96,12 @@ Plugins run unsandboxed inside `omarchy-shell`, so:
   moves where audio and text are written) must be accepted explicitly. The
   plugin keeps its own dangerous-path list as a superset of upstream's, so a
   gap there cannot silently widen the hole here.
+- An import confirmation covers the preview you saw, not the file path. The
+  preview returns a token over the exact file bytes, the import options and
+  the resulting changes; Apply reads the file once more, recomputes it, and
+  writes nothing if anything differs (for example, a sync peer replaced
+  `sync.json` with one that adds a command). The panel then shows the new
+  preview and asks again.
 - Automatic sync uses the same dangerous-path boundary before loading peer
   settings. Commands, remote transcription destinations, capture/output paths
   and the entire secrets block are not accepted automatically; vocabulary,
