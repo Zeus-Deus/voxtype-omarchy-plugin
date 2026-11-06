@@ -355,7 +355,12 @@ test('every spawned command is an argv array against a fixed binary; the bridge 
   assert.match(code, /readonly property string pythonBinary: "\/usr\/bin\/python3"/);
   assert.match(code, /Qt\.resolvedUrl\("bridge\.py"\)/);
   const spawns = code.match(/command: \[[^\]]*\]/g) || [];
-  assert.equal(spawns.length, 6);
+  assert.equal(spawns.length, 5);
+  // The chooser is the sixth process: one fixed zenity argv per kind.
+  const chooser = code.match(/command: root\.pickKind === "dir"\n\s*\? (\[[^\]]*\])\n\s*: (\[[^\]]*\])/);
+  assert.ok(chooser, 'the chooser picks between two literal argv arrays');
+  spawns.push('command: ' + chooser[1], 'command: ' + chooser[2]);
+  assert.match(chooser[1], /^\["zenity", "--file-selection", "--directory",/);
   for (const spawn of spawns) assert.match(spawn, /^command: \[(root\.pythonBinary|"voxtype"|"zenity"|"wl-copy")/);
   assert.match(code, /command: \["wl-copy", "--type", "text\/plain;charset=utf-8"\]/, 'clipboard text travels over stdin, never argv');
   assert.match(code, /command: \[root\.pythonBinary, root\.bridgePath, "--paste"\]/, 'clipboard reads go through the bounded bridge reader');
@@ -423,7 +428,7 @@ test('closeForPopoutSwitch is overridden and clears the attach flag so a late ch
   assert.match(panel, /function closeForPopoutSwitch\(\) \{[\s\S]*?popoutSwitchClosing = true;[\s\S]*?attaching = false;[\s\S]*?service\.cancelPick\(\);[\s\S]*?controller\.hide\(\);[\s\S]*?Qt\.callLater\(function\(\) \{ root\.popoutSwitchClosing = false \}\)/);
   assert.match(panel, /function resumeAfterPick\(\) \{[\s\S]*?if \(popoutTakenElsewhere\(\)\) return;[\s\S]*?controller\.show\(\)/);
   assert.match(panel, /bar\.activePopout !== owner/);
-  assert.match(panel, /function beginImport\(\)[\s\S]{0,300}attaching = true;[\s\S]{0,400}controller\.hide\(\);[\s\S]{0,80}service\.pick\(\)/);
+  assert.match(panel, /function beginImport\(\)[\s\S]{0,300}attaching = true;[\s\S]{0,400}controller\.hide\(\);[\s\S]{0,80}service\.pick\("bundle"\)/);
   assert.match(panel, /function launchGpu\(enable\)[\s\S]{0,400}controller\.hide\(\);[\s\S]{0,160}service\.launchGpuSetup\(enable\)/);
   assert.match(widget, /function closeForPopoutSwitch\(\) \{ if \(panelLoader\.item\) panelLoader\.item\.closeForPopoutSwitch\(\) \}/);
 });

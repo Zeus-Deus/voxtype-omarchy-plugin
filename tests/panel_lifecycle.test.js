@@ -41,7 +41,7 @@ function handler(source, name, context) {
   return vm.runInContext('(' + code + ')', context);
 }
 function timer() { return {running: false, restart() { this.running = true; }, stop() { this.running = false; }}; }
-function field() { return {text: '', focused: 0, forceActiveFocus() { this.focused++; }}; }
+function field() { return {text: '', focused: 0, activeFocus: false, forceActiveFocus() { this.focused++; }, selectAll() {}}; }
 
 function panelHarness(overrides) {
   const Model = {};
@@ -54,12 +54,12 @@ function panelHarness(overrides) {
     restartNeeded: [], errorText: '', notice: '', tuiMissing: false, loaded: true, previewOutput: '',
     exportPreview: null, importPreview: null, importPath: '', attaching: false, popoutSwitchClosing: false,
     importAcceptDangerous: false, importReview: '', importChanged: false,
-    section: 'dictate', cursorKey: '', cursorIndex: -1, cursorActive: false, focusedEditor: null, openPopups: 0,
+    section: 'home', cursorKey: '', cursorIndex: -1, cursorActive: false, focusedEditor: null, openPopups: 0,
     confirmAction: '', confirmPayload: null, dictCategory: 'Replacement', exportOpen: false, exportScope: 'sync',
     exportSecrets: false, importLocal: false, importSettings: false, hostWidget: {id: 'widget'}, bar: {activePopout: null},
     anchorItem: null,
     controller: {open: true, show() { this.open = true; }, hide() { this.open = false; }},
-    keyCatcher: field(), testField: field(), vocabSearch: field(), dictSearch: field(), dictFrom: field(), dictTo: field(), exportPath: field(),
+    keyCatcher: field(), testField: field(), wordsField: field(), historySearch: field(), exportPath: field(),
     engineDropdown: {opened: 0, open() { this.opened++; }},
     confirmation: {opened: false, message: '', confirmText: '', selectedIndex: 1},
     body: {contentY: 0, height: 300, contentHeight: 900, contentItem: {}},
@@ -79,6 +79,12 @@ function panelHarness(overrides) {
       copy(text) { copies.push(text); return true; },
     },
   }, overrides || {});
+  // Plain `property <type> name: <literal>` declarations start at their QML
+  // defaults, so a new state property does not need a hand-written fixture.
+  for (const m of panel.matchAll(/^    property (?:string|int|bool|real|var) (\w+): (.+)$/gm)) {
+    if (m[1] in root) continue;
+    try { root[m[1]] = vm.runInNewContext('(' + m[2] + ')', {}); } catch (_) { /* binding, not a literal */ }
+  }
   root.root = root;
   const context = vm.createContext(root);
   const bind = (name, expr) => Object.defineProperty(root, name, {get: () => vm.runInContext(expr, context), configurable: true});
@@ -111,7 +117,7 @@ module.exports = {panelHarness};
 
 test('a late chooser result cannot reclaim the screen once another widget owns the popout', () => {
   const h = panelHarness();
-  h.root.section = 'models';
+  h.root.section = 'settings'; h.root.view = 'models';
   h.root.beginImport();
   assert.equal(h.root.controller.open, false, 'hidden for the chooser');
   assert.equal(h.root.attaching, true);
@@ -160,7 +166,8 @@ test('confirmation messages and row text strip bidi/control characters from untr
   const h = panelHarness();
   const evil = 'evil\u202ephrase\u0007!';
   h.root.snapshot = {vocabulary: [{phrase: evil}], replacements: [{from: evil, to: 'x\u202e', category: 'Replacement'}], settings: {}};
-  h.root.section = 'vocabulary';
+  // Words: one list, A–Z by what is written (the word, then the rule).
+  h.root.section = 'words';
   h.root.setCursor('rows', 0);
   h.root.deleteSelected();
   assert.equal(h.root.confirmation.opened, true);
@@ -168,12 +175,12 @@ test('confirmation messages and row text strip bidi/control characters from untr
   assert.match(h.root.confirmation.message, /evilphrase!/);
   assert.equal(h.root.confirmPayload.phrase, evil, 'the bridge still gets the exact phrase to remove');
   h.root.confirmation.opened = false;
-  h.root.section = 'dictionary';
-  h.root.setCursor('rows', 0);
+  h.root.setCursor('rows', 1);
   h.root.deleteSelected();
+  assert.equal(h.root.confirmAction, 'dict.remove');
   assert.doesNotMatch(h.root.confirmation.message, /[\u202e\u0007]/);
   h.root.confirmation.opened = false;
-  h.root.section = 'models';
+  h.root.section = 'settings'; h.root.view = 'models';
   h.root.modelsEngine = 'whisper';
   h.root.modelRows = [{name: 'm\u202e' + 'x'.repeat(100), downloaded: true, active: false}];
   h.root.setCursor('rows', 0);
@@ -187,11 +194,16 @@ test('confirmation messages and row text strip bidi/control characters from untr
 });
 
 test('every row text binding for bridge strings goes through Model.sanitize', () => {
-  assert.match(panel, /text: Model\.sanitize\(vocabRow\.modelData\.phrase, 120\)/);
-  assert.match(panel, /text: Model\.sanitize\(ruleRow\.modelData\.from, 120\)/);
-  assert.match(panel, /text: Model\.sanitize\(ruleRow\.modelData\.to, 120\)/);
+  // Words rows (vocabulary, rules and learned entries share WordRow).
+  assert.match(panel, /text: wordRow\.word\.heard \? Model\.sanitize\(wordRow\.word\.heard, 80\) : "·"/);
+  assert.match(panel, /text: Model\.sanitize\(wordRow\.word\.written, 120\)/);
   assert.match(panel, /text: Model\.sanitize\(modelRow\.modelData\.name, 120\)/);
-  assert.doesNotMatch(panel, /text: (vocabRow\.modelData\.phrase|ruleRow\.modelData\.(from|to)|modelRow\.modelData\.name)[;\s]/);
+  // History rows, the expanded text, the raw-vs-final words and Fix tokens.
+  assert.match(panel, /text: Model\.sanitize\(line\.item\.text, 200\)/);
+  assert.match(panel, /text: Model\.sanitize\(Model\.recordText\(detail\.record\), 2000\)/);
+  assert.match(panel, /text: Model\.sanitize\(modelData\.raw, 40\)/);
+  assert.doesNotMatch(panel, /text: (wordRow\.word\.written|line\.item\.text|modelRow\.modelData\.name|modelData\.raw)[;\s]/);
+  assert.doesNotMatch(panel, /text: wordRow\.word\.heard[;\n]/);
 });
 
 test('redacted import rows never reach a value formatter, in the card or the confirmation', () => {
@@ -379,7 +391,7 @@ test('cancelling the import confirmation drops the acknowledgement', () => {
 
 test('both import ops send include_settings explicitly, defaulting OFF like voxtype-tui', () => {
   const h = panelHarness();
-  h.root.section = 'models';
+  h.root.section = 'settings'; h.root.view = 'models';
   h.root.beginImport();
   h.picked('/tmp/bundle.json');
   h.flush();
@@ -422,7 +434,7 @@ test('toggling Include settings re-previews with the new flag so the reviewed di
 
 test('a fresh import always starts with settings excluded, whatever the last bundle used', () => {
   const h = panelHarness();
-  h.root.section = 'models';
+  h.root.section = 'settings'; h.root.view = 'models';
   h.root.importSettings = true;
   h.root.importAcceptDangerous = true;
   h.root.beginImport();
@@ -448,8 +460,9 @@ test('no untrusted value can inject a line break into a confirmation, on any ask
 
   h.root.snapshot = {vocabulary: [{phrase: evil}], replacements: [{from: evil, to: evil, category: 'Replacement'}], settings: {}};
 
-  h.root.section = 'vocabulary';
-  h.root.setCursor('rows', 0);
+  h.root.section = 'words';
+  const rows = h.root.wordsView.rows;
+  h.root.setCursor('rows', rows.findIndex(r => r.kind === 'vocab'));
   h.root.deleteSelected();
   assert.equal(h.root.confirmation.opened, true);
   assert.doesNotMatch(h.root.confirmation.message, breaks, 'vocab delete: no injected break');
@@ -457,14 +470,13 @@ test('no untrusted value can inject a line break into a confirmation, on any ask
   assert.equal(h.root.confirmPayload.phrase, evil, 'the bridge still gets the exact phrase');
 
   h.root.confirmation.opened = false;
-  h.root.section = 'dictionary';
-  h.root.setCursor('rows', 0);
+  h.root.setCursor('rows', rows.findIndex(r => r.kind === 'rule'));
   h.root.deleteSelected();
   assert.doesNotMatch(h.root.confirmation.message, breaks, 'dict delete: no injected break');
   assert.match(h.root.confirmation.message, /^Delete the rule /);
 
   h.root.confirmation.opened = false;
-  h.root.section = 'models';
+  h.root.section = 'settings'; h.root.view = 'models';
   h.root.modelsEngine = 'whisper';
   h.root.modelRows = [{name: evil, downloaded: true, active: false}];
   h.root.setCursor('rows', 0);
@@ -552,7 +564,7 @@ test('a missing voxtype-tui locks the panel with a copyable install command', ()
 
 test('an engine switch shows a neutral loading state until its catalog arrives', () => {
   const h = panelHarness();
-  h.root.section = 'models';
+  h.root.section = 'settings'; h.root.view = 'models';
   h.root.loaded = false;
   assert.equal(h.root.modelsLoading, true, 'nothing loaded yet');
   h.root.loaded = true;
@@ -569,6 +581,7 @@ test('an engine switch shows a neutral loading state until its catalog arrives',
 test('u resets the cursor setting to its default only when the key is actually set', () => {
   const h = panelHarness();
   h.root.section = 'settings';
+  h.root.view = 'advanced';
   h.root.snapshot = {settings: {'whisper.language': 'en', 'hotkey.modifiers': ['LEFTCTRL']}};
   h.root.handleTextKey('u');
   assert.equal(h.requests.length, 0, 'no cursor, nothing happens');
@@ -584,10 +597,19 @@ test('u resets the cursor setting to its default only when the key is actually s
   h.root.setCursor('gpu.enable', -1);
   h.root.handleTextKey('u');
   assert.equal(h.requests.length, 2, 'GPU buttons are not settings');
-  h.root.section = 'models';
+  // The simple Settings rows reset the key behind them.
+  h.root.view = '';
+  h.root.setCursor('language', -1);
+  h.root.handleTextKey('u');
+  assert.deepEqual(JSON.parse(JSON.stringify(h.requests[2])), {op: 'settings.unset', path: 'whisper.language'});
+  h.root.setCursor('drill.models', -1);
+  h.root.handleTextKey('u');
+  assert.equal(h.requests.length, 3, 'a drill-in row has nothing to reset');
+  h.root.section = 'settings';
+  h.root.view = 'models';
   h.root.setCursor('engine', -1);
   h.root.handleTextKey('u');
-  assert.equal(h.requests.length, 2, 'u is a Settings-only verb');
+  assert.equal(h.requests.length, 3, 'u is a Settings-only verb');
   // Every settings component carries the reset action and the default tag.
   for (const c of ['SettingToggle', 'SettingDropdown', 'SettingNumber', 'SettingText', 'SettingSlider']) {
     const body = panel.slice(panel.indexOf('component ' + c + ':'));
@@ -601,7 +623,7 @@ test('u resets the cursor setting to its default only when the key is actually s
 
 test('x on the active or not-downloaded model shows a footer notice instead of a silent no-op', () => {
   const h = panelHarness();
-  h.root.section = 'models';
+  h.root.section = 'settings'; h.root.view = 'models';
   h.root.modelsEngine = 'whisper';
   h.root.modelRows = [{name: 'base', downloaded: true, active: true}, {name: 'tiny', downloaded: false, active: false}, {name: 'small', downloaded: true, active: false}];
   h.root.setCursor('rows', 0);
@@ -626,7 +648,7 @@ test('x on the active or not-downloaded model shows a footer notice instead of a
 
 test('the export form and the import preview scroll into view when they open', () => {
   const h = panelHarness();
-  h.root.section = 'models';
+  h.root.section = 'settings'; h.root.view = 'models';
   h.root.toggleExport();
   assert.equal(h.root.exportOpen, true);
   assert.equal(h.root.body.contentY, 0, 'deferred until the form has laid out');
@@ -646,36 +668,54 @@ test('the export form and the import preview scroll into view when they open', (
   assert.equal(h.root.body.contentY, 0, 'closing does not scroll');
 });
 
-test('footer hints mirror the live key bindings: every hinted key is bound and every section-scoped binding is hinted', () => {
+test('footer hints mirror the live key bindings: every hinted key is bound and every page-scoped binding is hinted', () => {
   const h = panelHarness();
   const Model = h.root.Model;
   const textKeys = panel.match(/function handleTextKey\(t\) \{[\s\S]*?\n    \}/)[0];
-  // Section-scoped letter bindings actually present in handleTextKey.
+  // Page-scoped letter bindings actually present in handleTextKey:
+  // `t === "c" && page === "words"` and `t === "u" && (page === "a" || page === "b")`.
   const bound = {};
-  for (const m of textKeys.matchAll(/t === "([a-z\/])" && section === "(\w+)"/g)) (bound[m[2]] = bound[m[2]] || new Set()).add(m[1]);
-  assert.match(textKeys, /t === "\/"/, '/ is bound for every section');
+  const add = (page, key) => (bound[page] = bound[page] || new Set()).add(key);
+  for (const m of textKeys.matchAll(/t === "([a-z\/])" && page === "(\w+)"/g)) add(m[2], m[1]);
+  for (const m of textKeys.matchAll(/t === "([a-z\/])" && \(page === "(\w+)" \|\| page === "(\w+)"\)/g)) { add(m[2], m[1]); add(m[3], m[1]); }
+  assert.match(textKeys, /t === "\/"/, '/ is bound for every page');
   assert.match(textKeys, /t === "r" \|\| t === "R"/, 'r is global');
   // Catcher-level verbs available everywhere.
-  const catcher = {Enter: /onActivateRequested: root\.activateCursor\(\)/, x: /onDeleteRequested: root\.deleteSelected\(\)/, Tab: /onTabRequested/, '↑↓': /onMoveRequested/, Esc: /onCloseRequested: root\.close\(\)/, 'Ctrl+R': /Qt\.Key_R\) \{ restartDaemon\(\)/, '1–5': /Model\.sectionForKey\(t\)/};
-  for (const section of Model.SECTIONS) {
+  const catcher = {Enter: /onActivateRequested: root\.activateCursor\(\)/, x: /onDeleteRequested: root\.deleteSelected\(\)/, Tab: /onTabRequested/,
+                   '↑↓': /onMoveRequested/, '←→': /else root\.moveCursorH\(dx\)/, Esc: /onCloseRequested: root\.close\(\)/,
+                   'Ctrl+R': /Qt\.Key_R\) \{ restartDaemon\(\)/, '1–4': /Model\.sectionForKey\(t\)/};
+  const pages = Model.SECTIONS.map(s => ({page: s, section: s, view: ''}))
+    .concat(Object.keys(Model.DRILLS).map(v => ({page: v, section: Model.DRILLS[v], view: v})));
+  for (const {page, section, view} of pages) {
     for (const editing of [false, true]) for (const cursorActive of [false, true]) {
-      const pairs = Model.hintPairs(section, {editing, cursorActive});
-      const text = Model.sectionHints(section, {editing, cursorActive});
+      const ctx = {editing, cursorActive, view};
+      const pairs = Model.hintPairs(section, ctx);
+      const text = Model.sectionHints(section, ctx);
       assert.equal(text, pairs.map(p => p.join(' ')).join('   '));
       for (const [key] of pairs) {
-        if (catcher[key]) { assert.match(panel, catcher[key], key + ' in ' + section); continue; }
+        if (catcher[key]) { assert.match(panel, catcher[key], key + ' in ' + page); continue; }
         if (key === '/' || key === 'r') continue;
-        assert.ok(bound[section] && bound[section].has(key), section + ' hints "' + key + '" but handleTextKey does not bind it');
+        if (key === 'A–Z') { assert.match(textKeys, /page === "words" && \/\^\[A-Z\]\$\/\.test\(t\)\) jumpToLetter\(t\)/); continue; }
+        assert.ok(bound[page] && bound[page].has(key), page + ' hints "' + key + '" but handleTextKey does not bind it');
       }
+      if (editing) assert.ok(pairs.some(p => p[0] === 'Esc'), 'editing: Esc leaves the field');
+      if (page === 'usage') continue;
       if (!cursorActive && !editing) assert.equal(pairs[0][0], '↑↓', 'no cursor yet: show how to get one');
       if (cursorActive && !editing) assert.notEqual(pairs[0][0], '↑↓', 'cursor active: hints show the verbs instead');
-      if (editing) assert.ok(pairs.some(p => p[0] === 'Esc'), 'editing: Esc leaves the field');
     }
-    // and the reverse: every letter bound for this section appears in its idle hints
-    const idle = new Set(Model.hintPairs(section, {editing: false, cursorActive: true}).map(p => p[0]));
-    for (const key of bound[section] || []) assert.ok(idle.has(key), section + ' binds "' + key + '" without hinting it');
+    // and the reverse: every letter bound for this page appears in its idle
+    // hints (Words: on a word row or on a learned row).
+    const idle = new Set(Model.hintPairs(section, {editing: false, cursorActive: true, view}).map(p => p[0])
+      .concat(Model.hintPairs(section, {editing: false, cursorActive: true, view, rowKind: 'learned'}).map(p => p[0])));
+    for (const key of bound[page] || []) assert.ok(idle.has(key), page + ' binds "' + key + '" without hinting it');
   }
-  assert.match(panel, /Model\.sectionHints\(root\.section, \{editing: root\.editing, cursorActive: root\.cursorActive\}\)/);
+  for (const [key] of Model.hintPairs('words', {cursorActive: true, rowKind: 'learned'}))
+    if (!catcher[key]) assert.ok(bound.words.has(key), 'learned row hints "' + key + '"');
+  assert.match(panel, /rowKind: root\.cursorWord\(\) \? root\.cursorWord\(\)\.kind : ""/);
+  // Fix a word has its own hints, and its keys are bound.
+  assert.equal(JSON.stringify(Model.hintPairs('history', {fixing: true}).map(p => p[0])), JSON.stringify(['←→', 'Enter', 'Esc']));
+  assert.match(textKeys, /if \(fixStage === "pick"\) \{\n\s*if \(t === "\]"\) growFix\(1\);\n\s*else if \(t === "\["\) growFix\(-1\);/);
+  assert.match(panel, /Model\.sectionHints\(root\.section, \{editing: root\.editing, cursorActive: root\.cursorActive, view: root\.view, fixing: root\.fixStage === "pick", fixField: root\.fixStage === "type", rowKind: root\.cursorWord\(\) \? root\.cursorWord\(\)\.kind : ""\}\)/);
   assert.doesNotMatch(panel, /pid " \+/, 'the idle footer no longer prints the PID');
   assert.match(panel, /idleText: root\.locked \? "" : Model\.footerIdle\(root\.status\)/);
 });
@@ -713,9 +753,9 @@ test('on/off: o stops and starts the unit, never restarts or disables it', () =>
   h.root.runPrimary();
   assert.equal(JSON.stringify(h.requests.map(r => r.op)), JSON.stringify(['daemon.start']));
 
-  // o is Dictate-only; elsewhere it is not bound.
+  // o is Home-only; elsewhere it is not bound.
   h.requests.length = 0;
-  h.root.section = 'vocabulary';
+  h.root.section = 'words';
   h.root.handleTextKey('o');
   assert.equal(JSON.stringify(h.requests), JSON.stringify([]));
 
@@ -748,7 +788,7 @@ test('on/off: a second press while a start/stop is in flight is ignored, and the
   h.root.turnOn();
   h.root.restartDaemon();
   assert.equal(JSON.stringify(h.requests), JSON.stringify([]));
-  assert.equal(JSON.stringify(h.root.targetsFor('dictate').slice(0, 3)), JSON.stringify(['record', 'power', 'restart']));
+  assert.equal(JSON.stringify(h.root.targetsFor('home').slice(0, 3)), JSON.stringify(['record', 'power', 'restart']));
   assert.match(panel, /else if \(key === "power"\) togglePower\(\)/);
   assert.match(panel, /setCursor\("power", -1\)/);
 });
@@ -771,16 +811,17 @@ test('the panel forgets options and gpu status when appropriate, and asks the br
   h.root.launchGpu(true);
   assert.equal(h.root.gpu, null, 'gpu status is stale once the terminal runs setup');
   assert.match(panel, /onOpenedChanged: \{[\s\S]*?options = null;/, 'options invalidated on close');
-  assert.match(panel, /if \(op === "status"\) \{ root\.status = result; service\.status = result; \}/);
+  assert.match(panel, /if \(op === "status"\) \{\n\s*var first = !root\.status \|\| !root\.status\.capabilities;\n\s*root\.status = result;\n\s*service\.status = result;/);
 });
 
 test('every Settings cursor target is reachable and visible: Clear key is skipped until a key is set, GPU controls scroll into view', () => {
   const h = panelHarness();
   h.root.section = 'settings';
-  assert.ok(h.root.targetsFor('settings').indexOf('remote.clear') < 0, 'no key stored: the invisible Clear button is not a cursor stop');
+  h.root.view = 'advanced';
+  assert.ok(h.root.targetsFor('advanced').indexOf('remote.clear') < 0, 'no key stored: the invisible Clear button is not a cursor stop');
   h.root.snapshot = {settings: {'whisper.remote_api_key_set': true}};
-  assert.ok(h.root.targetsFor('settings').indexOf('remote.clear') >= 0);
-  for (const key of ['gpu.device', 'gpu.enable', 'gpu.disable']) assert.ok(h.root.targetsFor('settings').indexOf(key) >= 0, key);
+  assert.ok(h.root.targetsFor('advanced').indexOf('remote.clear') >= 0);
+  for (const key of ['gpu.device', 'gpu.enable', 'gpu.disable']) assert.ok(h.root.targetsFor('advanced').indexOf(key) >= 0, key);
   assert.match(panel, /setCursor\("gpu\.device", -1\) \}\n\s*onHasCursorChanged: if \(hasCursor\) root\.ensureVisible\(gpuDevice\)/);
   assert.equal((panel.match(/root\.ensureVisible\(gpuButtons\)/g) || []).length, 2);
   assert.match(panel, /root\.ensureVisible\(clearKey\)/);
@@ -804,7 +845,8 @@ test('every Settings cursor target is reachable and visible: Clear key is skippe
 test('Settings cursor targets drop every conditionally-hidden control (engine, feedback, VAD, API key)', () => {
   const h = panelHarness();
   h.root.section = 'settings';
-  const targets = () => h.root.targetsFor('settings');
+  h.root.view = 'advanced';
+  const targets = () => h.root.targetsFor('advanced');
   const has = key => targets().indexOf(key) >= 0;
 
   const whisperOnly = ['whisper.language', 'whisper.remote_endpoint', 'whisper.remote_model', 'whisper.remote_timeout_secs'];
@@ -852,11 +894,11 @@ test('the cursor predicates mirror the visible: bindings that actually drive tho
   assert.match(panel, /visible: Model\.settingValue\(root\.config, "vad\.enabled", false\) === true/);
   assert.match(panel, /settingKey: "whisper\.language";[^\n]*visible: root\.engine === "whisper"/);
   assert.match(panel, /settingKey: "whisper\.remote_endpoint";[^\n]*visible: root\.engine === "whisper"/);
-  assert.equal((panel.match(/visible: root\.engine === "whisper"/g) || []).length, 6, 'both separators, header, language, endpoint and the two whisper Rows');
+  assert.equal((panel.match(/visible: root\.engine === "whisper"/g) || []).length, 7, 'both separators, header, language, endpoint and the two whisper Rows, plus the simple Language row');
   assert.match(panel, /visible: Model\.settingValue\(root\.config, "whisper\.remote_api_key_set", false\) === true/);
   // The predicate is Node-testable, not inlined in the QML.
   assert.match(panel, /readonly property var settingsTargets: Model\.settingsTargets\(config, engine, modelPath\)/);
-  assert.match(panel, /if \(sectionName === "settings"\) return settingsTargets;/);
+  assert.match(panel, /if \(name === "advanced"\) return settingsTargets;/);
 });
 
 test('locked install: Enter hides the panel and hands the fixed kind to the floating terminal; y still copies', () => {
@@ -869,7 +911,7 @@ test('locked install: Enter hides the panel and hands the fixed kind to the floa
   h.root.handleTextKey('y');
   assert.deepEqual(h.copies.slice(), ['omarchy pkg aur add voxtype-tui'], 'y copies');
   h.root.handleTextKey('2');
-  assert.equal(h.root.section, 'dictate', 'section keys stay dead while locked');
+  assert.equal(h.root.section, 'home', 'section keys stay dead while locked');
   h.root.activateCursor();
   assert.deepEqual(installs, ['tui']);
   assert.equal(h.root.opened, false, 'panel hides before the terminal opens over it');
@@ -902,7 +944,7 @@ test('without Omarchy\'s floating-terminal launcher the locked state falls back 
 
 test('picking Qwen3-ASR with no model downloaded browses its catalog instead of failing', () => {
   const h = panelHarness();
-  h.root.section = 'models';
+  h.root.section = 'settings'; h.root.view = 'models';
   h.root.options = {engines: ['whisper', 'qwen3-asr'], engine_labels: {'qwen3-asr': 'Qwen3-ASR'}};
   h.root.pickModelsEngine('qwen3-asr');
   const set = JSON.parse(JSON.stringify(h.requests.pop()));
@@ -959,7 +1001,7 @@ test('settings selecting the already active engine also leaves failed catalog br
 
 test('unavailable model rows explain themselves and never start a download', () => {
   const h = panelHarness();
-  h.root.section = 'models';
+  h.root.section = 'settings'; h.root.view = 'models';
   h.root.modelsEngine = 'whisper';
   h.root.modelRows = [{name: 'large-v3-turbo-q5_0', downloaded: false, available: false, disabled_reason: 'needs GPU acceleration'}];
   let downloads = 0;
@@ -1002,7 +1044,7 @@ test('loadModels derives the engine itself: inside onEngineChanged the modelsVie
   const body = panel.slice(panel.indexOf('    function loadModels()'), panel.indexOf('    function pickModelsEngine('));
   assert.doesNotMatch(body.replace(/\/\/.*$/gm, ''), /modelsView/);
   const h = panelHarness();
-  h.root.section = 'models';
+  h.root.section = 'settings'; h.root.view = 'models';
   h.root.snapshot = {settings: {engine: 'qwen3-asr'}};
   // Simulate the stale binding: modelsView still reports the old engine.
   Object.defineProperty(h.root, 'modelsView', {get: () => 'qwen3-asr', configurable: true});

@@ -5,8 +5,10 @@ import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
-// One KeyboardPanel: hero, five sections, key-hint footer. State machine and
-// cursor live here; every process lives in Service.qml.
+// One KeyboardPanel: hero, four sections (Home, Words, History, Settings)
+// with drill-ins (Home › Usage; Settings › Manage models, All Voxtype
+// settings, Backup), key-hint footer. State machine and cursor live here;
+// every process lives in Service.qml.
 Panel {
     id: root
     moduleName: "io.github.zeus-deus.voxtype"
@@ -48,7 +50,7 @@ Panel {
     property bool importChanged: false
 
     // Cursor / navigation
-    property string section: "dictate"
+    property string section: "home"
     property string cursorKey: ""
     property int cursorIndex: -1
     property bool cursorActive: false
@@ -69,14 +71,65 @@ Panel {
     // panel still sends it explicitly on both ops.
     property bool importSettings: false
 
+    // ---- layout B ----------------------------------------------------------
+    // `view` is the drill-in shown inside `section` ("" = the section itself).
+    property string view: ""
+    // Data for the new sections (voxtype-tui 0.2+; see `caps`).
+    property var shortcuts: null
+    property var features: null
+    property var usage: null
+    property var historyList: []
+    property var historyNext: null
+    property bool historyLoaded: false
+    property var learnedState: null
+    property var everywherePreview: null
+    property bool everywhereOpen: false
+    // op -> reason, for ops an older voxtype-tui answered with `unavailable`.
+    property var unavailable: ({})
+    property string wordFilter: "all"
+    property string expandedId: ""
+    // Fix a word: the dictation, the chosen word span and the stage
+    // ("pick" = choosing words, "type" = typing the correction).
+    property string fixId: ""
+    property int fixStart: -1
+    property int fixEnd: -1
+    property string fixKind: "sounds_like"
+    property string fixStage: ""
+    // What the shared file chooser is picking: "bundle" (import) or "dir".
+    property string pickKind: ""
+    // The Fix card's "should be" field registers itself here while shown.
+    property var fixField: null
+    property bool historyEnabled: true
+    property var historyKeepDays: 30
+
     readonly property var vocabulary: snapshot.vocabulary || []
     readonly property var replacements: snapshot.replacements || []
     readonly property var config: snapshot.settings || ({})
     readonly property var categories: snapshot.categories || ["Replacement", "Capitalization"]
     readonly property int vocabTokens: snapshot.vocab_tokens || 0
     readonly property int vocabTokenLimit: snapshot.vocab_token_limit || Model.TOKEN_LIMIT
-    readonly property var filteredVocabulary: Model.filterVocabulary(vocabulary, vocabSearch.text)
-    readonly property var filteredReplacements: Model.filterReplacements(replacements, dictSearch.text)
+    readonly property string page: view !== "" ? view : section
+    readonly property var caps: status && status.capabilities ? status.capabilities : ({})
+    readonly property var shortcutInfo: Model.shortcutSummary(shortcuts ? shortcuts.bindings : [], status ? status.hotkey : null)
+    readonly property var homeHero: Model.homeState(status, shortcutInfo.primary)
+    readonly property var myWords: Model.wordRows(vocabulary, replacements)
+    readonly property var learnedWords: Model.learnedRows(learnedState ? learnedState.entries : [])
+    readonly property var wordsView: Model.filterWords(myWords, learnedWords, wordFilter, wordsField.text)
+    readonly property var historyView: Model.historyRows(historyList, historySearch.text, null)
+    readonly property var historyItems: Model.historyItems(historyView)
+    readonly property var recentItems: Model.historyItems(Model.historyRows(historyList.slice(0, 3), "", null))
+    readonly property var fixRecord: Model.findRecord(historyList, fixId)
+    readonly property var fixTokens: Model.fixTokens(Model.recordText(fixRecord))
+    readonly property var usageNumbers: Model.usageNumbers(usage, null)
+    readonly property var featureAvail: features && features.available ? features.available : ({})
+    readonly property var featureReasons: features && features.reasons ? features.reasons : ({})
+    readonly property var feat: features && features.features ? features.features : ({})
+    readonly property bool archiveOn: !!(feat.archive && feat.archive.enabled)
+    readonly property bool learningOn: !(feat.learning && feat.learning.enabled === false)
+    readonly property bool usageReady: !!caps.history && usage !== null && usage.enabled !== false
+    readonly property string usageMessage: !caps.history ? "Usage " + Model.NEEDS_TUI_02 + "." : (unavailable["usage.summary"] ? "Usage: " + unavailable["usage.summary"] : (usage && usage.enabled === false ? "Usage counting is off · turn it on in Settings" : "Reading usage…"))
+    readonly property int advancedChanged: Model.changedCount(config, Model.ADVANCED_PATHS)
+    readonly property var simpleTargets: Model.simpleSettingsTargets({whisper: engine === "whisper", archiveOn: archiveOn, learningOn: learningOn && !!caps.features, everywhereAvailable: !!featureAvail.everywhere})
     readonly property string daemonState: service.daemonState
     readonly property string engine: String(Model.settingValue(config, "engine", status && status.engine ? status.engine : "whisper"))
     readonly property string modelsView: browseEngine !== "" ? browseEngine : engine
@@ -98,7 +151,7 @@ Panel {
     readonly property bool installTerminalAvailable: !(status && status.install_terminal_available === false)
     readonly property bool pickerAvailable: !(status && status.picker_available === false)
     readonly property string primary: root.locked ? "" : Model.primaryAction(status)
-    readonly property string tooltip: "Voxtype · " + Model.heroMeta(status, tuiMissing ? Model.ERROR_TUI_MISSING : "")
+    readonly property string tooltip: "Voxtype · " + Model.heroMeta(status, tuiMissing ? Model.ERROR_TUI_MISSING : "", shortcutInfo.primary)
     readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
     readonly property color urgent: bar ? bar.urgent : Commons.Color.urgent
     // Commons/Color.qml ships `muted` from the theme (and a per-bar override
@@ -111,31 +164,41 @@ Panel {
     readonly property bool editing: focusedEditor !== null
     readonly property bool keysBlocked: editing || confirmation.opened || openPopups > 0
     readonly property var sectionOptions: [
-        {value: "dictate", label: "Dictate"}, {value: "vocabulary", label: "Vocabulary"},
-        {value: "dictionary", label: "Dictionary"}, {value: "settings", label: "Settings"}, {value: "models", label: "Models"}
+        {value: "home", label: "Home"}, {value: "words", label: "Words"},
+        {value: "history", label: "History"}, {value: "settings", label: "Settings"}
     ]
     // Only the controls that are actually on screen: the predicates live in
     // Model.settingsTargets so Node can pin them against the `visible:`
     // bindings below.
     readonly property var settingsTargets: Model.settingsTargets(config, engine, modelPath)
 
-    function targetsFor(sectionName) {
-        if (sectionName === "dictate") {
+    function targetsFor(name) {
+        if (name === "home") {
             var t = ["record", "power", "restart"];
             if (modelMissing) t.push("download");
+            t.push("usage");
+            if (recentItems.length > 0) t.push("rows");
             t.push("test");
             return t;
         }
-        if (sectionName === "vocabulary") return ["search", "rows"];
-        if (sectionName === "dictionary") return ["search", "rows"];
-        if (sectionName === "settings") return settingsTargets;
-        if (sectionName === "models") return ["engine", "rows", "export", "import"];
+        if (name === "words") return learnedWords.length > 0 ? ["search", "filter", "rows", "learn.reset"] : ["search", "filter", "rows"];
+        if (name === "history") {
+            var h = ["search", "rows"];
+            if (historyNext) h.push("more");
+            if (historyList.length > 0) h.push("clear");
+            return h;
+        }
+        if (name === "settings") return simpleTargets;
+        if (name === "advanced") return settingsTargets;
+        if (name === "models") return ["engine", "rows"];
+        if (name === "backup") return ["export", "import"];
         return [];
     }
     function rowCount() {
-        if (section === "vocabulary") return filteredVocabulary.length;
-        if (section === "dictionary") return filteredReplacements.length;
-        if (section === "models") return modelRows.length;
+        if (page === "words") return wordsView.rows.length;
+        if (page === "history") return historyItems.length;
+        if (page === "home") return recentItems.length;
+        if (page === "models") return modelRows.length;
         return 0;
     }
     function cursorIs(key) { return cursorActive && cursorKey === key }
@@ -145,9 +208,19 @@ Panel {
         cursorKey = key;
         cursorIndex = key === "rows" ? index : -1;
     }
+    function resetCursor() {
+        cursorActive = false;
+        cursorKey = "";
+        cursorIndex = -1;
+    }
     function moveCursor(dy) {
-        var targets = targetsFor(section);
-        if (targets.length === 0) return;
+        if (fixStage === "pick") { moveFix(dy); return; }
+        var targets = targetsFor(page);
+        if (targets.length === 0) {
+            // Usage has nothing to select: arrows scroll it.
+            body.contentY = Model.wheelContentY(body.contentY, body.contentHeight, body.height, 0, -dy * 120, Style.spacing.popupRowHeight * 3);
+            return;
+        }
         if (!cursorActive || targets.indexOf(cursorKey) < 0) {
             cursorActive = true;
             cursorKey = targets[0];
@@ -171,12 +244,16 @@ Panel {
         cursorIndex = cursorKey === "rows" ? (dy > 0 ? 0 : rowCount() - 1) : -1;
     }
     function moveCursorH(dx) {
+        if (fixStage === "pick") { moveFix(dx); return; }
         if (!cursorActive) return;
+        if (page === "settings") { cycleSimple(cursorKey, dx); return; }
+        if (page === "words" && cursorKey === "filter") { wordFilter = Model.cycleValue(Model.wordFilters(myWords, learnedWords), wordFilter, dx); cursorIndex = -1; return; }
         if (cursorKey === "audio.feedback.volume") nudgeSlider("audio.feedback.volume", dx * 0.05, 0, 1);
         else if (cursorKey === "vad.threshold") nudgeSlider("vad.threshold", dx * 0.05, 0, 1);
+        else if (cursorKey === "osd.opacity") nudgeSlider("osd.opacity", dx * 0.05, 0, 1);
     }
     function nudgeSlider(path, delta, lo, hi) {
-        var v = Number(Model.settingValue(config, path, 0.5)) + delta;
+        var v = Number(Model.settingValue(config, path, Model.SETTING_DEFAULTS[path] !== undefined ? Model.SETTING_DEFAULTS[path] : 0.5)) + delta;
         setSetting(path, Math.round(Math.max(lo, Math.min(hi, v)) * 100) / 100);
     }
     function clampCursor() {
@@ -185,18 +262,50 @@ Panel {
         if (count === 0) { cursorIndex = -1; return; }
         cursorIndex = Math.max(0, Math.min(count - 1, cursorIndex));
     }
-    function selectSection(name) {
-        if (name === section || name === "") return;
-        section = name;
-        cursorActive = false;
-        cursorKey = "";
-        cursorIndex = -1;
+    function leavePage() {
+        resetCursor();
         exportOpen = false;
         importPreview = null;
+        everywhereOpen = false;
+        cancelFix();
         body.contentY = 0;
-        if (name === "models") loadModels();
-        if (name === "settings") { loadModels(); if (!gpu) service.run({op: "gpu.status"}); }
+    }
+    function selectSection(name) {
+        if (name === "" || (name === section && view === "")) return;
+        section = name;
+        view = "";
+        leavePage();
+        loadPage(name);
         keyCatcher.forceActiveFocus();
+    }
+    // Drill-ins live inside a section: the tab stays lit, Esc comes back.
+    function openDrill(name) {
+        if (!Model.isDrill(name)) return;
+        section = Model.drillSection(name);
+        view = name;
+        leavePage();
+        loadPage(name);
+        keyCatcher.forceActiveFocus();
+    }
+    function back() {
+        if (view === "") return false;
+        var from = view;
+        view = "";
+        leavePage();
+        // Land on the row that opened the drill-in.
+        if (from === "usage") setCursor("usage", -1);
+        else setCursor("drill." + from, -1);
+        loadPage(section);
+        keyCatcher.forceActiveFocus();
+        return true;
+    }
+    function loadPage(name) {
+        if (name === "models" || name === "settings" || name === "advanced") loadModels();
+        if (name === "advanced" && !gpu) service.run({op: "gpu.status"});
+        if (name === "home" || name === "usage") { loadUsage(); loadHistory(); }
+        if (name === "history") loadHistory();
+        if (name === "words") loadLearned();
+        if (name === "settings") loadFeatures();
     }
     function cycleSection(delta) { selectSection(Model.nextSection(section, delta)) }
 
@@ -207,8 +316,11 @@ Panel {
         refreshAll();
         Qt.callLater(function() { keyCatcher.forceActiveFocus() });
     }
+    // Esc: leave Fix, then a drill-in, then close.
     function close() {
         if (confirmation.opened) return;
+        if (fixStage !== "") { cancelFix(); return; }
+        if (back()) return;
         controller.hide();
     }
     function closeForPopoutSwitch() {
@@ -220,6 +332,7 @@ Panel {
         importAcceptDangerous = false;
         importReview = "";
         attaching = false;
+        pickKind = "";
         openPopups = 0;
         service.cancelPick();
         controller.hide();
@@ -243,8 +356,13 @@ Panel {
             service.cancelPaste();
             testField.text = "";
             previewOutput = "";
-            vocabSearch.text = "";
-            dictSearch.text = "";
+            wordsField.text = "";
+            historySearch.text = "";
+            if (fixField) fixField.text = "";
+            fixId = "";
+            fixStage = "";
+            expandedId = "";
+            everywhereOpen = false;
             service.cancelQueued("status");
             // Slow enumerations (devices, compiled engines) are cached per
             // panel open only.
@@ -255,7 +373,23 @@ Panel {
         service.run({op: "status"});
         service.run({op: "load"});
         if (!options) service.run({op: "options"});
-        if (section === "models" || section === "settings") loadModels();
+        // Hyprland binds change rarely: once per open.
+        service.run({op: "shortcuts.list"});
+        loadPage(page);
+    }
+    // The new sections ask only once `status` said the module exists, so an
+    // older voxtype-tui never sees these ops (and never shows an error).
+    function loadUsage() { if (caps.history) { service.cancelQueued("usage.summary"); service.run({op: "usage.summary", days: 365}); } }
+    function loadHistory() { if (caps.history) { service.cancelQueued("history.list"); service.run({op: "history.list", limit: Model.HISTORY_PAGE}); } }
+    function loadMoreHistory() {
+        if (!caps.history || !historyNext) return;
+        service.run({op: "history.list", limit: Model.HISTORY_PAGE, before: historyNext});
+    }
+    function loadLearned() { if (caps.learned) service.run({op: "learn.list"}); }
+    function loadFeatures() { if (caps.features) service.run({op: "features.get"}); }
+    function loadInsights() {
+        if (caps.features) loadFeatures();
+        loadPage(page);
     }
     function loadModels() {
         if (service.downloading) return;
@@ -340,32 +474,218 @@ Panel {
     function unsetSetting(path) { if (!locked) service.run({op: "settings.unset", path: path}) }
     function resetCursorSetting() {
         if (!cursorActive) return;
-        var path = Model.resettableSetting(cursorKey);
+        var path = page === "settings" ? Model.simpleSettingPath(cursorKey, modelPath) : Model.resettableSetting(cursorKey);
         if (path !== "" && Model.settingIsSet(config, path)) unsetSetting(path);
     }
     function toggleModifier(mod) {
         var mods = Model.settingValue(config, "hotkey.modifiers", []);
         setSetting("hotkey.modifiers", Model.toggleInList(mods, mod));
     }
-    function addVocab() {
-        var phrase = vocabSearch.text.trim();
-        if (phrase === "" || locked) return;
-        service.run({op: "vocab.add", phrase: phrase});
-        vocabSearch.text = "";
+    // Words: one field. "Codemux" adds a word, "code mucks → Codemux" a rule.
+    function addWord() {
+        var parsed = Model.parseWordInput(wordsField.text);
+        if (!parsed || locked) return;
+        if (parsed.kind === "invalid") { showNotice(parsed.reason); return; }
+        if (parsed.kind === "rule") service.run({op: "dict.upsert", from: parsed.from, to: parsed.to, category: "Replacement"});
+        else service.run({op: "vocab.add", phrase: parsed.phrase});
+        wordsField.text = "";
     }
-    function upsertRule() {
-        var from = dictFrom.text.trim();
-        var to = dictTo.text.trim();
-        if (from === "" || to === "" || locked) return;
-        service.run({op: "dict.upsert", from: from, to: to, category: dictCategory});
-        dictFrom.text = "";
-        dictTo.text = "";
+    function cursorWord() { return cursorKey === "rows" && page === "words" ? (wordsView.rows[cursorIndex] || null) : null }
+    // `c` on a rule cycles Replacement ↔ Capitalization (the old Dictionary `c`).
+    function cycleRuleCategory() {
+        var rule = cursorWord();
+        if (!rule || rule.kind !== "rule" || locked) return;
+        service.run({op: "dict.set_category", from: rule.from, category: Model.nextCategory(rule.category, categories)});
+    }
+    function acceptLearned() {
+        var w = cursorWord();
+        if (!w || w.kind !== "learned") return;
+        if (w.state === "suggested") service.run({op: "learn.accept", id: w.entryId});
+        else showNotice("Already in use · p adds it to your words, x rejects it");
+    }
+    function promoteLearned() {
+        var w = cursorWord();
+        if (!w || w.kind !== "learned" || locked) return;
+        service.run({op: "learn.promote", id: w.entryId});
+    }
+    function forgetLearned() {
+        var w = cursorWord();
+        if (!w || w.kind !== "learned") return;
+        ask("learn.forget", {id: w.entryId}, "Forget “" + Model.sanitize(w.heard, 40) + " → " + Model.sanitize(w.written, 40) + "”?\nIt can be learned again from a later correction.", "Forget");
+    }
+    function resetLearned() {
+        if (learnedWords.length === 0) return;
+        ask("learn.reset", {}, "Delete all " + learnedWords.length + " learned words?\nYour own words stay as they are.", "Delete all");
+    }
+    function jumpToLetter(letter) {
+        var i = Model.letterIndex(wordsView.rows, letter);
+        if (i < 0) { showNotice("Nothing from " + letter); return; }
+        setCursor("rows", i);
+    }
+    // ---- History ------------------------------------------------------------
+    function cursorHistoryItem() {
+        if (page !== "history" && page !== "home") return null;
+        if (cursorKey === "rows") return (page === "home" ? recentItems : historyItems)[cursorIndex] || null;
+        return null;
+    }
+    function toggleExpand(item) {
+        if (!item) return;
+        if (fixId !== "" && fixId !== item.id) cancelFix();
+        expandedId = expandedId === item.id ? "" : item.id;
+    }
+    function openRecent(item) {
+        if (!item) return;
+        selectSection("history");
+        expandedId = item.id;
+        for (var i = 0; i < historyItems.length; i++) if (historyItems[i].id === item.id) { setCursor("rows", i); break; }
+    }
+    function copyHistory() {
+        var item = cursorHistoryItem();
+        if (!item) return;
+        if (!service.copy(Model.recordText(item.record))) return;
+        showNotice("Copied");
+    }
+    function deleteHistory(item) {
+        if (!item) return;
+        ask("history.delete", {id: item.id}, "Delete this dictation from your history?\n“" + Model.sanitize(item.text, 70) + "”", "Delete");
+    }
+    function clearHistory() {
+        if (historyList.length === 0) return;
+        ask("history.clear", {}, "Delete your whole dictation history?\nUsage counts are kept; they hold no text.", "Delete all");
+    }
+    // ---- Fix a word -----------------------------------------------------------
+    function startFix() {
+        var item = cursorHistoryItem();
+        if (!item && expandedId !== "") item = {id: expandedId};
+        if (!item || locked) return;
+        if (!caps.learned) { showNotice("Fix a word " + Model.NEEDS_TUI_02); return; }
+        if (learningOn === false) { showNotice("Learning is off · turn it on in Settings"); return; }
+        expandedId = item.id;
+        fixId = item.id;
+        fixStart = 0;
+        fixEnd = 0;
+        fixStage = "pick";
+        if (fixField) fixField.text = "";
         keyCatcher.forceActiveFocus();
     }
-    function cycleRuleCategory() {
-        var rule = filteredReplacements[cursorIndex];
-        if (!rule || cursorKey !== "rows" || locked) return;
-        service.run({op: "dict.set_category", from: rule.from, category: Model.nextCategory(rule.category, categories)});
+    function moveFix(d) {
+        var n = fixTokens.length;
+        if (n === 0) return;
+        var i = Math.max(0, Math.min(n - 1, (d > 0 ? fixEnd : fixStart) + d));
+        fixStart = i;
+        fixEnd = i;
+    }
+    // `]` takes the next word too, `[` gives one back.
+    function growFix(d) {
+        var n = fixTokens.length;
+        if (n === 0 || fixStart < 0) return;
+        fixEnd = Math.max(fixStart, Math.min(n - 1, fixEnd + d));
+    }
+    function pickFixWord(index, extend) {
+        if (extend && fixStart >= 0 && index > fixEnd && index - fixStart < 6) fixEnd = index;
+        else { fixStart = index; fixEnd = index; }
+        if (fixStage === "") fixStage = "pick";
+    }
+    function confirmFixSpan() {
+        if (fixStart < 0) return;
+        fixStage = "type";
+        var heard = Model.spanText(fixTokens, fixStart, fixEnd);
+        fixKind = "sounds_like";
+        if (!fixField) return;
+        fixField.text = heard;
+        fixField.forceActiveFocus();
+        fixField.selectAll();
+    }
+    function cycleFixKind(d) { fixKind = Model.cycleValue(Model.FIX_KINDS, fixKind, d) }
+    function submitFix() {
+        var written = fixField ? fixField.text.trim() : "";
+        if (fixId === "" || written === "" || locked) return;
+        var heard = Model.spanText(fixTokens, fixStart, fixEnd);
+        if (written === heard) { showNotice("Type how it should be written"); return; }
+        var edited = Model.fixedText(fixTokens, fixStart, fixEnd, written);
+        if (edited === null) return;
+        service.run({op: "learn.submit", id: fixId, edited: edited, kind: fixKind});
+    }
+    function cancelFix() {
+        if (fixId === "" && fixStage === "") return;
+        var refocus = !!fixField && fixField.activeFocus;
+        fixId = "";
+        fixStage = "";
+        fixStart = -1;
+        fixEnd = -1;
+        if (fixField) fixField.text = "";
+        if (refocus) keyCatcher.forceActiveFocus();
+    }
+    // ---- Settings (simple rows) ----------------------------------------------
+    function setFeature(group, key, value) {
+        if (locked || !caps.features) return;
+        var patch = {};
+        patch[group] = {};
+        patch[group][key] = value;
+        service.run({op: "features.set", patch: patch});
+    }
+    function featureValue(group, key, fallback) {
+        var g = feat[group];
+        return g && g[key] !== undefined ? g[key] : fallback;
+    }
+    function featureOk(name) { return !!caps.features && (features === null || featureAvail[name] !== false) }
+    function featureReason(name) { return !caps.features ? Model.NEEDS_TUI_02 : String(featureReasons[name] || "") }
+    function setLogin(enabled) {
+        if (locked) return;
+        service.run({op: "daemon.set_login", enabled: enabled});
+    }
+    function pickArchiveDir() {
+        if (locked || !caps.features || service.picking || !pickerAvailable) return;
+        pickKind = "dir";
+        attaching = true;
+        controller.hide();
+        if (!service.pick("dir")) { attaching = false; pickKind = ""; controller.show(); }
+    }
+    function writeSettings(writes) {
+        for (var i = 0; i < writes.length; i++) setSetting(writes[i][0], writes[i][1]);
+    }
+    // ←/→ (and Enter, which steps forward) on a simple Settings row.
+    function cycleSimple(key, d) {
+        if (locked) return;
+        if (key === "model") {
+            var opts = Model.modelCycleOptions(modelsEngine === engine ? modelRows : [], String(Model.settingValue(config, modelPath, "")));
+            if (opts.length < 2) { showNotice(opts.length ? "Only one model downloaded · Manage models to add more" : "No model downloaded · open Manage models"); return; }
+            setSetting(modelPath, Model.cycleValue(opts, String(Model.settingValue(config, modelPath, "")), d));
+        }
+        else if (key === "language") setSetting("whisper.language", Model.cycleValue(Model.LANGUAGES, String(Model.settingOr(config, "whisper.language")), d));
+        else if (key === "mode") setSetting("hotkey.mode", Model.cycleValue(Model.HOTKEY_MODE_OPTIONS, String(Model.settingOr(config, "hotkey.mode")), d));
+        else if (key === "output_mode") setSetting("output.mode", Model.cycleValue(Model.OUTPUT_MODE_OPTIONS, String(Model.settingOr(config, "output.mode")), d));
+        else if (key === "indicator") writeSettings(Model.indicatorWrites(Model.cycleValue(Model.INDICATOR_OPTIONS, Model.indicatorValue(config), d)));
+        else if (key === "other_audio") writeSettings(Model.otherAudioWrites(Model.cycleValue(Model.OTHER_AUDIO_OPTIONS, Model.otherAudioValue(config), d)));
+        else if (key === "keep") setFeature("history", "keep_days", Model.cycleValue(Model.KEEP_OPTIONS, featureValue("history", "keep_days", 30), d));
+        else activateSimple(key);
+    }
+    function activateSimple(key) {
+        if (locked) return;
+        if (key === "drill.models") openDrill("models");
+        else if (key === "drill.advanced" || key === "shortcut") openDrill("advanced");
+        else if (key === "drill.backup") openDrill("backup");
+        else if (key === "sounds") setSetting("audio.feedback.enabled", !Model.settingOr(config, "audio.feedback.enabled"));
+        else if (key === "spoken_punctuation") setSetting("text.spoken_punctuation", !Model.settingOr(config, "text.spoken_punctuation"));
+        else if (key === "filler_words") setSetting("text.filter_filler_words", !Model.settingOr(config, "text.filter_filler_words"));
+        else if (key === "login") { if (status && status.daemon && status.daemon.starts_at_login !== null) setLogin(!status.daemon.starts_at_login); }
+        else if (key === "usage") setFeature("usage", "enabled", !featureValue("usage", "enabled", true));
+        else if (key === "history") setFeature("history", "enabled", !featureValue("history", "enabled", true));
+        else if (key === "archive") setFeature("archive", "enabled", !archiveOn);
+        else if (key === "archive.dir") pickArchiveDir();
+        else if (key === "archive.audio") setFeature("archive", "save_audio", !featureValue("archive", "save_audio", true));
+        else if (key === "archive.text") setFeature("archive", "save_text", !featureValue("archive", "save_text", true));
+        else if (key === "learning") setFeature("learning", "enabled", !learningOn);
+        else if (key === "everywhere") toggleEverywhereCard();
+        else cycleSimple(key, 1);
+    }
+    function toggleEverywhereCard() {
+        everywhereOpen = !everywhereOpen;
+        if (everywhereOpen && caps.everywhere) service.run({op: "learn.everywhere.preview"});
+    }
+    function setEverywhere(enabled) {
+        if (locked || !caps.everywhere) return;
+        service.run({op: "learn.everywhere.set", enabled: enabled});
     }
     function previewPhrase() {
         var text = testField.text.trim();
@@ -386,14 +706,15 @@ Panel {
         keyCatcher.forceActiveFocus();
     }
     function deleteSelected() {
+        if (page === "history") { deleteHistory(cursorHistoryItem()); return; }
         if (cursorKey !== "rows") return;
-        if (section === "vocabulary") {
-            var word = filteredVocabulary[cursorIndex];
-            if (word) ask("vocab.remove", {phrase: word.phrase}, "Remove “" + Model.sanitize(word.phrase, 60) + "” from the vocabulary?", "Remove");
-        } else if (section === "dictionary") {
-            var rule = filteredReplacements[cursorIndex];
-            if (rule) ask("dict.remove", {from: rule.from}, "Delete the rule “" + Model.sanitize(rule.from, 60) + " → " + Model.sanitize(rule.to, 60) + "”?", "Delete");
-        } else if (section === "models") {
+        if (page === "words") {
+            var w = cursorWord();
+            if (!w) return;
+            if (w.kind === "vocab") ask("vocab.remove", {phrase: w.phrase}, "Remove “" + Model.sanitize(w.phrase, 60) + "” from your words?", "Remove");
+            else if (w.kind === "rule") ask("dict.remove", {from: w.from}, "Delete the rule “" + Model.sanitize(w.from, 60) + " → " + Model.sanitize(w.written, 60) + "”?", "Delete");
+            else ask("learn.reject", {id: w.entryId}, "Stop using “" + Model.sanitize(w.heard, 40) + " → " + Model.sanitize(w.written, 40) + "”?\nIt will not be learned again.", "Reject");
+        } else if (page === "models") {
             var m = modelRows[cursorIndex];
             if (!m) return;
             var why = Model.modelActionBlock(m, "delete");
@@ -439,7 +760,7 @@ Panel {
         notice = "Downloading " + m.name + "…";
     }
     function downloadCursorModel() {
-        if (section !== "models" || cursorKey !== "rows") return;
+        if (page !== "models" || cursorKey !== "rows") return;
         var m = modelRows[cursorIndex];
         if (!m) return;
         var why = Model.modelActionBlock(m, "download");
@@ -452,25 +773,40 @@ Panel {
     }
     function activateCursor() {
         if (locked) { if (canInstallLocked) launchLockedInstall(); else copyLockedCommand(); return; }
+        if (fixStage === "pick") { confirmFixSpan(); return; }
         if (!cursorActive) { moveCursor(1); return; }
         var key = cursorKey;
-        if (section === "dictate") {
+        if (page === "home") {
             if (key === "record") toggleRecord();
             else if (key === "power") togglePower();
             else if (key === "restart") restartDaemon();
-            else if (key === "download") selectSection("models");
+            else if (key === "download") openDrill("models");
+            else if (key === "usage") openDrill("usage");
+            else if (key === "rows") openRecent(recentItems[cursorIndex]);
             else if (key === "test") testField.forceActiveFocus();
-        } else if (section === "vocabulary") {
-            if (key === "search") vocabSearch.forceActiveFocus();
-        } else if (section === "dictionary") {
-            if (key === "search") dictSearch.forceActiveFocus();
-            else if (key === "rows") cycleRuleCategory();
-        } else if (section === "models") {
+        } else if (page === "words") {
+            if (key === "search") wordsField.forceActiveFocus();
+            else if (key === "filter") wordFilter = Model.cycleValue(Model.wordFilters(myWords, learnedWords), wordFilter, 1);
+            else if (key === "learn.reset") resetLearned();
+            else if (key === "rows") {
+                var w = cursorWord();
+                if (w && w.kind === "rule") cycleRuleCategory();
+                else if (w && w.kind === "learned") acceptLearned();
+            }
+        } else if (page === "history") {
+            if (key === "search") historySearch.forceActiveFocus();
+            else if (key === "rows") toggleExpand(historyItems[cursorIndex]);
+            else if (key === "more") loadMoreHistory();
+            else if (key === "clear") clearHistory();
+        } else if (page === "models") {
             if (key === "engine") engineDropdown.open();
             else if (key === "rows") setActiveModel(modelRows[cursorIndex]);
-            else if (key === "export") toggleExport();
+        } else if (page === "backup") {
+            if (key === "export") toggleExport();
             else if (key === "import") beginImport();
-        } else if (section === "settings") {
+        } else if (page === "settings") {
+            activateSimple(key);
+        } else if (page === "advanced") {
             activateSetting(key);
         }
     }
@@ -551,8 +887,9 @@ Panel {
         importAcceptDangerous = false;
         importReview = "";
         importChanged = false;
+        pickKind = "bundle";
         controller.hide();
-        if (!service.pick()) { attaching = false; controller.show(); }
+        if (!service.pick("bundle")) { attaching = false; pickKind = ""; controller.show(); }
     }
     function resumeAfterPick() {
         if (!attaching) return;
@@ -626,29 +963,49 @@ Panel {
         }
     }
     function focusSearch() {
-        if (section === "vocabulary") vocabSearch.forceActiveFocus();
-        else if (section === "dictionary") dictSearch.forceActiveFocus();
-        else if (section === "dictate") testField.forceActiveFocus();
+        if (page === "words") wordsField.forceActiveFocus();
+        else if (page === "history") historySearch.forceActiveFocus();
+        else if (page === "home") testField.forceActiveFocus();
     }
     function handleTextKey(t) {
         if (locked) { if (t === "y" && canInstallLocked) copyLockedCommand(); return; }
+        if (fixStage === "pick") {
+            if (t === "]") growFix(1);
+            else if (t === "[") growFix(-1);
+            return;
+        }
         var s = Model.sectionForKey(t);
         if (s !== "") { selectSection(s); return; }
         if (t === "/") focusSearch();
-        else if (t === "a" && section === "vocabulary") vocabSearch.forceActiveFocus();
-        else if (t === "a" && section === "dictionary") dictFrom.forceActiveFocus();
-        else if (t === "c" && section === "dictionary") cycleRuleCategory();
-        else if (t === "d" && section === "models") downloadCursorModel();
-        else if (t === "u" && section === "settings") resetCursorSetting();
-        else if (t === "o" && section === "dictate") togglePower();
+        else if (t === "a" && page === "words") wordsField.forceActiveFocus();
+        else if (t === "c" && page === "words") cycleRuleCategory();
+        else if (t === "c" && page === "history") copyHistory();
+        else if (t === "f" && page === "history") startFix();
+        else if (t === "p" && page === "words") promoteLearned();
+        else if (t === "d" && page === "words") forgetLearned();
+        else if (t === "d" && page === "models") downloadCursorModel();
+        else if (t === "u" && (page === "settings" || page === "advanced")) resetCursorSetting();
+        else if (t === "u" && page === "home") openDrill("usage");
+        else if (t === "o" && page === "home") togglePower();
         else if (t === "r" || t === "R") toggleRecord();
+        else if (page === "words" && /^[A-Z]$/.test(t)) jumpToLetter(t);
     }
-    onFilteredVocabularyChanged: clampCursor()
-    onFilteredReplacementsChanged: clampCursor()
+    onWordsViewChanged: clampCursor()
+    onHistoryItemsChanged: clampCursor()
     onModelRowsChanged: clampCursor()
     onEngineChanged: {
         if (browseEngine === engine) browseEngine = "";
-        if (opened && (section === "models" || section === "settings")) loadModels();
+        if (opened && (page === "models" || page === "settings" || page === "advanced")) loadModels();
+    }
+    // A dictation just finished while the panel is open: show it.
+    property string lastDaemonState: ""
+    onDaemonStateChanged: {
+        var was = lastDaemonState;
+        lastDaemonState = daemonState;
+        if (opened && was === "transcribing" && daemonState !== "transcribing" && (page === "home" || page === "history" || page === "usage")) {
+            loadHistory();
+            loadUsage();
+        }
     }
 
     Service {
@@ -657,7 +1014,17 @@ Panel {
         pollIntervalMs: 1500
         onCompleted: function(op, result, req) {
             if (Model.isTuiMissing(result)) { root.tuiMissing = true; root.errorText = ""; return; }
+            // An older voxtype-tui (or one without a feature) answers the new
+            // ops with `unavailable`: the section says so, no error line.
+            if (!result.ok && typeof result.unavailable === "string") {
+                var un = {};
+                for (var u in root.unavailable) un[u] = root.unavailable[u];
+                un[op] = Model.sanitize(result.unavailable, 80);
+                root.unavailable = un;
+                return;
+            }
             if (!result.ok) {
+                if (op === "learn.submit") { root.errorText = "Not learned: " + Model.sanitize(result.error, 160); return; }
                 // The bridge refuses an apply whose diff no longer matches
                 // what was acknowledged (the file changed between preview and
                 // apply, or the dangerous set grew). Say what to do instead of
@@ -697,7 +1064,73 @@ Panel {
             }
             root.tuiMissing = false;
             if (op !== "status") root.errorText = "";
-            if (op === "status") { root.status = result; service.status = result; }
+            if (op === "status") {
+                var first = !root.status || !root.status.capabilities;
+                root.status = result;
+                service.status = result;
+                // Capabilities arrive with the first status; the new
+                // sections load only once we know they exist.
+                if (first) root.loadInsights();
+            }
+            else if (op === "shortcuts.list") root.shortcuts = result;
+            else if (op === "features.get") root.features = result;
+            else if (op === "features.set") {
+                root.features = result;
+                if (result.daemon_stale) {
+                    var need = root.restartNeeded.slice();
+                    var hooks = result.restart_needed || [];
+                    for (var h = 0; h < hooks.length; h++) if (need.indexOf(hooks[h]) < 0) need.push(hooks[h]);
+                    if (need.length === 0) need.push("output");
+                    root.restartNeeded = need;
+                }
+                root.notice = "Saved";
+                noticeTimer.restart();
+                if (req.patch && (req.patch.history || req.patch.usage)) { root.loadHistory(); root.loadUsage(); }
+            }
+            else if (op === "usage.summary") root.usage = result;
+            else if (op === "history.list") {
+                // A page with `before` appends; anything else replaces.
+                var items = result.items || [];
+                if (req.before) root.historyList = root.historyList.concat(items);
+                else if (!Model.sameList(root.historyList, items, true)) root.historyList = items;
+                root.historyNext = result.next || null;
+                root.historyLoaded = true;
+                root.historyEnabled = result.enabled !== false;
+                root.historyKeepDays = result.keep_days === undefined ? 30 : result.keep_days;
+            }
+            else if (op === "history.delete" || op === "history.clear") {
+                root.showNotice(op === "history.clear" ? "History cleared" : "Deleted");
+                if (op === "history.clear") root.expandedId = "";
+                root.loadHistory();
+                root.loadUsage();
+            }
+            else if (op === "learn.list") root.learnedState = result;
+            else if (op === "learn.submit") {
+                var applied = result.applied || [];
+                var cands = result.candidates || [];
+                root.cancelFix();
+                root.showNotice(applied.length ? "Learned " + Model.learnSummary(applied) : (cands.length ? "Suggested " + Model.learnSummary(cands) + " · review it in Words" : "Nothing new to learn from that"));
+                root.loadLearned();
+            }
+            else if (op === "learn.accept" || op === "learn.reject" || op === "learn.forget" || op === "learn.reset") {
+                root.showNotice(op === "learn.accept" ? "Now in use" : (op === "learn.reset" ? "Learned words deleted" : (op === "learn.reject" ? "Rejected" : "Forgotten")));
+                root.loadLearned();
+            }
+            else if (op === "learn.promote") {
+                if (result.snapshot !== undefined) root.applySnapshot(result.snapshot);
+                root.showNotice("Added to your words");
+                root.loadLearned();
+            }
+            else if (op === "learn.everywhere.preview") root.everywherePreview = result;
+            else if (op === "learn.everywhere.set") {
+                root.showNotice(req.enabled ? "Learn everywhere is on · log out and back in to apply" : "Learn everywhere is off");
+                root.loadFeatures();
+                service.run({op: "learn.everywhere.preview"});
+            }
+            else if (op === "daemon.set_login") {
+                root.showNotice(result.starts_at_login ? "Starts at login" : "Won't start at login");
+                service.run({op: "status"});
+            }
             else if (op === "load") { root.applySnapshot(result.snapshot); root.loaded = true; }
             else if (op === "options") root.options = result;
             else if (op === "models.list") {
@@ -761,13 +1194,16 @@ Panel {
             else { root.notice = ""; service.run({op: "status"}); }
         }
         onPicked: function(path) {
+            var kind = root.pickKind;
+            root.pickKind = "";
             root.resumeAfterPick();
+            if (kind === "dir") { root.setFeature("archive", "dir", path); return; }
             root.importPath = path;
             root.requestImportPreview();
         }
-        onPickCanceled: root.resumeAfterPick()
+        onPickCanceled: { root.pickKind = ""; root.resumeAfterPick() }
         onCopyFinished: function(ok) { if (!ok) { root.notice = ""; root.errorText = "Could not copy: is wl-copy installed?" } }
-        onPickFailed: { root.resumeAfterPick(); root.errorText = Model.ERROR_PICKER_MISSING }
+        onPickFailed: { root.pickKind = ""; root.resumeAfterPick(); root.errorText = Model.ERROR_PICKER_MISSING }
         onPasted: function(text) { root.finishPaste(text) }
         onPasteFailed: function(reason) { root.pasteTarget = null; root.showNotice(reason) }
     }
@@ -819,7 +1255,7 @@ Panel {
                     PanelHero {
                         id: hero
                         title: "Voxtype"
-                        meta: Model.heroMeta(root.status, root.tuiMissing ? Model.ERROR_TUI_MISSING : root.errorText)
+                        meta: Model.heroMeta(root.status, root.tuiMissing ? Model.ERROR_TUI_MISSING : root.errorText, root.shortcutInfo.primary)
                         detail: root.locked ? "" : (root.stale ? "RESTART TO APPLY" : "")
                         foreground: root.foreground
                         fontFamily: root.fontFamily
@@ -933,32 +1369,79 @@ Panel {
                             width: body.width - Style.space(6)
                             spacing: Style.space(12)
 
-                            // ================= 1 · Dictate =================
+                            // Breadcrumb on drill-ins: "Settings › All Voxtype settings   Esc back"
+                            Item {
+                                visible: root.view !== ""
+                                width: parent.width
+                                height: crumbText.implicitHeight + Style.space(4)
+                                Text {
+                                    id: crumbText
+                                    anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
+                                    textFormat: Text.PlainText
+                                    text: Model.SECTION_LABELS[root.section] + "  ›  "
+                                    color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.title
+                                }
+                                Text {
+                                    anchors.left: crumbText.right; anchors.verticalCenter: parent.verticalCenter
+                                    textFormat: Text.PlainText
+                                    text: Model.drillTitle(root.view)
+                                    color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.title; font.bold: true
+                                }
+                                Text {
+                                    anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                                    textFormat: Text.PlainText; text: "Esc back"
+                                    color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body
+                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.back() }
+                                }
+                            }
+
+                            // ================= 1 · Home =================
                             Column {
-                                visible: root.section === "dictate"
+                                visible: root.page === "home"
                                 width: parent.width
                                 spacing: Style.space(12)
 
-                                CursorSurface {
+                                // One word, and how to start.
+                                Column {
                                     width: parent.width
-                                    bordered: true
-                                    foreground: root.foreground
-                                    implicitHeight: statusGrid.implicitHeight + Style.space(24)
-                                    Grid {
-                                        id: statusGrid
-                                        anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                                        anchors.margins: Style.space(14)
-                                        columns: 2
-                                        columnSpacing: Style.space(16)
-                                        rowSpacing: Style.space(10)
-                                        StatusCell { width: (statusGrid.width - statusGrid.columnSpacing) / 2; label: "STATE"; value: Model.stateLabel(root.status); accent: root.daemonState === "recording" }
-                                        StatusCell { width: (statusGrid.width - statusGrid.columnSpacing) / 2; label: "ENGINE"; value: root.status ? Model.engineLabel(root.options, root.engine) + " · " + Model.sanitize(root.status.model ? root.status.model.name : "", 60) : "…" }
-                                        StatusCell { width: (statusGrid.width - statusGrid.columnSpacing) / 2; label: "HOTKEY"; value: root.status ? Model.hotkeyLabel(root.status.hotkey) : "…" }
-                                        StatusCell { width: (statusGrid.width - statusGrid.columnSpacing) / 2; label: "OUTPUT"; value: root.status ? String(root.status.output_mode || "") + (root.status.hotkey && root.status.hotkey.mode ? " · " + String(root.status.hotkey.mode).replace(/_/g, " ") : "") : "…" }
+                                    spacing: Style.space(6)
+                                    topPadding: Style.space(6)
+                                    Text {
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        textFormat: Text.PlainText
+                                        text: root.homeHero.title
+                                        color: root.homeHero.tone === "accent" ? Commons.Color.accent : (root.homeHero.tone === "urgent" ? root.urgent : (root.homeHero.tone === "muted" ? root.muted : root.foreground))
+                                        font.family: root.fontFamily; font.pixelSize: Style.font.displayLarge; font.bold: true
+                                    }
+                                    Row {
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        spacing: Style.space(6)
+                                        readonly property bool keyed: root.homeHero.title === "Ready" && root.shortcutInfo.primary !== ""
+                                        Text {
+                                            visible: parent.keyed
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            textFormat: Text.PlainText; text: root.shortcutInfo.isHold ? "Hold" : "Press"
+                                            color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.subtitle
+                                        }
+                                        Keycap { visible: parent.keyed; anchors.verticalCenter: parent.verticalCenter; text: root.shortcutInfo.primary }
+                                        Text {
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            textFormat: Text.PlainText
+                                            text: parent.keyed ? "and talk" + (root.status && root.status.model && root.status.model.name ? "  ·  " + Model.sanitize(root.status.model.name, 40) : "") : root.homeHero.line
+                                            color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.subtitle
+                                        }
+                                    }
+                                    Text {
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        visible: root.homeHero.title === "Ready" && root.shortcutInfo.hold !== ""
+                                        textFormat: Text.PlainText
+                                        text: "or hold " + root.shortcutInfo.hold
+                                        color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption
                                     }
                                 }
 
                                 Row {
+                                    anchors.horizontalCenter: parent.horizontalCenter
                                     spacing: Style.space(8)
                                     Button {
                                         text: root.daemonState === "recording" ? "Stop recording" : "Record"
@@ -987,13 +1470,14 @@ Panel {
                                         onClicked: root.togglePower()
                                     }
                                     Button {
-                                        text: "Restart daemon"
+                                        text: "Restart"
                                         iconText: "󰑓"
                                         bordered: true
                                         hasCursor: root.cursorIs("restart")
                                         foreground: root.foreground
                                         fontFamily: root.fontFamily
                                         enabled: !service.restarting && !service.powering && root.daemonState !== "stopped"
+                                        tooltipText: "Ctrl+R · restart the daemon"
                                         onHovered: function(h) { if (h) root.setCursor("restart", -1) }
                                         onClicked: root.restartDaemon()
                                     }
@@ -1033,7 +1517,7 @@ Panel {
                                     foreground: root.urgent
                                     accent: root.urgent
                                     implicitHeight: bannerRow.implicitHeight + Style.space(20)
-                                    MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onEntered: root.setCursor("download", -1); onClicked: root.selectSection("models") }
+                                    MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onEntered: root.setCursor("download", -1); onClicked: root.openDrill("models") }
                                     Row {
                                         id: bannerRow
                                         anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
@@ -1051,6 +1535,64 @@ Panel {
                                     }
                                 }
 
+                                // This year: heatmap + four numbers. Enter opens Usage.
+                                SectionHead { title: "THIS YEAR"; trailing: "usage ›"; onTrailingClicked: root.openDrill("usage") }
+                                CursorSurface {
+                                    id: usageCard
+                                    width: parent.width
+                                    bordered: true
+                                    hasCursor: root.cursorIs("usage")
+                                    foreground: root.foreground
+                                    implicitHeight: usageColumn.implicitHeight + Style.space(24)
+                                    onHasCursorChanged: if (hasCursor) root.ensureVisible(usageCard)
+                                    MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onEntered: root.setCursor("usage", -1); onClicked: root.openDrill("usage") }
+                                    Column {
+                                        id: usageColumn
+                                        anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                                        anchors.margins: Style.space(12)
+                                        spacing: Style.space(10)
+                                        Heatmap {
+                                            visible: root.usageReady
+                                            width: parent.width
+                                            grid: Model.heatmap(root.usage ? root.usage.days : [], null, 52)
+                                            foreground: root.foreground; muted: root.muted; accent: Commons.Color.accent; fontFamily: root.fontFamily
+                                        }
+                                        Row {
+                                            visible: root.usageReady
+                                            spacing: Style.space(18)
+                                            Stat { value: root.usageNumbers.today; label: "today" }
+                                            Stat { value: root.usageNumbers.words; label: "words" }
+                                            Stat { value: root.usageNumbers.wpm; label: "wpm" }
+                                            Text {
+                                                anchors.baseline: parent.children[0].baseline
+                                                visible: root.usageNumbers.saved !== ""
+                                                textFormat: Text.PlainText; text: root.usageNumbers.saved
+                                                color: Commons.Color.accent; font.family: root.fontFamily; font.pixelSize: Style.font.subtitle; font.bold: true
+                                            }
+                                        }
+                                        Text {
+                                            visible: !root.usageReady
+                                            width: parent.width; wrapMode: Text.WordWrap
+                                            textFormat: Text.PlainText
+                                            text: root.usageMessage
+                                            color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body
+                                        }
+                                    }
+                                }
+
+                                SectionHead { visible: root.recentItems.length > 0; title: "RECENT"; trailing: "history ›"; onTrailingClicked: root.selectSection("history") }
+                                Repeater {
+                                    model: root.recentItems
+                                    delegate: HistoryLine {
+                                        required property var modelData
+                                        required property int index
+                                        pageName: "home"
+                                        item: modelData
+                                        rowIndex: index
+                                        onPicked: root.openRecent(modelData)
+                                    }
+                                }
+
                                 PanelSectionHeader { text: "TEST A PHRASE"; foreground: root.foreground; fontFamily: root.fontFamily }
                                 EditField {
                                     id: testField
@@ -1060,6 +1602,7 @@ Panel {
                                     foreground: root.foreground
                                     hasCursor: root.cursorIs("test")
                                     onHoveredChanged: if (hovered) root.setCursor("test", -1)
+                                    onHasCursorChanged: if (hasCursor) root.ensureVisible(testField)
                                     onActiveFocusChanged: root.noteEditor(testField, activeFocus)
                                     onTextChanged: previewDebounce.restart()
                                     Keys.onEscapePressed: function(event) { keyCatcher.forceActiveFocus(); event.accepted = true }
@@ -1074,192 +1617,354 @@ Panel {
                                 }
                             }
 
-                            // ================= 2 · Vocabulary =================
+                            // ================= Home › Usage =================
                             Column {
-                                visible: root.section === "vocabulary"
+                                visible: root.page === "usage"
+                                width: parent.width
+                                spacing: Style.space(14)
+                                Text {
+                                    visible: !root.usageReady
+                                    width: parent.width; wrapMode: Text.WordWrap
+                                    textFormat: Text.PlainText; text: root.usageMessage
+                                    color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body
+                                }
+                                PanelSectionHeader { visible: root.usageReady; text: "LAST 12 MONTHS"; foreground: root.foreground; fontFamily: root.fontFamily }
+                                Heatmap {
+                                    visible: root.usageReady
+                                    width: parent.width
+                                    grid: Model.heatmap(root.usage ? root.usage.days : [], null, 52)
+                                    foreground: root.foreground; muted: root.muted; accent: Commons.Color.accent; fontFamily: root.fontFamily
+                                }
+                                Row {
+                                    visible: root.usageReady
+                                    spacing: Style.space(26)
+                                    BigStat { value: root.usageNumbers.wordsFull; label: "words" }
+                                    BigStat { value: root.usageNumbers.dictations; label: "dictations" }
+                                    BigStat { value: root.usageNumbers.spoken; label: "spoken" }
+                                    BigStat { value: root.usageNumbers.wpm; label: "wpm" }
+                                }
+                                Text {
+                                    visible: root.usageReady && root.usageNumbers.saved !== ""
+                                    textFormat: Text.PlainText
+                                    text: root.usageNumbers.saved + " vs typing at " + Number(root.featureValue("usage", "typing_wpm", 40)) + " wpm"
+                                    color: Commons.Color.accent; font.family: root.fontFamily; font.pixelSize: Style.font.title; font.bold: true
+                                }
+                                Row {
+                                    visible: root.usageReady
+                                    width: parent.width
+                                    spacing: Style.space(20)
+                                    Column {
+                                        width: (parent.width - parent.spacing) * 0.55
+                                        spacing: Style.space(6)
+                                        PanelSectionHeader { text: "WHEN YOU DICTATE"; foreground: root.foreground; fontFamily: root.fontFamily }
+                                        Row {
+                                            id: hourRow
+                                            readonly property var bars: Model.hourBars(root.usage ? root.usage.hours : [])
+                                            width: parent.width
+                                            height: Style.space(44)
+                                            spacing: Style.space(2)
+                                            Repeater {
+                                                model: hourRow.bars.bars
+                                                delegate: Item {
+                                                    required property var modelData
+                                                    width: (hourRow.width - hourRow.spacing * 23) / 24
+                                                    height: hourRow.height
+                                                    Rectangle {
+                                                        anchors.bottom: parent.bottom
+                                                        width: parent.width
+                                                        height: Math.max(modelData.value > 0 ? Style.space(2) : 0, parent.height * modelData.value)
+                                                        color: Commons.Color.accent
+                                                        opacity: modelData.top ? 1 : 0.55
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Text { textFormat: Text.PlainText; text: hourRow.bars.busiest; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body }
+                                    }
+                                    Column {
+                                        width: (parent.width - parent.spacing) * 0.45
+                                        spacing: Style.space(6)
+                                        PanelSectionHeader { text: "BY MODEL"; foreground: root.foreground; fontFamily: root.fontFamily }
+                                        Repeater {
+                                            model: root.usage && root.usage.models ? root.usage.models.slice(0, 5) : []
+                                            delegate: Item {
+                                                required property var modelData
+                                                required property int index
+                                                width: parent.width
+                                                height: modelName.implicitHeight + Style.space(4)
+                                                Text {
+                                                    id: modelName
+                                                    anchors.left: parent.left; anchors.right: modelCount.left; anchors.rightMargin: Style.space(8)
+                                                    textFormat: Text.PlainText; elide: Text.ElideRight
+                                                    text: Model.sanitize(modelData.model || modelData.engine, 40)
+                                                    color: index === 0 ? root.foreground : root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body
+                                                }
+                                                Text {
+                                                    id: modelCount
+                                                    anchors.right: parent.right
+                                                    textFormat: Text.PlainText; text: Model.groupedNumber(modelData.dictations)
+                                                    color: index === 0 ? root.foreground : root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Text {
+                                    visible: root.usageReady && Model.healthLine(root.usage ? root.usage.health : null) !== ""
+                                    width: parent.width; wrapMode: Text.WordWrap
+                                    textFormat: Text.PlainText
+                                    text: "󰀦  " + Model.healthLine(root.usage ? root.usage.health : null)
+                                    color: root.urgent; font.family: root.fontFamily; font.pixelSize: Style.font.caption
+                                }
+                                Text {
+                                    visible: root.usageReady
+                                    width: parent.width; wrapMode: Text.WordWrap
+                                    textFormat: Text.PlainText
+                                    text: "Counts only, no text" + (root.usage && root.usage.since ? " · since " + Model.sanitize(root.usage.since, 20) : "") + " · turn off in Settings"
+                                    color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption
+                                }
+                            }
+
+                            // ================= 2 · Words =================
+                            Column {
+                                visible: root.page === "words"
                                 width: parent.width
                                 spacing: Style.space(10)
                                 Row {
                                     width: parent.width
                                     spacing: Style.space(10)
                                     EditField {
-                                        id: vocabSearch
-                                        onPasteRequested: root.requestPaste(vocabSearch)
+                                        id: wordsField
+                                        onPasteRequested: root.requestPaste(wordsField)
                                         width: parent.width - tokenMeter.width - parent.spacing
-                                        placeholderText: "Search or add a word · Enter adds"
+                                        placeholderText: "Add a word, or heard → written · type to search"
                                         foreground: root.foreground
                                         hasCursor: root.cursorIs("search")
                                         onHoveredChanged: if (hovered) root.setCursor("search", -1)
-                                        onActiveFocusChanged: root.noteEditor(vocabSearch, activeFocus)
+                                        onActiveFocusChanged: root.noteEditor(wordsField, activeFocus)
                                         onTextChanged: { root.cursorIndex = 0; body.contentY = 0 }
-                                        Keys.onReturnPressed: root.addVocab()
+                                        Keys.onReturnPressed: root.addWord()
                                         Keys.onEscapePressed: function(event) { if (text !== "") text = ""; else keyCatcher.forceActiveFocus(); event.accepted = true }
                                         Keys.onDownPressed: function(event) { keyCatcher.forceActiveFocus(); root.setCursor("rows", 0); event.accepted = true }
                                     }
                                     Text {
                                         id: tokenMeter
                                         anchors.verticalCenter: parent.verticalCenter
-                                        text: Model.tokenMeter(root.vocabTokens, root.vocabTokenLimit)
+                                        text: "prompt " + Model.tokenMeter(root.vocabTokens, root.vocabTokenLimit)
                                         textFormat: Text.PlainText
                                         color: Model.tokenLevel(root.vocabTokens, root.vocabTokenLimit) === "urgent" ? root.urgent : (Model.tokenLevel(root.vocabTokens, root.vocabTokenLimit) === "amber" ? Commons.Color.accent : root.muted)
                                         font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true
                                     }
                                 }
+                                ButtonGroup {
+                                    id: wordFilterGroup
+                                    readonly property var filterOptions: Model.wordFilters(root.myWords, root.learnedWords)
+                                    width: parent.width
+                                    options: filterOptions
+                                    value: root.wordFilter
+                                    focusable: false
+                                    cursorIndex: root.cursorIs("filter") ? Math.max(0, filterOptions.map(function(o) { return o.value }).indexOf(root.wordFilter)) : -1
+                                    foreground: root.foreground
+                                    fontFamily: root.fontFamily
+                                    fontSize: Style.font.bodySmall
+                                    onHovered: function(i, h) { if (h) root.setCursor("filter", -1) }
+                                    onChanged: function(v) { root.wordFilter = v }
+                                }
                                 Repeater {
-                                    model: root.filteredVocabulary
-                                    delegate: CursorSurface {
-                                        id: vocabRow
+                                    model: root.wordsView.mine
+                                    delegate: WordRow {
                                         required property var modelData
                                         required property int index
-                                        width: sections.width
-                                        implicitHeight: Style.space(40)
-                                        hasCursor: root.rowHasCursor(index)
-                                        foreground: root.foreground
-                                        onHasCursorChanged: if (hasCursor) root.ensureVisible(vocabRow)
-                                        MouseArea { anchors.fill: parent; hoverEnabled: true; onEntered: root.setCursor("rows", vocabRow.index) }
-                                        Text {
-                                            anchors.left: parent.left; anchors.right: vocabActions.left; anchors.verticalCenter: parent.verticalCenter
-                                            anchors.leftMargin: Style.space(12); anchors.rightMargin: Style.space(8)
-                                            text: Model.sanitize(vocabRow.modelData.phrase, 120); textFormat: Text.PlainText; elide: Text.ElideRight
-                                            color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.subtitle
-                                        }
-                                        Row {
-                                            id: vocabActions
-                                            anchors.right: parent.right; anchors.rightMargin: Style.space(8); anchors.verticalCenter: parent.verticalCenter
-                                            opacity: vocabRow.hasCursor ? 1 : 0
-                                            enabled: vocabRow.hasCursor && !service.mutating
-                                            PanelActionButton { iconText: "󰆴"; foreground: root.foreground; hoverColor: root.urgent; tooltipText: "x · remove word"; onClicked: { root.setCursor("rows", vocabRow.index); root.deleteSelected() } }
-                                        }
+                                        word: modelData
+                                        rowIndex: index
+                                    }
+                                }
+                                // Learned words: kept apart from yours; accept, promote, reject.
+                                Item {
+                                    visible: root.wordsView.learned.length > 0 || (root.wordFilter === "learned")
+                                    width: parent.width
+                                    height: learnedHead.implicitHeight + Style.space(10)
+                                    PanelSectionHeader {
+                                        id: learnedHead
+                                        anchors.left: parent.left; anchors.bottom: parent.bottom
+                                        text: "LEARNED FROM YOUR CORRECTIONS · " + root.learnedWords.length
+                                        foreground: root.foreground; fontFamily: root.fontFamily
+                                    }
+                                    Button {
+                                        anchors.right: parent.right; anchors.bottom: parent.bottom
+                                        visible: root.learnedWords.length > 0
+                                        text: "Reset all"; bordered: true
+                                        hasCursor: root.cursorIs("learn.reset")
+                                        foreground: root.foreground; fontFamily: root.fontFamily; fontSize: Style.font.caption
+                                        onHovered: function(h) { if (h) root.setCursor("learn.reset", -1) }
+                                        onHasCursorChanged: if (hasCursor) root.ensureVisible(this)
+                                        onClicked: root.resetLearned()
+                                    }
+                                }
+                                Repeater {
+                                    model: root.wordsView.learned
+                                    delegate: WordRow {
+                                        required property var modelData
+                                        required property int index
+                                        word: modelData
+                                        rowIndex: root.wordsView.mine.length + index
                                     }
                                 }
                                 EmptyState {
-                                    visible: root.filteredVocabulary.length === 0
+                                    visible: root.wordsView.rows.length === 0
                                     glyph: "󰗊"
-                                    title: !root.loaded ? (service.busy ? "Loading vocabulary…" : "Vocabulary unavailable") : (vocabSearch.text !== "" ? "Not in the vocabulary yet" : "No custom words yet")
-                                    hint: vocabSearch.text !== "" ? "Press Enter to add “" + vocabSearch.text.trim() + "”" : "Names, products and jargon Voxtype should spell correctly."
+                                    title: !root.loaded ? (service.busy ? "Loading your words…" : "Words unavailable") : (wordsField.text !== "" ? "Not in your words yet" : (root.wordFilter === "learned" ? "Nothing learned yet" : "No words yet"))
+                                    hint: wordsField.text !== "" ? "Press Enter to add “" + Model.sanitize(wordsField.text.trim(), 60) + "”" : (root.wordFilter === "learned" ? "Fix a word in History and it shows up here." : "Names and jargon to spell right, or “heard → written” rules:\n“slash release → /release”.")
+                                }
+                                Text {
+                                    width: parent.width; wrapMode: Text.WordWrap
+                                    textFormat: Text.PlainText
+                                    text: !root.caps.learned ? "Learning from your corrections " + Model.NEEDS_TUI_02 + "." : (root.learningOn ? "Shift+letter jumps · learned words apply without a restart" : "Learning is off · learned words are paused")
+                                    color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption
                                 }
                             }
 
-                            // ================= 3 · Dictionary =================
+                            // ================= 3 · History =================
                             Column {
-                                visible: root.section === "dictionary"
+                                visible: root.page === "history"
                                 width: parent.width
-                                spacing: Style.space(10)
-                                Row {
-                                    width: parent.width
-                                    spacing: Style.space(8)
-                                    EditField {
-                                        id: dictFrom
-                                        onPasteRequested: root.requestPaste(dictFrom)
-                                        width: (parent.width - categoryChip.width - addRule.width - parent.spacing * 3) * 0.5
-                                        placeholderText: "spoken phrase"
-                                        foreground: root.foreground
-                                        onActiveFocusChanged: root.noteEditor(dictFrom, activeFocus)
-                                        Keys.onReturnPressed: { if (dictTo.text.trim() === "") dictTo.forceActiveFocus(); else root.upsertRule() }
-                                        Keys.onEscapePressed: function(event) { keyCatcher.forceActiveFocus(); event.accepted = true }
-                                    }
-                                    EditField {
-                                        id: dictTo
-                                        onPasteRequested: root.requestPaste(dictTo)
-                                        width: dictFrom.width
-                                        placeholderText: "→ replacement"
-                                        foreground: root.foreground
-                                        onActiveFocusChanged: root.noteEditor(dictTo, activeFocus)
-                                        Keys.onReturnPressed: root.upsertRule()
-                                        Keys.onEscapePressed: function(event) { keyCatcher.forceActiveFocus(); event.accepted = true }
-                                    }
-                                    Button {
-                                        id: categoryChip
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        text: root.dictCategory
-                                        bordered: true
-                                        foreground: root.foreground
-                                        fontFamily: root.fontFamily
-                                        fontSize: Style.font.caption
-                                        tooltipText: "Category for the new rule"
-                                        onClicked: root.dictCategory = Model.nextCategory(root.dictCategory, root.categories)
-                                    }
-                                    Button {
-                                        id: addRule
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        iconText: "＋"
-                                        bordered: true
-                                        foreground: root.foreground
-                                        enabled: dictFrom.text.trim() !== "" && dictTo.text.trim() !== ""
-                                        tooltipText: "Add rule"
-                                        onClicked: root.upsertRule()
-                                    }
-                                }
+                                spacing: Style.space(8)
                                 EditField {
-                                    id: dictSearch
-                                    onPasteRequested: root.requestPaste(dictSearch)
+                                    id: historySearch
+                                    onPasteRequested: root.requestPaste(historySearch)
                                     width: parent.width
-                                    placeholderText: "Search rules · /"
+                                    visible: root.caps.history === true
+                                    placeholderText: "Search history · /"
                                     foreground: root.foreground
                                     hasCursor: root.cursorIs("search")
                                     onHoveredChanged: if (hovered) root.setCursor("search", -1)
-                                    onActiveFocusChanged: root.noteEditor(dictSearch, activeFocus)
+                                    onActiveFocusChanged: root.noteEditor(historySearch, activeFocus)
                                     onTextChanged: { root.cursorIndex = 0; body.contentY = 0 }
                                     Keys.onReturnPressed: { keyCatcher.forceActiveFocus(); root.setCursor("rows", 0) }
                                     Keys.onEscapePressed: function(event) { if (text !== "") text = ""; else keyCatcher.forceActiveFocus(); event.accepted = true }
                                     Keys.onDownPressed: function(event) { keyCatcher.forceActiveFocus(); root.setCursor("rows", 0); event.accepted = true }
                                 }
                                 Repeater {
-                                    model: root.filteredReplacements
-                                    delegate: CursorSurface {
-                                        id: ruleRow
+                                    model: root.historyView
+                                    delegate: Column {
+                                        id: historyEntry
                                         required property var modelData
-                                        required property int index
                                         width: sections.width
-                                        implicitHeight: Style.space(44)
-                                        hasCursor: root.rowHasCursor(index)
-                                        foreground: root.foreground
-                                        onHasCursorChanged: if (hasCursor) root.ensureVisible(ruleRow)
-                                        MouseArea { anchors.fill: parent; hoverEnabled: true; onEntered: root.setCursor("rows", ruleRow.index); onClicked: root.cycleRuleCategory() }
-                                        Row {
-                                            anchors.left: parent.left; anchors.right: ruleActions.left; anchors.verticalCenter: parent.verticalCenter
-                                            anchors.leftMargin: Style.space(12); anchors.rightMargin: Style.space(8)
-                                            spacing: Style.space(8)
-                                            Text {
-                                                width: Math.min(implicitWidth, parent.width * 0.45)
-                                                text: Model.sanitize(ruleRow.modelData.from, 120); textFormat: Text.PlainText; elide: Text.ElideRight
-                                                color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body
-                                                anchors.verticalCenter: parent.verticalCenter
-                                            }
-                                            Text { textFormat: Text.PlainText; text: "→"; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body; anchors.verticalCenter: parent.verticalCenter }
-                                            Text {
-                                                width: Math.min(implicitWidth, parent.width * 0.45)
-                                                text: Model.sanitize(ruleRow.modelData.to, 120); textFormat: Text.PlainText; elide: Text.ElideRight
-                                                color: Commons.Color.accent; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true
-                                                anchors.verticalCenter: parent.verticalCenter
-                                            }
+                                        spacing: Style.space(4)
+                                        Item {
+                                            visible: historyEntry.modelData.type === "day"
+                                            width: parent.width
+                                            height: dayLabel.implicitHeight + Style.space(12)
+                                            PanelSectionHeader { id: dayLabel; anchors.left: parent.left; anchors.bottom: parent.bottom; text: String(historyEntry.modelData.label || "").toUpperCase(); foreground: root.foreground; fontFamily: root.fontFamily }
+                                            Text { anchors.right: parent.right; anchors.bottom: parent.bottom; textFormat: Text.PlainText; text: historyEntry.modelData.meta || ""; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
                                         }
-                                        Row {
-                                            id: ruleActions
-                                            anchors.right: parent.right; anchors.rightMargin: Style.space(8); anchors.verticalCenter: parent.verticalCenter
-                                            spacing: Style.space(6)
-                                            Text {
-                                                anchors.verticalCenter: parent.verticalCenter
-                                                text: String(ruleRow.modelData.category || "").toUpperCase(); textFormat: Text.PlainText
-                                                color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true; font.letterSpacing: 1
-                                            }
-                                            PanelActionButton { visible: ruleRow.hasCursor; iconText: "󰑖"; foreground: root.foreground; tooltipText: "c · cycle category"; enabled: !service.mutating; onClicked: { root.setCursor("rows", ruleRow.index); root.cycleRuleCategory() } }
-                                            PanelActionButton { visible: ruleRow.hasCursor; iconText: "󰆴"; foreground: root.foreground; hoverColor: root.urgent; tooltipText: "x · delete rule"; enabled: !service.mutating; onClicked: { root.setCursor("rows", ruleRow.index); root.deleteSelected() } }
+                                        HistoryLine {
+                                            pageName: "history"
+                                            visible: historyEntry.modelData.type === "item"
+                                            item: historyEntry.modelData
+                                            rowIndex: historyEntry.modelData.index === undefined ? -1 : historyEntry.modelData.index
+                                            expanded: root.expandedId === historyEntry.modelData.id
+                                            onPicked: root.toggleExpand(historyEntry.modelData)
+                                        }
+                                        HistoryDetail {
+                                            visible: historyEntry.modelData.type === "item" && root.expandedId === historyEntry.modelData.id
+                                            item: historyEntry.modelData
                                         }
                                     }
                                 }
+                                Button {
+                                    visible: !!root.historyNext
+                                    text: "Load older"; bordered: true
+                                    hasCursor: root.cursorIs("more")
+                                    foreground: root.foreground; fontFamily: root.fontFamily; fontSize: Style.font.bodySmall
+                                    onHovered: function(h) { if (h) root.setCursor("more", -1) }
+                                    onHasCursorChanged: if (hasCursor) root.ensureVisible(this)
+                                    onClicked: root.loadMoreHistory()
+                                }
                                 EmptyState {
-                                    visible: root.filteredReplacements.length === 0
-                                    glyph: "󰬴"
-                                    title: !root.loaded ? (service.busy ? "Loading rules…" : "Rules unavailable") : (dictSearch.text !== "" ? "No matching rules" : "No dictionary rules yet")
-                                    hint: "Rules rewrite what you said before it is typed:\n“slash release” → “/release”."
+                                    visible: root.historyItems.length === 0
+                                    glyph: "󰋚"
+                                    title: !root.caps.history ? "History " + Model.NEEDS_TUI_02 : (!root.historyLoaded ? "Loading history…" : (historySearch.text !== "" ? "Nothing matches" : (root.historyEnabled ? "No dictations yet" : "History is off")))
+                                    hint: !root.caps.history ? "Update voxtype-tui to keep recent dictations here." : (root.historyEnabled ? "Each dictation shows up here, with what Voxtype heard and what it wrote." : "Turn on Save history in Settings.")
+                                }
+                                Item {
+                                    visible: root.caps.history === true
+                                    width: parent.width
+                                    height: Math.max(retention.implicitHeight, clearAll.implicitHeight) + Style.space(8)
+                                    Text {
+                                        id: retention
+                                        anchors.left: parent.left; anchors.right: clearAll.left; anchors.rightMargin: Style.space(10); anchors.verticalCenter: parent.verticalCenter
+                                        wrapMode: Text.WordWrap
+                                        textFormat: Text.PlainText
+                                        text: Model.retentionLine(root.historyEnabled, root.historyKeepDays, root.feat.archive)
+                                        color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption
+                                    }
+                                    Button {
+                                        id: clearAll
+                                        anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                                        visible: root.historyList.length > 0
+                                        text: "Clear all"; bordered: true
+                                        hasCursor: root.cursorIs("clear")
+                                        foreground: root.foreground; fontFamily: root.fontFamily; fontSize: Style.font.bodySmall
+                                        onHovered: function(h) { if (h) root.setCursor("clear", -1) }
+                                        onHasCursorChanged: if (hasCursor) root.ensureVisible(clearAll)
+                                        onClicked: root.clearHistory()
+                                    }
                                 }
                             }
 
-                            // ================= 4 · Settings =================
+                            // ================= 4 · Settings (simple rows) =================
+                            Column {
+                                visible: root.page === "settings"
+                                width: parent.width
+                                spacing: Style.space(2)
+                                SimpleRow { key: "model"; label: "Model"; kind: "cycle"; value: Model.sanitize(String(Model.settingValue(root.config, root.modelPath, root.status && root.status.model ? root.status.model.name || "" : "")), 40) }
+                                SimpleRow { key: "drill.models"; label: "Manage models"; kind: "drill"; value: Model.modelsSummary(root.modelsEngine === root.engine ? root.modelRows : []) }
+                                SimpleRow { key: "language"; label: "Language"; kind: "cycle"; visible: root.engine === "whisper"; value: Model.optionLabel(Model.LANGUAGES, String(Model.settingOr(root.config, "whisper.language"))) }
+                                SimpleRow { key: "shortcut"; label: "Shortcut"; kind: "keycap"; value: root.shortcutInfo.primary !== "" ? root.shortcutInfo.primary : "none"; hint: root.shortcutInfo.hold !== "" ? "hold " + root.shortcutInfo.hold : "" }
+                                SimpleRow { key: "mode"; label: "Mode"; kind: "cycle"; value: Model.optionLabel(Model.HOTKEY_MODE_OPTIONS, String(Model.settingOr(root.config, "hotkey.mode"))) }
+                                SettingsGroup { title: "WHILE DICTATING" }
+                                SimpleRow { key: "indicator"; label: "Indicator"; kind: "cycle"; value: Model.optionLabel(Model.INDICATOR_OPTIONS, Model.indicatorValue(root.config)) }
+                                SimpleRow { key: "sounds"; label: "Sounds"; kind: "toggle"; checked: Model.settingOr(root.config, "audio.feedback.enabled") === true }
+                                SimpleRow { key: "other_audio"; label: "Other audio"; kind: "cycle"; value: Model.optionLabel(Model.OTHER_AUDIO_OPTIONS, Model.otherAudioValue(root.config)) }
+                                SettingsGroup { title: "TEXT" }
+                                SimpleRow { key: "output_mode"; label: "Insert text by"; kind: "cycle"; value: Model.optionLabel(Model.OUTPUT_MODE_OPTIONS, String(Model.settingOr(root.config, "output.mode"))) }
+                                SimpleRow { key: "spoken_punctuation"; label: "Spoken punctuation"; kind: "toggle"; checked: Model.settingOr(root.config, "text.spoken_punctuation") === true }
+                                SimpleRow { key: "filler_words"; label: "Remove filler words"; kind: "toggle"; checked: Model.settingOr(root.config, "text.filter_filler_words") === true }
+                                SettingsGroup { title: "SYSTEM" }
+                                SimpleRow {
+                                    key: "login"; label: "Start at login"; kind: "toggle"
+                                    checked: !!(root.status && root.status.daemon && root.status.daemon.starts_at_login === true)
+                                    available: !!(root.status && root.status.daemon && root.status.daemon.starts_at_login !== null && root.status.daemon.starts_at_login !== undefined)
+                                    reason: "systemd did not report the unit"
+                                }
+                                SettingsGroup { title: "HISTORY & USAGE" }
+                                SimpleRow { key: "usage"; label: "Count usage"; kind: "toggle"; checked: root.featureValue("usage", "enabled", true) === true; available: root.featureOk("usage"); reason: root.featureReason("usage") }
+                                SimpleRow { key: "history"; label: "Save history"; kind: "toggle"; checked: root.featureValue("history", "enabled", true) === true; available: root.featureOk("history"); reason: root.featureReason("history") }
+                                SimpleRow { key: "keep"; label: "Keep for"; kind: "cycle"; value: Model.keepLabel(root.featureValue("history", "keep_days", 30)); available: root.featureOk("history"); reason: root.featureReason("history") }
+                                SimpleRow { key: "archive"; label: "Archive (your dataset)"; kind: "toggle"; checked: root.archiveOn; available: root.featureOk("archive"); reason: root.featureReason("archive") }
+                                SimpleRow { key: "archive.dir"; visible: root.archiveOn; label: "   Folder"; kind: "drill"; value: Model.sanitize(root.featureValue("archive", "dir", null) || "~/Documents/Voxtype", 48) }
+                                SimpleRow { key: "archive.audio"; visible: root.archiveOn; label: "   Save audio"; kind: "toggle"; hint: "separate recording of your mic"; checked: root.featureValue("archive", "save_audio", true) === true }
+                                SimpleRow { key: "archive.text"; visible: root.archiveOn; label: "   Save text"; kind: "toggle"; checked: root.featureValue("archive", "save_text", true) === true }
+                                SettingsGroup { title: "LEARNING" }
+                                SimpleRow { key: "learning"; label: "Learn from corrections"; kind: "toggle"; checked: root.learningOn; available: root.featureOk("learning"); reason: root.featureReason("learning") }
+                                SimpleRow {
+                                    key: "everywhere"; visible: root.learningOn && root.featureOk("everywhere") && !!root.caps.features
+                                    label: "Learn everywhere"; kind: "drill"
+                                    value: root.featureValue("learning", "everywhere", false) === true ? "on" : "off"
+                                    hint: "also from browsers and apps"
+                                }
+                                EverywhereCard { visible: root.everywhereOpen }
+                                SettingsGroup { title: "MORE" }
+                                SimpleRow { key: "drill.advanced"; label: "All Voxtype settings"; kind: "drill"; badge: root.advancedChanged > 0 ? root.advancedChanged + " changed" : ""; value: "hotkey, audio, output, GPU…" }
+                                SimpleRow { key: "drill.backup"; label: "Backup"; kind: "drill"; value: "export / import" }
+                                Item { width: 1; height: Style.space(4) }
+                            }
+
+                            // ============ Settings › All Voxtype settings ============
                             Column {
                                 id: settingsForm
-                                visible: root.section === "settings"
+                                visible: root.page === "advanced"
                                 width: parent.width
                                 spacing: Style.space(10)
                                 function controlFor(key) {
@@ -1344,6 +2049,7 @@ Panel {
                                         options: Model.plainOptions(root.options ? root.options.feedback_themes : ["default"]) }
                                     SettingSlider { settingKey: "audio.feedback.volume"; label: "Volume"; width: (parent.width - parent.spacing) / 2; fallback: 0.5 }
                                 }
+                                SettingNumber { visible: Model.settingOr(root.config, "audio.duck_media") === true; settingKey: "audio.duck_media_volume_percent"; label: "Lowered volume (%)"; from: 0; to: 150; stepSize: 5; fallback: 34 }
 
                                 PanelSeparator { width: parent.width; foreground: root.foreground }
                                 PanelSectionHeader { text: "OUTPUT"; foreground: root.foreground; fontFamily: root.fontFamily }
@@ -1358,6 +2064,8 @@ Panel {
                                 SettingToggle { settingKey: "output.auto_submit"; label: "Auto-submit"; description: "Press Enter after the text is typed"; fallback: false }
                                 SettingToggle { settingKey: "text.smart_auto_submit"; label: "Smart auto-submit"; description: "Only submit when the phrase sounds like a command"; fallback: false }
                                 SettingToggle { settingKey: "text.spoken_punctuation"; label: "Spoken punctuation"; description: "“comma”, “period”, “new line” become punctuation"; fallback: false }
+                                SettingToggle { settingKey: "output.restore_clipboard"; label: "Restore clipboard"; description: "Put the previous clipboard back after a paste"; fallback: false }
+                                SettingToggle { settingKey: "output.shift_enter_newlines"; label: "Shift+Enter for new lines"; description: "So chat apps don't send early"; fallback: false }
 
                                 PanelSeparator { width: parent.width; foreground: root.foreground }
                                 PanelSectionHeader { text: "VOICE ACTIVITY"; foreground: root.foreground; fontFamily: root.fontFamily }
@@ -1415,6 +2123,25 @@ Panel {
                                 }
 
                                 PanelSeparator { width: parent.width; foreground: root.foreground }
+                                PanelSectionHeader { text: "INDICATOR DETAILS"; foreground: root.foreground; fontFamily: root.fontFamily }
+                                Row {
+                                    width: parent.width
+                                    spacing: Style.space(10)
+                                    SettingDropdown { settingKey: "osd.position"; label: "Position"; width: (parent.width - parent.spacing) / 2; fallback: "bottom-center"
+                                        options: Model.plainOptions(Model.OSD_POSITIONS) }
+                                    SettingSlider { settingKey: "osd.opacity"; label: "Opacity"; width: (parent.width - parent.spacing) / 2; fallback: 0.95 }
+                                }
+
+                                PanelSeparator { width: parent.width; foreground: root.foreground }
+                                PanelSectionHeader { text: "NOTIFICATIONS"; foreground: root.foreground; fontFamily: root.fontFamily }
+                                SettingToggle { settingKey: "output.notification.on_transcription"; label: "Show the text"; description: "A notification with each transcription"; fallback: true }
+                                SettingToggle { settingKey: "output.notification.on_recording_start"; label: "Recording started"; fallback: false }
+                                SettingToggle { settingKey: "output.notification.on_recording_stop"; label: "Recording stopped"; fallback: false }
+                                SettingToggle { settingKey: "output.notification.on_no_speech"; label: "No speech heard"; fallback: true }
+                                SettingDropdown { settingKey: "output.notification.urgency"; label: "Urgency"; width: parent.width / 2; fallback: "normal"
+                                    options: Model.plainOptions(["low", "normal", "critical"]) }
+
+                                PanelSeparator { width: parent.width; foreground: root.foreground }
                                 PanelSectionHeader { text: "GPU"; foreground: root.foreground; fontFamily: root.fontFamily }
                                 Text {
                                     width: parent.width; textFormat: Text.PlainText; wrapMode: Text.WordWrap
@@ -1470,9 +2197,9 @@ Panel {
                                 Item { width: 1; height: Style.space(4) }
                             }
 
-                            // ================= 5 · Models =================
+                            // ============ Settings › Manage models ============
                             Column {
-                                visible: root.section === "models"
+                                visible: root.page === "models"
                                 width: parent.width
                                 spacing: Style.space(10)
                                 Row {
@@ -1578,8 +2305,20 @@ Panel {
                                     hint: root.modelsLoading ? "" : "Models live under the voxtype data directory."
                                 }
 
-                                PanelSeparator { width: parent.width; foreground: root.foreground }
-                                PanelSectionHeader { text: "BACKUP"; foreground: root.foreground; fontFamily: root.fontFamily }
+                                Item { width: 1; height: Style.space(4) }
+                            }
+
+                            // ============ Settings › Backup ============
+                            Column {
+                                visible: root.page === "backup"
+                                width: parent.width
+                                spacing: Style.space(10)
+                                Text {
+                                    width: parent.width; wrapMode: Text.WordWrap
+                                    textFormat: Text.PlainText
+                                    text: "Export your words, rules and settings to a file, or import a voxtype-tui bundle. Imports are previewed before anything is written."
+                                    color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body
+                                }
                                 Row {
                                     id: backupRow
                                     spacing: Style.space(8)
@@ -1726,7 +2465,7 @@ Panel {
                             id: hints
                             anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
                             textFormat: Text.PlainText
-                            text: root.locked ? (root.canInstallLocked ? "Enter install   y copy   Esc close" : (root.lockedCommand !== "" ? "Enter copy   Esc close" : "Esc close")) : Model.sectionHints(root.section, {editing: root.editing, cursorActive: root.cursorActive})
+                            text: root.locked ? (root.canInstallLocked ? "Enter install   y copy   Esc close" : (root.lockedCommand !== "" ? "Enter copy   Esc close" : "Esc close")) : Model.sectionHints(root.section, {editing: root.editing, cursorActive: root.cursorActive, view: root.view, fixing: root.fixStage === "pick", fixField: root.fixStage === "type", rowKind: root.cursorWord() ? root.cursorWord().kind : ""})
                             color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption
                         }
                     }
@@ -1990,6 +2729,405 @@ Panel {
                 minimum: 0; maximum: 1; step: 0.05
                 value: sliderRow.current
                 onReleased: function(v) { root.setSetting(sliderRow.settingKey, Math.round(v * 100) / 100) }
+            }
+        }
+    }
+
+    // ---- layout B pieces ------------------------------------------------------
+    // A key name in a thin box: "Super+Ctrl+X".
+    component Keycap: Rectangle {
+        id: cap
+        property string text: ""
+        implicitWidth: capText.implicitWidth + Style.space(14)
+        implicitHeight: capText.implicitHeight + Style.space(6)
+        color: Style.hoverFillFor(root.foreground, Commons.Color.accent)
+        border.width: Math.max(1, Style.normalBorderWidth)
+        border.color: root.muted
+        radius: Style.cornerRadius
+        Text {
+            id: capText
+            anchors.centerIn: parent
+            textFormat: Text.PlainText; text: cap.text
+            color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body
+        }
+    }
+    // Section header with a right-aligned link ("usage ›").
+    component SectionHead: Item {
+        id: head
+        property string title: ""
+        property string trailing: ""
+        signal trailingClicked()
+        width: parent ? parent.width : implicitWidth
+        height: Math.max(headTitle.implicitHeight, headLink.implicitHeight)
+        PanelSectionHeader { id: headTitle; anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter; text: head.title; foreground: root.foreground; fontFamily: root.fontFamily }
+        Text {
+            id: headLink
+            anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText; text: head.trailing
+            color: linkArea.containsMouse ? root.foreground : root.muted
+            font.family: root.fontFamily; font.pixelSize: Style.font.caption
+            MouseArea { id: linkArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: head.trailingClicked() }
+        }
+    }
+    component Stat: Row {
+        id: stat
+        property string value: ""
+        property string label: ""
+        spacing: Style.space(5)
+        Text { textFormat: Text.PlainText; text: stat.value; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.subtitle; font.bold: true }
+        Text { textFormat: Text.PlainText; text: stat.label; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.subtitle }
+    }
+    component BigStat: Column {
+        id: big
+        property string value: ""
+        property string label: ""
+        spacing: Style.space(2)
+        Text { textFormat: Text.PlainText; text: big.value; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.display; font.bold: true }
+        Text { textFormat: Text.PlainText; text: big.label; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body }
+    }
+    component SettingsGroup: Item {
+        id: group
+        property string title: ""
+        width: parent ? parent.width : implicitWidth
+        height: groupTitle.implicitHeight + Style.space(16)
+        PanelSectionHeader { id: groupTitle; anchors.left: parent.left; anchors.bottom: parent.bottom; anchors.bottomMargin: Style.space(4); text: group.title; foreground: root.foreground; fontFamily: root.fontFamily }
+    }
+    // One Settings row: label left; on the right a ‹ value › cycler, a
+    // switch, a key cap or "value ›" for a drill-in. Enter / ←→ change it.
+    component SimpleRow: CursorSurface {
+        id: simple
+        required property string key
+        property string label: ""
+        property string kind: "cycle"
+        property string value: ""
+        property string hint: ""
+        property string badge: ""
+        property bool checked: false
+        property bool available: true
+        property string reason: ""
+        readonly property bool rowHasCursor: root.page === "settings" && root.cursorIs(key)
+        width: parent ? parent.width : implicitWidth
+        implicitHeight: Math.max(Style.spacing.popupRowHeight + Style.space(6), simpleLabel.implicitHeight + Style.space(12))
+        hasCursor: rowHasCursor
+        foreground: root.foreground
+        onHasCursorChanged: if (hasCursor) root.ensureVisible(simple)
+        MouseArea {
+            anchors.fill: parent; hoverEnabled: true; cursorShape: simple.available ? Qt.PointingHandCursor : Qt.ArrowCursor
+            onEntered: root.setCursor(simple.key, -1)
+            onClicked: if (simple.available) root.activateSimple(simple.key)
+        }
+        Text {
+            id: simpleLabel
+            anchors.left: parent.left; anchors.leftMargin: Style.spacing.rowPaddingX; anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText; text: simple.label
+            color: simple.available ? root.foreground : root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body
+        }
+        Text {
+            anchors.left: simpleLabel.right; anchors.leftMargin: Style.space(10); anchors.right: simpleRight.left; anchors.rightMargin: Style.space(10)
+            anchors.verticalCenter: parent.verticalCenter
+            visible: text !== ""
+            textFormat: Text.PlainText; elide: Text.ElideRight
+            text: !simple.available ? Model.sanitize(simple.reason, 60) : simple.hint
+            color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption
+        }
+        Row {
+            id: simpleRight
+            anchors.right: parent.right; anchors.rightMargin: Style.spacing.rowPaddingX; anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(8)
+            visible: simple.available
+            Rectangle {
+                visible: simple.badge !== ""
+                anchors.verticalCenter: parent.verticalCenter
+                implicitWidth: badgeText.implicitWidth + Style.space(10); implicitHeight: badgeText.implicitHeight + Style.space(4)
+                color: "transparent"; border.width: Math.max(1, Style.normalBorderWidth); border.color: Commons.Color.accent; radius: Style.cornerRadius
+                Text { id: badgeText; anchors.centerIn: parent; textFormat: Text.PlainText; text: simple.badge; color: Commons.Color.accent; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+            }
+            Text {
+                visible: simple.kind === "cycle" && simple.rowHasCursor
+                anchors.verticalCenter: parent.verticalCenter
+                textFormat: Text.PlainText; text: "‹"; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body
+                MouseArea { anchors.fill: parent; anchors.margins: -Style.space(4); onClicked: root.cycleSimple(simple.key, -1) }
+            }
+            Text {
+                visible: simple.kind === "cycle" || simple.kind === "drill"
+                anchors.verticalCenter: parent.verticalCenter
+                textFormat: Text.PlainText; text: simple.value
+                color: simple.kind === "drill" ? root.muted : root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body
+            }
+            Text {
+                visible: simple.kind === "drill" || (simple.kind === "cycle" && simple.rowHasCursor)
+                anchors.verticalCenter: parent.verticalCenter
+                textFormat: Text.PlainText; text: "›"; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body
+                MouseArea { anchors.fill: parent; anchors.margins: -Style.space(4); onClicked: simple.kind === "cycle" ? root.cycleSimple(simple.key, 1) : root.activateSimple(simple.key) }
+            }
+            Keycap { visible: simple.kind === "keycap"; anchors.verticalCenter: parent.verticalCenter; text: simple.value }
+            ToggleSwitch {
+                visible: simple.kind === "toggle"
+                anchors.verticalCenter: parent.verticalCenter
+                checked: simple.checked
+                hasCursor: simple.rowHasCursor
+                cursorRing: false
+                foreground: root.foreground
+                onToggled: root.activateSimple(simple.key)
+            }
+        }
+    }
+    // One Words row: heard → written, a type tag; learned rows add a state.
+    component WordRow: CursorSurface {
+        id: wordRow
+        property var word: ({})
+        property int rowIndex: -1
+        readonly property bool learned: word.kind === "learned"
+        width: parent ? parent.width : implicitWidth
+        implicitHeight: Style.space(36)
+        hasCursor: root.page === "words" && root.rowHasCursor(rowIndex)
+        foreground: root.foreground
+        onHasCursorChanged: if (hasCursor) root.ensureVisible(wordRow)
+        MouseArea { anchors.fill: parent; hoverEnabled: true; onEntered: root.setCursor("rows", wordRow.rowIndex); onClicked: { root.setCursor("rows", wordRow.rowIndex); root.activateCursor() } }
+        Text {
+            id: heardText
+            anchors.left: parent.left; anchors.leftMargin: Style.space(12); anchors.verticalCenter: parent.verticalCenter
+            width: parent.width * 0.32
+            horizontalAlignment: Text.AlignRight
+            textFormat: Text.PlainText; elide: Text.ElideLeft
+            text: wordRow.word.heard ? Model.sanitize(wordRow.word.heard, 80) : "·"
+            color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body
+        }
+        Text {
+            id: arrowText
+            anchors.left: heardText.right; anchors.leftMargin: Style.space(10); anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText; text: "→"; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body
+        }
+        Text {
+            anchors.left: arrowText.right; anchors.leftMargin: Style.space(10); anchors.right: wordTags.left; anchors.rightMargin: Style.space(8)
+            anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText; elide: Text.ElideRight
+            text: Model.sanitize(wordRow.word.written, 120)
+            color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.subtitle
+        }
+        Row {
+            id: wordTags
+            anchors.right: parent.right; anchors.rightMargin: Style.space(10); anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(6)
+            Tag { text: wordRow.word.tag || ""; tone: "muted" }
+            Tag { visible: wordRow.learned; text: wordRow.word.stateLabel || ""; tone: wordRow.word.state === "suggested" ? "muted" : "accent" }
+        }
+    }
+    component Tag: Rectangle {
+        id: tag
+        property string text: ""
+        property string tone: "muted"
+        visible: text !== ""
+        implicitWidth: tagText.implicitWidth + Style.space(12)
+        implicitHeight: tagText.implicitHeight + Style.space(4)
+        color: "transparent"
+        border.width: Math.max(1, Style.normalBorderWidth)
+        border.color: tone === "accent" ? Commons.Color.accent : root.muted
+        radius: Style.cornerRadius
+        Text { id: tagText; anchors.centerIn: parent; textFormat: Text.PlainText; text: tag.text; color: tag.tone === "accent" ? Commons.Color.accent : root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+    }
+    // A dictation: "14:32  first words of the text…  16w".
+    component HistoryLine: CursorSurface {
+        id: line
+        property var item: ({})
+        property int rowIndex: -1
+        property string pageName: "history"
+        property bool expanded: false
+        signal picked()
+        width: parent ? parent.width : implicitWidth
+        implicitHeight: Style.space(34)
+        hasCursor: root.page === pageName && root.rowHasCursor(rowIndex)
+        current: expanded
+        foreground: root.foreground
+        onHasCursorChanged: if (hasCursor) root.ensureVisible(line)
+        MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onEntered: root.setCursor("rows", line.rowIndex); onClicked: { root.setCursor("rows", line.rowIndex); line.picked() } }
+        Text {
+            id: lineTime
+            anchors.left: parent.left; anchors.leftMargin: Style.space(12); anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText; text: line.item.time || ""
+            color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body
+        }
+        Text {
+            anchors.left: lineTime.right; anchors.leftMargin: Style.space(14); anchors.right: lineWords.left; anchors.rightMargin: Style.space(12)
+            anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText; elide: Text.ElideRight
+            text: Model.sanitize(line.item.text, 200)
+            color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body
+        }
+        Text {
+            id: lineWords
+            anchors.right: parent.right; anchors.rightMargin: Style.space(12); anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText; text: (line.item.words || 0) + "w"
+            color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption
+        }
+    }
+    // The expanded dictation: full text, what Voxtype heard, actions, Fix.
+    component HistoryDetail: Item {
+        id: detail
+        property var item: ({})
+        readonly property var record: item.record || ({})
+        readonly property bool fixing: root.fixId !== "" && root.fixId === item.id
+        readonly property bool rewritten: Model.changedByRules(record.raw, record.final)
+        width: parent ? parent.width : implicitWidth
+        implicitHeight: detailColumn.implicitHeight + Style.space(16)
+        Rectangle { anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom; width: Math.max(2, Style.normalBorderWidth * 2); color: Commons.Color.accent }
+        Column {
+            id: detailColumn
+            anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+            anchors.leftMargin: Style.space(18); anchors.rightMargin: Style.space(8); anchors.topMargin: Style.space(8)
+            spacing: Style.space(8)
+            Text {
+                width: parent.width; wrapMode: Text.WordWrap
+                textFormat: Text.PlainText
+                text: Model.sanitize(Model.recordText(detail.record), 2000)
+                color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.subtitle
+            }
+            // What Voxtype heard, changed words in the accent colour.
+            Flow {
+                visible: detail.rewritten
+                width: parent.width
+                spacing: Style.space(5)
+                Text { textFormat: Text.PlainText; text: "heard:"; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body }
+                Repeater {
+                    model: detail.rewritten ? Model.diffWords(detail.record.raw, detail.record.final) : []
+                    delegate: Text {
+                        required property var modelData
+                        textFormat: Text.PlainText; text: modelData.text
+                        color: modelData.changed ? Commons.Color.accent : root.muted
+                        font.family: root.fontFamily; font.pixelSize: Style.font.body; font.underline: modelData.changed
+                    }
+                }
+            }
+            Text {
+                visible: !!detail.record.model || detail.record.duration_s !== undefined
+                textFormat: Text.PlainText
+                text: [detail.record.model ? Model.sanitize(detail.record.model, 40) : "", detail.record.duration_s ? Math.round(detail.record.duration_s * 10) / 10 + " s" : "",
+                       detail.record.app && detail.record.app["class"] ? Model.sanitize(detail.record.app["class"], 30) : ""].filter(function(x) { return x !== "" }).join("  ·  ")
+                color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption
+            }
+            Row {
+                visible: !detail.fixing
+                spacing: Style.space(8)
+                Button { text: "Copy"; iconText: "󰆏"; bordered: true; foreground: root.foreground; fontFamily: root.fontFamily; fontSize: Style.font.bodySmall; tooltipText: "c · copy the text"
+                    onClicked: { if (service.copy(Model.recordText(detail.record))) root.showNotice("Copied") } }
+                Button { text: "Fix a word"; iconText: "󰏫"; bordered: true; foreground: root.foreground; fontFamily: root.fontFamily; fontSize: Style.font.bodySmall
+                    enabled: !!root.caps.learned && root.learningOn
+                    tooltipText: !root.caps.learned ? "Fix a word " + Model.NEEDS_TUI_02 : (root.learningOn ? "f · teach Voxtype the right word" : "Learning is off in Settings")
+                    onClicked: { root.expandedId = detail.item.id; root.fixId = detail.item.id; root.fixStart = 0; root.fixEnd = 0; root.fixStage = "pick"; keyCatcher.forceActiveFocus() } }
+                Button { text: "Delete"; iconText: "󰆴"; bordered: true; foreground: root.foreground; fontFamily: root.fontFamily; fontSize: Style.font.bodySmall; tooltipText: "x · delete from history"
+                    onClicked: root.deleteHistory(detail.item) }
+            }
+            // Fix a word: pick the misheard word(s), type the right one,
+            // choose how to learn it, Teach.
+            Column {
+                visible: detail.fixing
+                width: parent.width
+                spacing: Style.space(8)
+                Text {
+                    textFormat: Text.PlainText
+                    text: root.fixStage === "pick" ? "Fix a word — pick what was misheard (←→, ] for more, Enter):" : "Fix a word"
+                    color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body
+                }
+                Flow {
+                    width: parent.width
+                    spacing: Style.space(4)
+                    Repeater {
+                        model: detail.fixing ? root.fixTokens : []
+                        delegate: Button {
+                            required property var modelData
+                            readonly property bool inSpan: modelData.index >= root.fixStart && modelData.index <= root.fixEnd
+                            text: Model.sanitize(modelData.raw, 40)
+                            bordered: inSpan
+                            selected: inSpan
+                            foreground: inSpan ? Commons.Color.accent : root.foreground
+                            fontFamily: root.fontFamily; fontSize: Style.font.body
+                            horizontalPadding: Style.space(5)
+                            onClicked: root.pickFixWord(modelData.index, root.fixStage === "pick" && modelData.index === root.fixEnd + 1)
+                        }
+                    }
+                }
+                Row {
+                    width: parent.width
+                    spacing: Style.space(10)
+                    Text { anchors.verticalCenter: parent.verticalCenter; textFormat: Text.PlainText; text: "should be"; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body }
+                    EditField {
+                        id: fixEdit
+                        onPasteRequested: root.requestPaste(fixEdit)
+                        width: parent.width - Style.space(90)
+                        placeholderText: root.fixStage === "pick" ? "press Enter after picking the word" : "the right spelling"
+                        foreground: root.foreground
+                        onVisibleChanged: if (visible) root.fixField = fixEdit
+                        Component.onCompleted: if (visible) root.fixField = fixEdit
+                        onActiveFocusChanged: { root.noteEditor(fixEdit, activeFocus); if (activeFocus && root.fixStage === "pick") root.confirmFixSpan() }
+                        Keys.onReturnPressed: root.submitFix()
+                        Keys.onEnterPressed: root.submitFix()
+                        Keys.onUpPressed: root.cycleFixKind(-1)
+                        Keys.onDownPressed: root.cycleFixKind(1)
+                        Keys.onEscapePressed: function(event) { root.cancelFix(); event.accepted = true }
+                    }
+                }
+                Row {
+                    spacing: Style.space(10)
+                    Text { anchors.verticalCenter: parent.verticalCenter; textFormat: Text.PlainText; text: "teach as"; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body }
+                    ButtonGroup {
+                        anchors.verticalCenter: parent.verticalCenter
+                        options: Model.FIX_KINDS
+                        value: root.fixKind
+                        focusable: false
+                        foreground: root.foreground; fontFamily: root.fontFamily; fontSize: Style.font.bodySmall
+                        onChanged: function(v) { root.fixKind = v }
+                    }
+                    Button { text: "Cancel"; bordered: true; foreground: root.foreground; fontFamily: root.fontFamily; fontSize: Style.font.bodySmall; onClicked: root.cancelFix() }
+                    Button { text: "Teach"; bordered: true; foreground: Commons.Color.accent; fontFamily: root.fontFamily; fontSize: Style.font.bodySmall
+                        enabled: root.fixStage === "type" && !service.mutating; onClicked: root.submitFix() }
+                }
+            }
+        }
+    }
+    // "Learn everywhere": exactly which files it writes, and that it needs a
+    // re-login. Nothing is written until the user presses Turn on.
+    component EverywhereCard: CursorSurface {
+        id: everywhere
+        readonly property var preview: root.everywherePreview
+        readonly property bool on: root.featureValue("learning", "everywhere", false) === true
+        width: parent ? parent.width : implicitWidth
+        bordered: true
+        foreground: root.foreground
+        implicitHeight: everyColumn.implicitHeight + Style.space(20)
+        Column {
+            id: everyColumn
+            anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+            anchors.margins: Style.space(12)
+            spacing: Style.space(6)
+            Text {
+                width: parent.width; wrapMode: Text.WordWrap; textFormat: Text.PlainText
+                text: everywhere.on ? "Learn everywhere is on. Turning it off removes only what it added:" : "Lets browsers and apps show their text to Voxtype, so a correction you type in place can be learned. It writes:"
+                color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body
+            }
+            Repeater {
+                model: everywhere.preview && everywhere.preview.files ? everywhere.preview.files.slice(0, 8) : []
+                delegate: Text {
+                    required property var modelData
+                    width: everyColumn.width; wrapMode: Text.WrapAnywhere; textFormat: Text.PlainText
+                    text: "· " + Model.sanitize(modelData.action, 20) + "  " + Model.sanitize(modelData.path, 120)
+                    color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption
+                }
+            }
+            Text {
+                visible: !everywhere.preview
+                textFormat: Text.PlainText; text: root.unavailable["learn.everywhere.preview"] ? Model.sanitize(root.unavailable["learn.everywhere.preview"], 80) : "Reading what it would change…"
+                color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption
+            }
+            Text {
+                visible: !!everywhere.preview && everywhere.preview.needs_relogin !== false
+                textFormat: Text.PlainText; text: "Log out and back in afterwards. Terminals still learn through History › Fix."
+                color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption
+            }
+            Row {
+                spacing: Style.space(8)
+                Button { text: everywhere.on ? "Turn off" : "Turn on"; bordered: true; foreground: root.foreground; fontFamily: root.fontFamily; fontSize: Style.font.bodySmall
+                    enabled: !!everywhere.preview && !service.mutating; onClicked: root.setEverywhere(!everywhere.on) }
+                Button { text: "Close"; bordered: true; foreground: root.foreground; fontFamily: root.fontFamily; fontSize: Style.font.bodySmall; onClicked: root.everywhereOpen = false }
             }
         }
     }

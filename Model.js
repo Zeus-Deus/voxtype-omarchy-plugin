@@ -1,8 +1,12 @@
 // Pure helpers for the Voxtype panel. No Qt imports: Node runs these directly
 // (tests/model.test.js) and the QML side imports the same file.
 
-var SECTIONS = ["dictate", "vocabulary", "dictionary", "settings", "models"];
-var SECTION_LABELS = {dictate: "Dictate", vocabulary: "Vocabulary", dictionary: "Dictionary", settings: "Settings", models: "Models"};
+var SECTIONS = ["home", "words", "history", "settings"];
+var SECTION_LABELS = {home: "Home", words: "Words", history: "History", settings: "Settings"};
+// Drill-in views and the section each one belongs to. Esc goes back to it.
+var DRILLS = {usage: "home", models: "settings", advanced: "settings", backup: "settings"};
+var DRILL_TITLES = {usage: "Usage", models: "Manage models", advanced: "All Voxtype settings", backup: "Backup"};
+var NEEDS_TUI_02 = "needs voxtype-tui 0.2 or newer";
 var TOKEN_LIMIT = 224;
 var TOKEN_AMBER = 200;
 var RESPONSE_CAP = 2 * 1024 * 1024;
@@ -143,7 +147,7 @@ function lockedState(status, error) {
     return null;
 }
 
-function heroMeta(status, error) {
+function heroMeta(status, error, shortcut) {
     if (error === ERROR_TUI_MISSING) return "voxtype-tui is not installed";
     if (status && status.voxtype_installed === false) return "Voxtype is not installed";
     if (status && status.config_exists === false) return "Not set up yet";
@@ -157,7 +161,43 @@ function heroMeta(status, error) {
     if (status.daemon.stale) return "Restart to apply changes";
     if (asrDown(status)) return "Qwen3-ASR server down";
     var model = status.model && status.model.name ? status.model.name : (status.engine || "");
-    return "Listening · " + model + " · " + hotkeyLabel(status.hotkey);
+    return "Ready · " + model + " · " + (shortcut ? shortcut : hotkeyLabel(status.hotkey));
+}
+
+// The Home hero: one word and how to start. Same precedence as heroMeta.
+function homeState(status, shortcut) {
+    if (!status) return {title: "…", line: "", tone: "muted"};
+    var state = daemonState(status);
+    var model = status.model && status.model.name ? sanitize(status.model.name, 60) : "";
+    if (daemonStarting(status)) return {title: "Turning on", line: "Loading " + (model || "the model") + "…", tone: "muted"};
+    if (daemonFailed(status)) return {title: "Stopped", line: "Voxtype stopped unexpectedly · press o to turn it on", tone: "urgent"};
+    if (state === "stopped") return {title: "Off", line: "Model unloaded · press o to turn it on", tone: "muted"};
+    if (state === "recording") return {title: "Listening", line: "Speak now · press r or your shortcut to stop", tone: "accent"};
+    if (state === "transcribing") return {title: "Transcribing", line: "Writing it down…", tone: "accent"};
+    if (status.daemon.stale) return {title: "Restart to apply", line: "Saved changes load after a restart · Ctrl+R", tone: "accent"};
+    var how = shortcut ? "Press " + shortcut + " and talk" : "Press r to record";
+    return {title: "Ready", line: how + (model ? " · " + model : ""), tone: "normal"};
+}
+
+// shortcuts.list → the one shortcut worth naming plus a hold-to-talk key.
+// Toggle binds win (one press starts and stops); a start/stop pair on the
+// same key is "hold". voxtype's own hotkey is the fallback.
+function shortcutSummary(bindings, hotkey) {
+    var list = bindings || [];
+    var toggle = "", hold = "";
+    for (var i = 0; i < list.length; i++) {
+        var b = list[i];
+        if (!b || typeof b.keys !== "string" || b.keys === "") continue;
+        var keys = sanitize(b.keys, 40);
+        if (b.action === "toggle" && toggle === "") toggle = keys;
+        else if (b.action === "start" && hold === "") hold = keys;
+    }
+    if (toggle === "" && hold === "" && hotkey && hotkey.key && hotkey.enabled !== false) {
+        var hk = hotkeyLabel(hotkey);
+        if (hotkey.mode === "toggle") toggle = hk; else hold = hk;
+    }
+    var primary = toggle !== "" ? toggle : hold;
+    return {primary: primary, hold: toggle !== "" ? hold : "", isHold: toggle === "" && hold !== ""};
 }
 
 function primaryAction(status) {
@@ -464,13 +504,20 @@ function labelled(list) {
 // checks every key here is bound in Panel.qml and every bound key is hinted.
 function hintPairs(section, context) {
     var c = context || {};
-    if (c.editing) return section === "vocabulary" ? [["Enter", "add"], ["Esc", "back"]] : [["Enter", "save"], ["Esc", "cancel"]];
+    var view = c.view || "";
+    if (c.fixing) return [["←→", "word"], ["Enter", "next"], ["Esc", "cancel"]];
+    if (c.editing) return section === "words" ? [["Enter", "add"], ["Esc", "back"]] : (c.fixField ? [["↑↓", "kind"], ["Enter", "teach"], ["Esc", "cancel"]] : [["Enter", "save"], ["Esc", "cancel"]]);
     var move = c.cursorActive ? [] : [["↑↓", "move"]];
-    if (section === "dictate") return move.concat([["r", "record"], ["o", "on/off"], ["Ctrl+R", "restart"], ["1–5", "sections"]]);
-    if (section === "vocabulary") return move.concat([["/", "search"], ["a", "add"], ["x", "delete"], ["Tab", "next"]]);
-    if (section === "dictionary") return move.concat([["/", "search"], ["a", "add"], ["c", "category"], ["x", "delete"]]);
-    if (section === "settings") return move.concat([["Enter", "change"], ["u", "reset"], ["Tab", "next"]]);
-    if (section === "models") return move.concat([["Enter", "set active"], ["d", "download"], ["x", "delete"]]);
+    if (view === "usage") return [["Esc", "back"], ["r", "record"], ["1–4", "sections"]];
+    if (view === "models") return move.concat([["Enter", "set active"], ["d", "download"], ["x", "delete"], ["Esc", "back"]]);
+    if (view === "advanced") return move.concat([["Enter", "change"], ["u", "reset"], ["Esc", "back"]]);
+    if (view === "backup") return move.concat([["Enter", "open"], ["Esc", "back"]]);
+    if (section === "home") return move.concat([["r", "record"], ["o", "on/off"], ["u", "usage"], ["Ctrl+R", "restart"], ["1–4", "sections"]]);
+    // A learned row has its own verbs; the footer follows the cursor.
+    if (section === "words" && c.rowKind === "learned") return [["Enter", "accept"], ["p", "promote"], ["x", "reject"], ["d", "forget"]];
+    if (section === "words") return move.concat([["/", "search"], ["a", "add"], ["c", "type"], ["x", "delete"], ["A–Z", "jump"]]);
+    if (section === "history") return move.concat([["Enter", "open"], ["c", "copy"], ["f", "fix"], ["x", "delete"]]);
+    if (section === "settings") return move.concat([["←→", "change"], ["Enter", "open"], ["u", "reset"], ["1–4", "sections"]]);
     return [];
 }
 
@@ -531,7 +578,9 @@ function settingsTargets(config, engine, modelPath) {
     out = out.concat(["hotkey.key", "hotkey.mod.LEFTCTRL", "hotkey.mod.LEFTALT", "hotkey.mod.LEFTSHIFT", "hotkey.mod.LEFTMETA", "hotkey.mode", "hotkey.enabled",
                       "audio.device", "audio.max_duration_secs", "audio.feedback.enabled"]);
     if (feedback) out = out.concat(["audio.feedback.theme", "audio.feedback.volume"]);
-    out = out.concat(["output.mode", "output.fallback_to_clipboard", "output.auto_submit", "text.smart_auto_submit", "text.spoken_punctuation", "output.type_delay_ms",
+    if (settingValue(config, "audio.duck_media", false) === true) out.push("audio.duck_media_volume_percent");
+    out = out.concat(["output.mode", "output.fallback_to_clipboard", "output.auto_submit", "text.smart_auto_submit", "text.spoken_punctuation",
+                      "output.restore_clipboard", "output.shift_enter_newlines", "output.type_delay_ms",
                       "vad.enabled"]);
     if (vad) out = out.concat(["vad.threshold", "vad.model"]);
     out = out.concat(["output.post_process.command", "output.post_process.timeout_ms"]);
@@ -539,6 +588,8 @@ function settingsTargets(config, engine, modelPath) {
         out = out.concat(["whisper.remote_endpoint", "whisper.remote_model", "whisper.remote_timeout_secs"]);
         if (keySet) out.push("remote.clear");
     }
+    out = out.concat(["osd.position", "osd.opacity", "output.notification.on_transcription", "output.notification.on_recording_start",
+                      "output.notification.on_recording_stop", "output.notification.on_no_speech", "output.notification.urgency"]);
     return out.concat(["gpu.device", "gpu.enable", "gpu.disable"]);
 }
 
@@ -768,4 +819,560 @@ function notices(status, snapshot) {
         out.push({kind: "info", text: "Settings synced from " + sanitize(sync.applied_from, 60) + " — save any change to keep them"});
     (s.migrations_applied || []).forEach(function(m) { out.push({kind: "info", text: "Migrated: " + sanitize(m, 120)}); });
     return out;
+}
+
+
+// ===========================================================================
+// Layout B: Home · Words · History · Settings (+ drill-ins)
+// ===========================================================================
+
+function isDrill(view) { return Object.prototype.hasOwnProperty.call(DRILLS, String(view || "")); }
+function drillSection(view) { return isDrill(view) ? DRILLS[view] : ""; }
+function drillTitle(view) { return isDrill(view) ? DRILL_TITLES[view] : ""; }
+
+// ---- Words: vocabulary + dictionary (+ learned) as one list ---------------
+
+var WORD_TAGS = {spelling: "spelling", sounds_like: "sounds like", replace: "replace", capitalization: "capitalization"};
+var WORD_FILTERS = ["all", "spelling", "replace", "capitalization", "learned"];
+var WORD_FILTER_LABELS = {all: "All", spelling: "Spelling", replace: "Replace", capitalization: "Capitalization", learned: "Learned"};
+
+function sortKey(s) { return String(s || "").replace(/^[^A-Za-z0-9]+/, "").toLowerCase(); }
+
+function ruleTag(category) { return String(category || "") === "Capitalization" ? "capitalization" : "replace"; }
+
+// Your own words: every vocabulary phrase (spelling) and every dictionary
+// rule (replace / capitalization), A–Z by what gets written. `id` is unique
+// across both kinds so the cursor survives a reload.
+function wordRows(vocabulary, replacements) {
+    var out = [];
+    var i;
+    for (i = 0; i < (vocabulary || []).length; i++) {
+        var v = vocabulary[i];
+        if (!v || typeof v.phrase !== "string") continue;
+        out.push({id: "v:" + v.phrase, kind: "vocab", heard: "", written: v.phrase, tag: "spelling", phrase: v.phrase});
+    }
+    for (i = 0; i < (replacements || []).length; i++) {
+        var r = replacements[i];
+        if (!r || typeof r.from !== "string") continue;
+        out.push({id: "r:" + r.from, kind: "rule", heard: r.from, written: String(r.to || ""), tag: ruleTag(r.category), from: r.from, category: r.category});
+    }
+    out.sort(function(a, b) {
+        var x = sortKey(a.written), y = sortKey(b.written);
+        return x < y ? -1 : (x > y ? 1 : (a.id < b.id ? -1 : 1));
+    });
+    return out;
+}
+
+var LEARN_STATE_LABELS = {active: "learned", suggested: "suggested", dormant: "paused", rejected: "rejected", promoted: "promoted"};
+
+// Learned entries (learn.list), kept apart from the user's words. Rejected
+// and promoted ones are history, not vocabulary: hidden here.
+function learnedRows(entries) {
+    var out = [];
+    for (var i = 0; i < (entries || []).length; i++) {
+        var e = entries[i];
+        if (!e || typeof e.id !== "string" || typeof e.written !== "string") continue;
+        if (e.state === "rejected" || e.state === "promoted") continue;
+        var heard = Array.isArray(e.heard) ? e.heard.join(", ") : String(e.heard || "");
+        out.push({id: "l:" + e.id, entryId: e.id, kind: "learned", heard: heard, written: e.written,
+                  tag: WORD_TAGS[e.kind] || String(e.kind || ""), state: String(e.state || ""),
+                  stateLabel: LEARN_STATE_LABELS[e.state] || String(e.state || "")});
+    }
+    out.sort(function(a, b) {
+        // Suggestions first: they wait for a decision.
+        var sa = a.state === "suggested" ? 0 : 1, sb = b.state === "suggested" ? 0 : 1;
+        if (sa !== sb) return sa - sb;
+        var x = sortKey(a.written), y = sortKey(b.written);
+        return x < y ? -1 : (x > y ? 1 : 0);
+    });
+    return out;
+}
+
+function matchesQuery(row, q) {
+    if (!q) return true;
+    return String(row.written).toLowerCase().indexOf(q) !== -1 || String(row.heard).toLowerCase().indexOf(q) !== -1;
+}
+
+// What the Words list shows for a filter + search. Learned rows sit in their
+// own group after "Your words" (filter "learned" shows only them).
+function filterWords(mine, learned, filter, query) {
+    var q = normalize(query);
+    var f = WORD_FILTERS.indexOf(filter) >= 0 ? filter : "all";
+    var own = [], lrn = [];
+    var i;
+    if (f !== "learned")
+        for (i = 0; i < (mine || []).length; i++)
+            if ((f === "all" || mine[i].tag === f) && matchesQuery(mine[i], q)) own.push(mine[i]);
+    if (f === "all" || f === "learned")
+        for (i = 0; i < (learned || []).length; i++)
+            if (matchesQuery(learned[i], q)) lrn.push(learned[i]);
+    return {mine: own, learned: lrn, rows: own.concat(lrn)};
+}
+
+function wordFilters(mine, learned) {
+    var counts = {all: (mine || []).length + (learned || []).length, spelling: 0, replace: 0, capitalization: 0, learned: (learned || []).length};
+    for (var i = 0; i < (mine || []).length; i++) if (counts[mine[i].tag] !== undefined) counts[mine[i].tag]++;
+    var out = [];
+    for (var j = 0; j < WORD_FILTERS.length; j++) {
+        var f = WORD_FILTERS[j];
+        if (f !== "all" && counts[f] === 0) continue;
+        out.push({value: f, label: WORD_FILTER_LABELS[f] + " " + counts[f], count: counts[f]});
+    }
+    return out;
+}
+
+// The one add field: "Codemux" adds a word, "code mucks → Codemux" (or ->,
+// =>) adds a rule.
+function parseWordInput(text) {
+    var s = String(text || "").trim();
+    if (s === "") return null;
+    var m = /^(.*?)\s*(?:→|->|=>)\s*(.*)$/.exec(s);
+    if (m) {
+        var from = m[1].trim(), to = m[2].trim();
+        if (from === "" || to === "") return {kind: "invalid", reason: "Write it as: heard → written"};
+        return {kind: "rule", from: from, to: to};
+    }
+    return {kind: "vocab", phrase: s};
+}
+
+// A–Z jump: first row whose written form starts with `letter`, else the
+// next letter that has one; -1 when nothing follows.
+function letterIndex(rows, letter) {
+    var l = String(letter || "").toLowerCase();
+    if (!/^[a-z]$/.test(l)) return -1;
+    var best = -1;
+    for (var i = 0; i < (rows || []).length; i++) {
+        var k = sortKey(rows[i].written);
+        var c = k.charAt(0);
+        if (c === l) return i;
+        if (best < 0 && c > l && /[a-z]/.test(c)) best = i;
+    }
+    return best;
+}
+
+// ---- History ---------------------------------------------------------------
+
+function pad2(n) { return (n < 10 ? "0" : "") + n; }
+function dayKey(d) { return d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()); }
+
+function recordDate(rec) {
+    var t = rec && (rec.ts || rec.started_at);
+    var d = t ? new Date(t) : null;
+    return d && !isNaN(d.getTime()) ? d : null;
+}
+
+function dayLabel(d, now) {
+    var today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    var that = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    var diff = Math.round((today - that) / 86400000);
+    if (diff === 0) return "Today";
+    if (diff === 1) return "Yesterday";
+    var months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    var days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    if (diff > 1 && diff < 7) return days[d.getDay()];
+    return d.getDate() + " " + months[d.getMonth()] + (d.getFullYear() !== now.getFullYear() ? " " + d.getFullYear() : "");
+}
+
+function recordText(rec) { return String(rec && (rec.final !== undefined && rec.final !== null ? rec.final : rec.raw) || ""); }
+function wordCount(text) { var t = String(text || "").trim(); return t === "" ? 0 : t.split(/\s+/).length; }
+
+// Flat display list: a header per day ("Today · 4 dictations · 49 words")
+// then its rows. `index` on item rows is the cursor index among items only.
+function historyRows(items, query, now) {
+    var q = normalize(query);
+    var n = now || new Date();
+    var out = [];
+    var lastKey = "", header = null, idx = 0;
+    for (var i = 0; i < (items || []).length; i++) {
+        var rec = items[i];
+        if (!rec || typeof rec.id !== "string") continue;
+        var text = recordText(rec);
+        if (q && text.toLowerCase().indexOf(q) === -1 && String(rec.raw || "").toLowerCase().indexOf(q) === -1) continue;
+        var d = recordDate(rec);
+        var key = d ? dayKey(d) : "unknown";
+        if (key !== lastKey) {
+            header = {type: "day", key: key, label: d ? dayLabel(d, n) : "Earlier", count: 0, words: 0};
+            out.push(header);
+            lastKey = key;
+        }
+        var words = typeof rec.words === "number" ? rec.words : wordCount(text);
+        header.count++;
+        header.words += words;
+        out.push({type: "item", index: idx++, id: rec.id, time: d ? pad2(d.getHours()) + ":" + pad2(d.getMinutes()) : "--:--",
+                  text: sanitize(text, 400), words: words, record: rec});
+    }
+    for (var j = 0; j < out.length; j++)
+        if (out[j].type === "day") out[j].meta = out[j].count + " dictation" + (out[j].count === 1 ? "" : "s") + " · " + out[j].words + " words";
+    return out;
+}
+
+function historyItems(rows) {
+    var out = [];
+    for (var i = 0; i < (rows || []).length; i++) if (rows[i].type === "item") out.push(rows[i]);
+    return out;
+}
+
+var KEEP_OPTIONS = [{value: 7, label: "1 week"}, {value: 30, label: "1 month"}, {value: 90, label: "3 months"},
+                    {value: 365, label: "1 year"}, {value: null, label: "forever"}];
+
+function keepLabel(days) {
+    for (var i = 0; i < KEEP_OPTIONS.length; i++) if (KEEP_OPTIONS[i].value === (days === undefined ? 30 : days)) return KEEP_OPTIONS[i].label;
+    return days + " days";
+}
+
+function retentionLine(enabled, keepDays, archive) {
+    if (enabled === false) return "History is off · nothing new is saved";
+    var audio = archive && archive.enabled && archive.save_audio ? "audio archived" : "audio not saved";
+    return "Text only on this machine, kept " + keepLabel(keepDays) + " · " + audio;
+}
+
+// Raw-vs-final: the raw transcript as words, each marked when it did not
+// survive into the final text (longest common subsequence on words).
+function diffWords(raw, finalText) {
+    var a = String(raw || "").split(/\s+/).filter(function(w) { return w !== ""; });
+    var b = String(finalText || "").split(/\s+/).filter(function(w) { return w !== ""; });
+    if (a.length > 400 || b.length > 400) return [{text: sanitize(a.join(" "), 2000), changed: false}];
+    var n = a.length, m = b.length;
+    var dp = [];
+    var i, j;
+    for (i = 0; i <= n; i++) { dp.push(new Array(m + 1)); for (j = 0; j <= m; j++) dp[i][j] = 0; }
+    for (i = n - 1; i >= 0; i--)
+        for (j = m - 1; j >= 0; j--)
+            dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    var out = [];
+    i = 0; j = 0;
+    while (i < n) {
+        if (j < m && a[i] === b[j]) { out.push({text: sanitize(a[i], 80), changed: false}); i++; j++; }
+        else if (j < m && dp[i][j + 1] > dp[i + 1][j]) j++;
+        else { out.push({text: sanitize(a[i], 80), changed: true}); i++; }
+    }
+    return out;
+}
+
+function changedByRules(raw, finalText) { return String(raw || "").trim() !== String(finalText || "").trim(); }
+
+// ---- Fix a word -------------------------------------------------------------
+
+// The words of a dictation as clickable tokens: leading/trailing
+// punctuation is kept aside so "Omashi." offers "Omashi".
+var FIX_EDGE = /^([\"'“”‘’«»(\[{¿¡]*)(.*?)([\"'“”‘’«»)\]}.,!?;:…]*)$/;
+function fixTokens(text) {
+    var parts = String(text || "").split(/\s+/).filter(function(w) { return w !== ""; });
+    var out = [];
+    for (var i = 0; i < parts.length && i < 200; i++) {
+        var m = FIX_EDGE.exec(parts[i]);
+        out.push({index: i, raw: parts[i], lead: m ? m[1] : "", word: m ? m[2] : parts[i], trail: m ? m[3] : ""});
+    }
+    return out;
+}
+
+function clampSpan(tokens, start, end) {
+    var n = (tokens || []).length;
+    if (n === 0) return {start: -1, end: -1};
+    var a = clamp(Math.min(start, end), 0, n - 1), b = clamp(Math.max(start, end), 0, n - 1);
+    return {start: a, end: b};
+}
+
+function spanText(tokens, start, end) {
+    var sp = clampSpan(tokens, start, end);
+    if (sp.start < 0) return "";
+    var words = [];
+    for (var i = sp.start; i <= sp.end; i++) words.push(tokens[i].word || tokens[i].raw);
+    return words.join(" ");
+}
+
+// The whole dictation with the chosen span replaced; punctuation that
+// framed the span stays ("Omashi." -> "Omarchy.").
+function fixedText(tokens, start, end, replacement) {
+    var sp = clampSpan(tokens, start, end);
+    var rep = String(replacement || "").replace(/[\r\n\t]+/g, " ").replace(UNSAFE_CHARS, "").trim();
+    if (sp.start < 0 || rep === "") return null;
+    var out = [];
+    for (var i = 0; i < tokens.length; i++) {
+        if (i < sp.start || i > sp.end) { out.push(tokens[i].raw); continue; }
+        if (i === sp.start) out.push(tokens[sp.start].lead + rep + tokens[sp.end].trail);
+    }
+    return out.join(" ");
+}
+
+var FIX_KINDS = [{value: "sounds_like", label: "sounds like"}, {value: "replace", label: "replace"}, {value: "spelling", label: "spelling"}];
+
+// A sensible first guess: same letters, different case/spacing → spelling;
+// a single short word → sounds like; anything else → replace.
+function guessFixKind(heard, written) {
+    var h = String(heard || "").toLowerCase().replace(/[\s-]+/g, ""), w = String(written || "").toLowerCase().replace(/[\s-]+/g, "");
+    if (h !== "" && h === w) return "spelling";
+    if (/\s/.test(String(written || "").trim()) && String(written).length > 24) return "replace";
+    return "sounds_like";
+}
+
+function cycleValue(options, current, delta) {
+    var list = options || [];
+    if (!list.length) return current;
+    var idx = -1;
+    for (var i = 0; i < list.length; i++) if (JSON.stringify(list[i].value) === JSON.stringify(current)) { idx = i; break; }
+    if (idx < 0) return list[0].value;
+    return list[(idx + delta + list.length) % list.length].value;
+}
+
+function optionLabel(options, value, fallback) {
+    for (var i = 0; i < (options || []).length; i++) if (JSON.stringify(options[i].value) === JSON.stringify(value)) return options[i].label;
+    return fallback !== undefined ? fallback : String(value);
+}
+
+// ---- Usage -----------------------------------------------------------------
+
+function compactNumber(n) {
+    var v = Number(n) || 0;
+    if (v >= 1000000) return (v / 1000000).toFixed(1).replace(/\.0$/, "") + "M";
+    if (v >= 10000) return Math.round(v / 1000) + "k";
+    if (v >= 1000) return (v / 1000).toFixed(1).replace(/\.0$/, "") + "k";
+    return String(Math.round(v));
+}
+
+function groupedNumber(n) { return String(Math.round(Number(n) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ","); }
+
+function formatDuration(seconds) {
+    var s = Math.max(0, Math.round(Number(seconds) || 0));
+    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+    if (h > 0) return h + "h " + m + "m";
+    if (m > 0) return m + "m";
+    return s + "s";
+}
+
+function savedLabel(seconds) {
+    if (seconds === null || seconds === undefined || !(Number(seconds) > 0)) return "";
+    var h = Number(seconds) / 3600;
+    if (h >= 1.5) return "≈ " + Math.round(h) + " h saved";
+    return "≈ " + Math.max(1, Math.round(Number(seconds) / 60)) + " min saved";
+}
+
+// days: [{date:"YYYY-MM-DD", dictations, words, seconds}] → 7×N grid ending
+// with the week of `end` (Sunday-first rows, like a contribution graph).
+// level 0..4 from quartiles of the non-zero days, so one huge day does
+// not flatten the rest.
+function heatmap(days, end, weeks) {
+    var W = weeks || 52;
+    var e = end ? new Date(end.getFullYear(), end.getMonth(), end.getDate()) : new Date();
+    var byDate = {};
+    var counts = [];
+    for (var i = 0; i < (days || []).length; i++) {
+        var d = days[i];
+        if (!d || typeof d.date !== "string") continue;
+        var c = Number(d.dictations) || 0;
+        byDate[d.date] = {count: c, words: Number(d.words) || 0};
+        if (c > 0) counts.push(c);
+    }
+    counts.sort(function(a, b) { return a - b; });
+    function q(p) { return counts.length ? counts[Math.min(counts.length - 1, Math.floor(p * counts.length))] : 0; }
+    var t1 = q(0.25), t2 = q(0.5), t3 = q(0.75);
+    var start = new Date(e.getFullYear(), e.getMonth(), e.getDate() - e.getDay() - (W - 1) * 7);
+    var cells = [], months = [];
+    var lastMonth = -1;
+    for (var w = 0; w < W; w++) {
+        for (var dow = 0; dow < 7; dow++) {
+            var day = new Date(start.getFullYear(), start.getMonth(), start.getDate() + w * 7 + dow);
+            if (day > e) continue;
+            var key = dayKey(day);
+            var v = byDate[key] ? byDate[key].count : 0;
+            var level = v <= 0 ? 0 : (v <= t1 ? 1 : (v <= t2 ? 2 : (v <= t3 ? 3 : 4)));
+            cells.push({week: w, day: dow, level: level, date: key, count: v, today: day.getTime() === e.getTime()});
+            if (dow === 0 && day.getMonth() !== lastMonth) {
+                lastMonth = day.getMonth();
+                if (w <= W - 3) months.push({week: w, label: ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][lastMonth]});
+            }
+        }
+    }
+    return {cells: cells, months: months, weeks: W};
+}
+
+function todayCount(days, now) {
+    var key = dayKey(now || new Date());
+    for (var i = 0; i < (days || []).length; i++) if (days[i] && days[i].date === key) return Number(days[i].dictations) || 0;
+    return 0;
+}
+
+// The four Home numbers and the Usage detail numbers. Unknown values are
+// shown as "–", never as a made-up 0.
+function usageNumbers(summary, now) {
+    var s = summary || {};
+    var t = s.totals || {};
+    return {
+        today: String(todayCount(s.days, now)),
+        words: compactNumber(t.words),
+        wordsFull: groupedNumber(t.words),
+        dictations: groupedNumber(t.dictations),
+        spoken: t.seconds ? formatDuration(t.seconds) : "–",
+        wpm: t.wpm === null || t.wpm === undefined ? "–" : String(Math.round(t.wpm)),
+        saved: savedLabel(t.saved_seconds),
+        typing: t.saved_seconds !== null && t.saved_seconds !== undefined && t.seconds ? formatDuration(Number(t.saved_seconds) + Number(t.seconds)) : ""
+    };
+}
+
+function hourBars(hours) {
+    var h = [];
+    var max = 0, best = -1;
+    for (var i = 0; i < 24; i++) {
+        var v = Number((hours || [])[i]) || 0;
+        h.push(v);
+        if (v > max) { max = v; best = i; }
+    }
+    var bars = h.map(function(v, i) { return {hour: i, value: max ? v / max : 0, top: i === best && max > 0}; });
+    return {bars: bars, busiest: best >= 0 ? "busiest at " + pad2(best) + ":00" : ""};
+}
+
+// A11 health: silent failure must never read as zero usage.
+function healthLine(health) {
+    if (!health) return "";
+    var parts = [];
+    var un = health.unavailable || [];
+    for (var i = 0; i < un.length && i < 2; i++) if (un[i] && un[i].reason) parts.push(sanitize(un[i].feature, 20) + ": " + sanitize(un[i].reason, 60));
+    if (health.dropped) parts.push(health.dropped + " dictation" + (health.dropped === 1 ? "" : "s") + " not counted");
+    var f = health.failures || [];
+    if (f.length) parts.push("last error: " + sanitize(f[f.length - 1].msg || f[f.length - 1].where, 60));
+    return parts.join(" · ");
+}
+
+// ---- Settings (simple rows) --------------------------------------------------
+
+// Whisper language codes (whisper.cpp's list, most used first).
+var LANGUAGES = [
+    {value: "auto", label: "Auto-detect"}, {value: "en", label: "English"}, {value: "de", label: "German"},
+    {value: "nl", label: "Dutch"}, {value: "fr", label: "French"}, {value: "es", label: "Spanish"},
+    {value: "it", label: "Italian"}, {value: "pt", label: "Portuguese"}, {value: "tr", label: "Turkish"},
+    {value: "pl", label: "Polish"}, {value: "sv", label: "Swedish"}, {value: "da", label: "Danish"},
+    {value: "no", label: "Norwegian"}, {value: "fi", label: "Finnish"}, {value: "cs", label: "Czech"},
+    {value: "uk", label: "Ukrainian"}, {value: "ru", label: "Russian"}, {value: "el", label: "Greek"},
+    {value: "ro", label: "Romanian"}, {value: "hu", label: "Hungarian"}, {value: "ar", label: "Arabic"},
+    {value: "he", label: "Hebrew"}, {value: "hi", label: "Hindi"}, {value: "ja", label: "Japanese"},
+    {value: "ko", label: "Korean"}, {value: "zh", label: "Chinese"}, {value: "id", label: "Indonesian"},
+    {value: "vi", label: "Vietnamese"}, {value: "th", label: "Thai"}
+];
+
+var HOTKEY_MODE_OPTIONS = [{value: "push_to_talk", label: "Hold to talk"}, {value: "toggle", label: "Toggle"}];
+var OUTPUT_MODE_OPTIONS = [{value: "type", label: "Typing"}, {value: "clipboard", label: "Clipboard"}, {value: "paste", label: "Paste"}];
+var INDICATOR_OPTIONS = [{value: "off", label: "Off"}, {value: "compact", label: "Pill"}, {value: "wide", label: "Wide"},
+                         {value: "minimal", label: "Minimal"}, {value: "orb", label: "Orb"}, {value: "tile", label: "Tile"}];
+var OSD_POSITIONS = ["bottom-center", "top-center", "bottom-left", "bottom-right", "top-left", "top-right"];
+var OTHER_AUDIO_OPTIONS = [{value: "leave", label: "Leave"}, {value: "lower", label: "Lower"}, {value: "pause", label: "Pause"}];
+
+// Voxtype's built-in defaults (voxtype 1.1.1 `voxtype config schema`) for
+// the keys whose absence the panel has to read as a value.
+var SETTING_DEFAULTS = {
+    "engine": "whisper", "whisper.language": "en", "hotkey.mode": "push_to_talk", "hotkey.enabled": true,
+    "audio.device": "default", "audio.max_duration_secs": 60, "audio.feedback.enabled": true, "audio.feedback.theme": "default",
+    "audio.feedback.volume": 0.5, "output.mode": "type", "output.fallback_to_clipboard": true, "output.auto_submit": false,
+    "output.type_delay_ms": 0, "output.post_process.timeout_ms": 5000, "text.spoken_punctuation": false,
+    "text.smart_auto_submit": false, "vad.enabled": false, "vad.threshold": 0.5, "whisper.remote_timeout_secs": 30,
+    "audio.pause_media": false, "audio.duck_media": false, "audio.duck_media_volume_percent": 34, "audio.duck_media_fade_ms": 150,
+    "osd.enabled": true, "osd.layout": "compact", "osd.position": "bottom-center", "osd.opacity": 0.95,
+    "text.filter_filler_words": true, "output.restore_clipboard": false, "output.shift_enter_newlines": false,
+    "output.notification.on_recording_start": false, "output.notification.on_recording_stop": false,
+    "output.notification.on_transcription": true, "output.notification.on_no_speech": true, "output.notification.urgency": "normal"
+};
+
+function settingOr(config, path) { return settingValue(config, path, SETTING_DEFAULTS[path]); }
+
+function indicatorValue(config) {
+    if (settingOr(config, "osd.enabled") === false) return "off";
+    return String(settingOr(config, "osd.layout"));
+}
+// [path, value] writes for an indicator pick. Off keeps the layout.
+function indicatorWrites(value) {
+    if (value === "off") return [["osd.enabled", false]];
+    return [["osd.enabled", true], ["osd.layout", value]];
+}
+
+function otherAudioValue(config) {
+    if (settingOr(config, "audio.duck_media") === true) return "lower";
+    if (settingOr(config, "audio.pause_media") === true) return "pause";
+    return "leave";
+}
+function otherAudioWrites(value) {
+    return [["audio.duck_media", value === "lower"], ["audio.pause_media", value === "pause"]];
+}
+
+// "N changed" for a drill-in: keys set to something other than voxtype's
+// default (a key whose default the panel does not know counts when set).
+function changedCount(config, paths) {
+    var n = 0;
+    for (var i = 0; i < (paths || []).length; i++) {
+        var p = paths[i];
+        if (!settingIsSet(config, p)) continue;
+        if (!(p in SETTING_DEFAULTS) || JSON.stringify(config[p]) !== JSON.stringify(SETTING_DEFAULTS[p])) n++;
+    }
+    return n;
+}
+
+// Every key the All-settings drill-in edits (its "N changed" badge).
+var ADVANCED_PATHS = ["engine", "hotkey.key", "hotkey.modifiers", "hotkey.enabled", "audio.device", "audio.max_duration_secs",
+    "audio.feedback.theme", "audio.feedback.volume", "audio.duck_media_volume_percent", "output.fallback_to_clipboard",
+    "output.auto_submit", "text.smart_auto_submit", "output.type_delay_ms", "output.restore_clipboard", "output.shift_enter_newlines",
+    "vad.enabled", "vad.threshold", "vad.model", "output.post_process.command", "output.post_process.timeout_ms",
+    "whisper.remote_endpoint", "whisper.remote_model", "whisper.remote_timeout_secs", "osd.position", "osd.opacity",
+    "output.notification.on_recording_start", "output.notification.on_recording_stop", "output.notification.on_transcription",
+    "output.notification.on_no_speech", "output.notification.urgency"];
+
+// Settings › simple rows, top to bottom (the cursor order). Rows that need
+// voxtype-tui 0.2 are present but say so; the archive details appear only
+// while the archive is on.
+function simpleSettingsTargets(ctx) {
+    var c = ctx || {};
+    var out = ["model", "drill.models", "language", "shortcut", "mode", "indicator", "sounds", "other_audio",
+               "output_mode", "spoken_punctuation", "filler_words", "login", "usage", "history", "keep"];
+    if (c.whisper === false) out.splice(out.indexOf("language"), 1);
+    out.push("archive");
+    if (c.archiveOn) out = out.concat(["archive.dir", "archive.audio", "archive.text"]);
+    out.push("learning");
+    if (c.learningOn && c.everywhereAvailable) out.push("everywhere");
+    return out.concat(["drill.advanced", "drill.backup"]);
+}
+
+// Downloaded models of the current engine, for the Settings › Model cycler.
+function modelCycleOptions(rows, current) {
+    var out = [];
+    var seen = false;
+    for (var i = 0; i < (rows || []).length; i++) {
+        var m = rows[i];
+        if (!m || !m.name || !m.downloaded || modelUnavailable(m) || m.incomplete === true) continue;
+        if (m.name === current) seen = true;
+        out.push({value: m.name, label: sanitize(m.name, 60)});
+    }
+    if (current && !seen) out.unshift({value: current, label: sanitize(current, 60)});
+    return out;
+}
+
+function modelsSummary(rows) {
+    var n = 0, bytes = 0;
+    for (var i = 0; i < (rows || []).length; i++) {
+        if (!rows[i] || !rows[i].downloaded) continue;
+        n++;
+        bytes += Number(rows[i].on_disk_bytes) || (Number(rows[i].size_mb) || 0) * 1000000;
+    }
+    return n === 0 ? "none downloaded" : n + " downloaded" + (bytes ? " · " + formatBytes(bytes) : "");
+}
+
+var HISTORY_PAGE = 30;
+
+function findRecord(items, id) {
+    if (!id) return null;
+    for (var i = 0; i < (items || []).length; i++) if (items[i] && items[i].id === id) return items[i];
+    return null;
+}
+
+// "Omashi → Omarchy" for the footer after a Fix.
+function learnSummary(entries) {
+    var e = (entries || [])[0];
+    if (!e) return "";
+    var heard = Array.isArray(e.heard) ? e.heard[0] : e.heard;
+    var s = (heard ? sanitize(heard, 30) + " → " : "") + sanitize(e.written, 30);
+    return entries.length > 1 ? s + " +" + (entries.length - 1) : s;
+}
+
+// `u` on a simple Settings row resets the voxtype key behind it.
+var SIMPLE_PATHS = {language: "whisper.language", mode: "hotkey.mode", sounds: "audio.feedback.enabled", output_mode: "output.mode",
+                    spoken_punctuation: "text.spoken_punctuation", filler_words: "text.filter_filler_words"};
+function simpleSettingPath(key, modelPath) {
+    if (key === "model") return String(modelPath || "");
+    return Object.prototype.hasOwnProperty.call(SIMPLE_PATHS, key) ? SIMPLE_PATHS[key] : "";
 }

@@ -31,7 +31,9 @@ test('hotkey labels read like the hero line', () => {
 
 test('hero meta and primary action follow the design table', () => {
   const base = {voxtype_installed: true, daemon: {active: true, state: 'idle', stale: false}, model: {name: 'large-v3'}, hotkey: {key: 'X', modifiers: ['LEFTCTRL']}};
-  assert.equal(Model.heroMeta(base, ''), 'Listening · large-v3 · Ctrl+X');
+  // Idle is "Ready"; "Listening" is the Home hero's word for recording.
+  assert.equal(Model.heroMeta(base, ''), 'Ready · large-v3 · Ctrl+X');
+  assert.equal(Model.heroMeta(base, '', 'Super+Ctrl+X'), 'Ready · large-v3 · Super+Ctrl+X', 'a Hyprland shortcut wins over the disabled built-in hotkey');
   assert.equal(Model.primaryAction(base), 'record');
   const stale = Object.assign({}, base, {daemon: {active: true, state: 'idle', stale: true}});
   assert.equal(Model.heroMeta(stale, ''), 'Restart to apply changes');
@@ -199,11 +201,15 @@ test('settings helpers', () => {
 });
 
 test('section navigation and footer', () => {
-  assert.equal(Model.nextSection('dictate', 1), 'vocabulary');
-  assert.equal(Model.nextSection('dictate', -1), 'models');
-  assert.equal(Model.nextSection('bogus', 1), 'vocabulary');
-  assert.equal(Model.sectionForKey('3'), 'dictionary');
+  assert.equal(Model.nextSection('home', 1), 'words');
+  assert.equal(Model.nextSection('home', -1), 'settings');
+  assert.equal(Model.nextSection('bogus', 1), 'words');
+  assert.equal(Model.sectionForKey('3'), 'history');
+  assert.equal(Model.sectionForKey('5'), '', 'four sections: 5 is no longer a key');
   assert.equal(Model.sectionForKey('9'), '');
+  assert.equal(Model.drillSection('models'), 'settings');
+  assert.equal(Model.drillSection('usage'), 'home');
+  assert.equal(Model.drillSection('bogus'), '');
   assert.equal(Model.sectionForKey('a'), '');
   for (const s of Model.SECTIONS) assert.ok(Model.sectionHints(s).length > 0);
   same(Model.footerNotice({error: 'boom', notice: 'x'}), {text: 'boom', urgent: true});
@@ -491,7 +497,7 @@ test('a down Qwen3-ASR server is a warning only while voxtype runs', () => {
   const up = {daemon: {active: true, state: 'idle', stale: false}, engine: 'qwen3-asr', model: {name: '0.6b-q4_k'}, hotkey: {key: 'X'},
               asr: {active: true, healthy: true, detail: 'ok'}};
   assert.equal(Model.asrDown(up), false);
-  assert.equal(Model.heroMeta(up, ''), 'Listening · 0.6b-q4_k · X');
+  assert.equal(Model.heroMeta(up, ''), 'Ready · 0.6b-q4_k · X');
   const down = Object.assign({}, up, {asr: {active: true, healthy: false, detail: 'not running'}});
   assert.equal(Model.asrDown(down), true);
   assert.equal(Model.heroMeta(down, ''), 'Qwen3-ASR server down');
