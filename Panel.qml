@@ -2187,6 +2187,15 @@ Panel {
                                         options: Model.plainOptions(Model.OSD_POSITIONS) }
                                     SettingSlider { settingKey: "osd.opacity"; label: "Opacity"; width: (parent.width - parent.spacing) / 2; fallback: 0.95 }
                                 }
+                                Row {
+                                    width: parent.width
+                                    spacing: Style.space(10)
+                                    // Unset = the package decides the colours (u resets it).
+                                    SettingDropdown { settingKey: "osd.palette"; label: "Colours"; width: (parent.width - parent.spacing) / 2; fallback: "package"
+                                        options: Model.plainOptions(["omarchy", "package", "fallback", "custom"]) }
+                                    SettingDropdown { settingKey: "osd.frontend"; label: "Drawn by"; width: (parent.width - parent.spacing) / 2; fallback: "gtk4"
+                                        options: Model.plainOptions(["gtk4", "native", "quickshell"]) }
+                                }
 
                                 PanelSeparator { width: parent.width; foreground: root.foreground }
                                 PanelSectionHeader { text: "NOTIFICATIONS"; foreground: root.foreground; fontFamily: root.fontFamily }

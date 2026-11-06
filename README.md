@@ -1,14 +1,14 @@
 # Voxtype for Omarchy
 
-A bar widget for **Omarchy Quattro** that manages [Voxtype](https://github.com/peteonrails/voxtype), Omarchy's bundled voice-to-text daemon: record, restart, vocabulary, dictionary rules, every setting, model downloads and backups — without opening `config.toml`.
+A bar widget for **Omarchy Quattro** that manages [Voxtype](https://github.com/peteonrails/voxtype), Omarchy's bundled voice-to-text daemon: record, restart, your words, recent dictations, every setting, model downloads and backups — without opening `config.toml`.
 
-| Dictate | Vocabulary | Dictionary |
+| Home | Words | History |
 |---|---|---|
-| ![Dictate section](docs/images/panel-dictate.png) | ![Vocabulary section](docs/images/panel-vocabulary.png) | ![Dictionary section](docs/images/panel-dictionary.png) |
+| ![Home](docs/images/panel-home.png) | ![Words](docs/images/panel-words.png) | ![History](docs/images/panel-history.png) |
 
-| Settings | Models |
+| Settings | Home › Usage |
 |---|---|
-| ![Settings section](docs/images/panel-settings.png) | ![Models section](docs/images/panel-models.png) |
+| ![Settings](docs/images/panel-settings.png) | ![Usage](docs/images/panel-usage.png) |
 
 ## Install
 
@@ -25,12 +25,12 @@ You need Voxtype itself and the `voxtype-tui` package (AUR: `voxtype-tui`) insta
 ## What the panel does
 
 - **Bar button** with the live daemon state: idle, recording (accent), transcribing, stopped. Left-click opens the panel, right-click toggles recording, middle-click restarts a stale daemon. The tooltip is the hero line.
-- **Dictate** — status card (state, engine + model, hotkey, output mode), Record, **Turn off / Turn on** and Restart buttons, a missing-model banner, and a *test a phrase* field that shows what the dictionary engine would type.
-- **Turn off / Turn on** (`o` on Dictate) stops the Voxtype service so its model leaves your GPU memory (or RAM on CPU) until you turn it back on. It is a plain `systemctl --user stop`: nothing is uninstalled or disabled, so Voxtype still starts at your next login. Turning on reloads the model (a few seconds for a large one). While it is off the hotkey does nothing and Restart will not quietly start it.
-- **Vocabulary** — search/add field (Enter adds), token meter `n / 224` (amber at 200, urgent at 224), delete on the cursor row (`x`, confirmed).
-- **Dictionary** — add `from → to` with a category chip, search, `c` cycles category, `x` deletes (confirmed).
-- **Settings** — engine & model, hotkey (key, modifier chips, mode, enabled), audio (device, max duration, feedback theme/volume), output (mode, fallback, auto-submit, smart auto-submit, spoken punctuation, type delay), voice activity, post-processing, remote Whisper (endpoint, model, timeout, *API key is set* indicator + Clear — the key is never entered or shown here), GPU (backend status, device drop-in, Enable/Disable acceleration handed to your terminal for `sudo`). Changes are written immediately and validated by the bridge; restart-sensitive ones light **Restart to apply**.
-- **Models** — per-engine catalog with size and state, set active, download with progress and log tail (cancellable), delete (confirmed; refuses the active model). **Export…** writes a voxtype-tui bundle (secrets off by default); **Import…** opens a file chooser, previews the diff with dangerous rows highlighted, and asks before applying.
+- **Home** — one word for the state (Ready, Listening, Off, Restart to apply), the shortcut that starts dictation (read from your Hyprland binds, so Omarchy's Super+Ctrl+X / F9 show up), Record, **Turn off / Turn on** and Restart, a missing-model banner, the year of dictations as a small heatmap with four numbers, your last three dictations, and a *test a phrase* field. `u` opens **Usage**: totals, words per minute, time saved versus typing, when you dictate and with which model.
+- **Turn off / Turn on** (`o` on Home) stops the Voxtype service so its model leaves your GPU memory (or RAM on CPU) until you turn it back on. It is a plain `systemctl --user stop`: nothing is uninstalled or disabled, so Voxtype still starts at your next login. Turning on reloads the model (a few seconds for a large one). While it is off the hotkey does nothing and Restart will not quietly start it.
+- **Words** — your vocabulary and dictionary rules in one list, *heard → written*: type `Codemux` to add a word, `code mucks → Codemux` to add a rule; the same field searches. Filter chips, A–Z jump (Shift+letter), `c` cycles a rule between Replacement and Capitalization, `x` deletes (confirmed), and the prompt meter `n / 224` (amber at 200, urgent at 224). Words Voxtype **learned** from your corrections sit in their own group: Enter accepts, `p` adds one to your own words, `x` rejects, `d` forgets.
+- **History** — dictations grouped by day, searchable. Open one to see the full text and, where your rules changed it, what Voxtype heard. **Copy**, **Delete**, **Clear all**, and **Fix a word**: pick the misheard word(s), type the right one, choose spelling / sounds like / replace, and Voxtype uses it from the next dictation on.
+- **Settings** — the everyday rows first (model, language, shortcut, mode, indicator, sounds, other audio while dictating, how text is inserted, spoken punctuation, filler words, start at login, usage / history / archive / learning). Three drill-ins keep everything else one step away: **Manage models** (per-engine catalog, set active, download with progress and log tail, delete), **All Voxtype settings** (engine, hotkey, audio, output, voice activity, post-processing, remote Whisper with an *API key is set* indicator — the key is never entered or shown — indicator details, notifications, GPU) and **Backup** (Export… / Import… with a previewed diff). A drill-in shows how many of its settings you changed. Changes are written immediately and validated by the bridge; restart-sensitive ones light **Restart to apply**.
+- Usage, History and learned words need **voxtype-tui 0.2** or newer; with an older one those parts say so and everything else works as before.
 - Honest states: Voxtype not installed, voxtype-tui missing, installed but not set up (copyable `voxtype setup` hint — never run for you), daemon stopped, stale config, model missing, empty lists, bridge errors in the footer.
 
 ## Which model?
@@ -46,7 +46,7 @@ dictionary on. Your results will vary.
 
 ## Keyboard
 
-`1`–`5` jump to a section, `Tab`/`Shift+Tab` cycle, `↑↓`/`j k` move the cursor, `Enter`/`Space` activate, `←→` nudge sliders, `/` or `Ctrl+F` focus search, `a` add, `c` cycle category, `d` download, `u` reset a setting to its default, `x` delete, `r` toggle recording, `o` turn Voxtype off/on (Dictate), `Ctrl+R` restart the daemon, `Esc` leaves a field, then closes the panel.
+`1`–`4` jump to a section, `Tab`/`Shift+Tab` cycle, `↑↓`/`j k` move the cursor, `Enter`/`Space` activate, `←→` change a setting or nudge a slider, `/` or `Ctrl+F` focus search, `a` add, `c` copy (History) or cycle a rule's category (Words), `f` fix a word, `p` keep a learned word, `d` download (models) or forget (learned), `u` open Usage (Home) or reset a setting to its default, `x` delete, `r` toggle recording, `o` turn Voxtype off/on (Home), `Ctrl+R` restart the daemon. `Esc` steps back one level: out of a field, Fix, an open dictation or a drill-in, then closes the panel.
 
 ## Dependencies
 
@@ -75,8 +75,12 @@ Plugins run unsandboxed inside `omarchy-shell`, so:
   is active, voxtype-tui also checks its local server's health on 127.0.0.1.
   Transcription itself belongs to Voxtype: Qwen3-ASR is local, while a remote
   Whisper endpoint you configure can send audio to that chosen server.
-- It never touches your audio or your transcripts. It edits configuration,
-  vocabulary and dictionary rules, and reads the daemon's state file.
+- It edits configuration, vocabulary and dictionary rules, and reads the
+  daemon's state file. With voxtype-tui 0.2, voxtype-tui keeps a local
+  history of your dictations (text only unless you turn on the archive;
+  files are `0600`, pruned after the period you choose, never synced or
+  exported). The panel reads it only to show History and Usage, and it never
+  leaves the machine. It never records or reads audio itself.
 - Every process is a fixed argv array. Untrusted strings travel over stdin as
   JSON, never through a shell. There is no `shell=True`, `eval` or string-built
   command anywhere in the plugin.

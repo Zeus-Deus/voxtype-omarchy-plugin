@@ -588,7 +588,7 @@ function settingsTargets(config, engine, modelPath) {
         out = out.concat(["whisper.remote_endpoint", "whisper.remote_model", "whisper.remote_timeout_secs"]);
         if (keySet) out.push("remote.clear");
     }
-    out = out.concat(["osd.position", "osd.opacity", "output.notification.on_transcription", "output.notification.on_recording_start",
+    out = out.concat(["osd.position", "osd.opacity", "osd.palette", "osd.frontend", "output.notification.on_transcription", "output.notification.on_recording_start",
                       "output.notification.on_recording_stop", "output.notification.on_no_speech", "output.notification.urgency"]);
     return out.concat(["gpu.device", "gpu.enable", "gpu.disable"]);
 }
@@ -1310,7 +1310,7 @@ var ADVANCED_PATHS = ["engine", "hotkey.key", "hotkey.modifiers", "hotkey.enable
     "output.auto_submit", "text.smart_auto_submit", "output.type_delay_ms", "output.restore_clipboard", "output.shift_enter_newlines",
     "vad.enabled", "vad.threshold", "vad.model", "output.post_process.command", "output.post_process.timeout_ms",
     "whisper.remote_endpoint", "whisper.remote_model", "whisper.remote_timeout_secs", "osd.position", "osd.opacity",
-    "output.notification.on_recording_start", "output.notification.on_recording_stop", "output.notification.on_transcription",
+    "osd.palette", "osd.frontend", "output.notification.on_recording_start", "output.notification.on_recording_stop", "output.notification.on_transcription",
     "output.notification.on_no_speech", "output.notification.urgency"];
 
 // Settings › simple rows, top to bottom (the cursor order). Rows that need

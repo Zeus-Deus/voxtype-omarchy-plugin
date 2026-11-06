@@ -1178,7 +1178,11 @@ def test_dict_upsert_wires_post_process(env: Env):
     assert "text.replacements" in res["restart_needed"]
     cfg = env.config_dict()
     assert cfg["text"]["replacements"] == {"vox type": "Voxtype"}
-    assert cfg["output"]["post_process"]["command"] == "voxtype-tui-postprocess"
+    from voxtype_tui import config
+
+    # 0.2 wires an uninstall-safe form (it falls back to `cat`); 0.1.x the bare name.
+    wired = getattr(config, "POSTPROCESS_COMMAND", "voxtype-tui-postprocess")
+    assert cfg["output"]["post_process"]["command"] == wired
     res = env.ok("dict.upsert", **{"from": "vox type", "to": "Voxtype!", "category": "Capitalization"})
     assert res["snapshot"]["replacements"][0]["category"] == "Capitalization"
     assert res["snapshot"]["replacements"][0]["to"] == "Voxtype!"
@@ -3770,7 +3774,9 @@ def test_first_save_wires_capture_hook_on_tui_02(env: Env):
     wires the capture hook, and the reply says the daemon must restart."""
     env.features_json.unlink()
     res = env.ok("vocab.add", phrase="Omarchy")
-    assert "output.pre_recording_command" in res["restart_needed"], res["restart_needed"]
+    # The wiring is reconciled at load time (like a migration), so it is not in
+    # this save's restart_needed diff; the daemon is still marked stale.
+    assert res["daemon_stale"] is True
     hook = env.config_dict()["output"]["pre_recording_command"]
     assert "voxtype-tui" in hook
     feats = env.ok("features.get")

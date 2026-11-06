@@ -209,40 +209,75 @@ are the plugin's own `EditField.qml`, styled with the same kit tokens (see
 Security rules: the kit's `TextField`/`NumberField` read the clipboard).
 
 **Hero**: mic glyph (accent while recording), title "Voxtype", meta = daemon
-line ("Listening · large-v3 · Super+Ctrl+X" / "Transcribing…" / "Off · model unloaded" /
-"Turning on · loading model…" / "Restart to apply changes"), trailing control = primary action (Record /
-Restart / Turn on).
+line ("Ready · large-v3 · Super+Ctrl+X" / "Listening…" / "Transcribing…" /
+"Off · model unloaded" / "Turning on · loading model…" / "Restart to apply
+changes"), trailing control = primary action (Record / Restart / Turn on). The
+shortcut is the first Hyprland bind from `shortcuts.list` (Omarchy binds
+dictation there), falling back to voxtype's own hotkey when it is enabled.
 
-**Sections** (ButtonGroup, keys `1–5`, `Tab`/`Shift+Tab` cycle):
+**Sections** (ButtonGroup, keys `1–4`, `Tab`/`Shift+Tab` cycle) and drill-ins.
+A drill-in keeps its section's tab lit, shows a breadcrumb ("Settings ›
+Manage models   Esc back"), and `Esc` returns to the section. `Esc` always
+steps out one level: a field, Fix a word, an open dictation, a drill-in, then
+the panel. A click outside the panel still closes it outright.
 
-1. **Dictate** — status card (state, engine+model, hotkey, output mode), big
-   Record toggle, **Turn off / Turn on** (`o`; `daemon.stop` / `daemon.start`,
-   asks first if a dictation is in progress), Restart daemon, missing-model
-   banner, "test a phrase" field showing dictionary-engine output.
-2. **Vocabulary** — search + add field (Enter adds), token meter
-   `n / 224` (amber ≥ 200, urgent ≥ 224), cursor rows with delete action on
-   the cursor row only (`x` → confirm).
-3. **Dictionary** — add row (from → to, category chip), search, rows show
-   `from → to` + category chip; `c` cycles category; `x` deletes (confirm).
-4. **Settings** — grouped: Engine & model (engine dropdown; model dropdown
-   built from `models.list`; language), Hotkey (key, modifier toggles, mode,
-   built-in detect), Audio (device dropdown, max duration, feedback
-   on/theme/volume slider), Output (mode, fallback, auto-submit, smart
-   auto-submit, spoken punctuation, type delay), Voice activity (enable,
-   threshold slider, model path), Post-processing (command, timeout),
-   Remote (endpoint, model, timeout, "API key is set" indicator + Clear;
-   **no key entry field** — point at `VOXTYPE_WHISPER_API_KEY`), GPU
-   (backend text, detected GPUs, device dropdown → drop-in; Enable/Disable
-   acceleration open a terminal running `sudo voxtype setup gpu --enable`
-   after hiding the panel — never a password field). Every restart-sensitive
-   change lights the "Restart to apply" pill; changes are written immediately
-   (no separate Save — the bridge validates each write).
-5. **Models** — engine dropdown, rows `name · size · downloaded/active`,
-   actions: Set active, Download (progress bar + log tail, Cancel), Delete
-   (confirm; refuses active). Backup/Import: **Export…** (scope + include
-   secrets toggle, default `~/Downloads/voxtype-tui-export-YYYY-MM-DD.json`)
-   and **Import…** (hide panel → zenity file chooser → preview diff with
-   dangerous rows highlighted → confirm).
+1. **Home** — the state in one word, "Press <shortcut> and talk · <model>",
+   Record, **Turn off / Turn on** (`o`; `daemon.stop` / `daemon.start`, asks
+   first if a dictation is in progress), Restart, missing-model banner, the
+   year heatmap (52 × 7, accent levels) with today / words / wpm / time saved,
+   the last three dictations (Enter opens them in History) and the "test a
+   phrase" field. `u` → **Usage** drill-in (`usage.summary`): totals, saved
+   time versus `usage.typing_wpm`, hour-of-day bars, per-model counts, the
+   last capture failure from `health`.
+2. **Words** — vocabulary and dictionary rules as one list, sorted by what is
+   written: `heard → written` + a tag (spelling / replace / capitalization).
+   One field adds (`Codemux` → `vocab.add`; `code mucks → Codemux` →
+   `dict.upsert`) and searches. Filter chips, Shift+letter jumps, `c` cycles a
+   rule's category, `x` deletes (confirm). Column heads carry the prompt
+   meter `n / 224` (amber ≥ 200, urgent ≥ 224). Learned entries
+   (`learn.list`) are a separate group that never mixes with the user's own
+   lists and costs no prompt tokens: Enter accept, `p` promote (adds to the
+   user's lists, restart to apply), `x` reject, `d` forget, Reset all.
+3. **History** — `history.list` grouped by day, searchable, paged with
+   `before`. Enter opens a dictation: full text, "heard: …" with the words
+   the rules changed underlined, model · duration · app, **Copy** (`c`),
+   **Delete** (`x`), **Fix a word** (`f`): pick the misheard span (←→, `]`/`[`
+   widen/narrow, Enter), type the right spelling, choose spelling / sounds
+   like / replace, Teach → `learn.submit`. The footer says what was learned
+   or voxtype-tui's reason for learning nothing. The retention line and
+   **Clear all** (confirm) close the list.
+4. **Settings** — simple rows, everyday first: model, Manage models, language
+   (‹ › cycles Whisper ISO codes + auto), shortcut (read-only, from Hyprland),
+   mode; while dictating: indicator, sounds, other audio (pause / lower);
+   text: insert by, spoken punctuation, filler words; system: start at login
+   (`daemon.set_login`); history & usage: count usage, save history, keep for
+   (7 / 30 / 90 / 365 days / forever), archive (folder via the zenity
+   directory chooser, fixed argv); learning: learn from corrections, Learn
+   everywhere (a card that previews exactly which files it writes and that it
+   needs a re-login; nothing is written until Turn on). Drill-ins:
+   - **Manage models** — engine dropdown, rows `name · size · state`: Set
+     active, Download (progress + log tail, Cancel), Delete (confirm; refuses
+     active).
+   - **All Voxtype settings** — the full 0.3.2 Settings page: engine & model,
+     hotkey (key, modifier toggles, mode, enabled), audio (device, max
+     duration, feedback on/theme/volume, other-audio volume), output (mode,
+     fallback, auto-submit, smart auto-submit, type delay, restore clipboard,
+     Shift+Enter newlines), voice activity, post-processing, remote Whisper
+     (endpoint, model, timeout, "API key is set" + Clear; **no key entry
+     field**), indicator details (position, opacity, colours, frontend),
+     notifications, GPU (backend text, device drop-in, Enable/Disable
+     acceleration in a terminal). Its row shows "N changed".
+   - **Backup** — **Export…** (scope + include secrets, default
+     `~/Downloads/voxtype-tui-export-YYYY-MM-DD.json`) and **Import…** (hide
+     panel → zenity chooser → previewed diff, dangerous rows highlighted →
+     confirm).
+   Every restart-sensitive change lights "Restart to apply"; changes are
+   written immediately (no Save — the bridge validates each write).
+
+`tests/parity.test.js` pins that nothing was lost: every setting path the
+bridge accepts has a control, every op the 0.3.2 panel sent is still sent,
+every bridge op is sent or documented as headless, and every 0.3.2 key
+binding is still bound.
 
 **Footer**: left = live notice / error (urgent) / "Saved · restart to apply";
 right = key hints for the current section. Poll `status` every 2 s only
@@ -268,6 +303,14 @@ while the panel is open; the bar button polls the state file
   interpolated into shell. `bash -c` is not used.
 - The remote API key is never read back to QML; the bridge reports only
   `remote_api_key_set`. Clearing is `settings.unset`.
+- Dictation text exists on disk with voxtype-tui 0.2 (its `history.jsonl`,
+  `0600` in a `0700` dir, pruned to the chosen period; written by
+  voxtype-tui, never by the plugin). Only `history.list` returns it to QML,
+  one page of at most `HISTORY_PAGE_MAX` items, inside the normal response
+  cap (`learn.list` returns only the learned word pairs). `status` and
+  `usage.summary` carry no dictation text, and voxtype-tui's sync/export
+  never includes history or learned words. The panel shows it
+  in History and Home and copies it only on an explicit Copy.
 - Sudo-needing actions (GPU enable/disable) are handed to the user's
   terminal; the plugin never prompts for a password.
 - Export defaults `include_secrets=false`; import defaults
