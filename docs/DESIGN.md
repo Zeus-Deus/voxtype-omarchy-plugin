@@ -107,6 +107,38 @@ config once at start), so the panel lights the "Restart to apply" pill on
 | `daemon.start` / `daemon.stop` | — | `systemctl --user start|stop voxtype` → `{ok, message, daemon:{active, active_state, main_pid, started_at, start_monotonic_us, starts_at_login}, error?}` (`error` only when `ok:false`). This is the panel's on/off: `stop` ends the process, so the model leaves VRAM/RAM; it never runs `enable`/`disable`, so the unit still starts at the next login. |
 | `record.toggle` | — | `voxtype record toggle` → `{ok, message}`; on failure `{ok:false, error}` where `error` is the CLI's stderr (ANSI stripped), suffixed with "(daemon is not running)" when the unit is inactive, or `"voxtype record toggle exited N"` when the CLI was silent. Kept for the panel's Record button; the bar button may use it too. |
 
+### Insights ops (voxtype-tui 0.2+)
+
+Usage, History, the archive and learned words live in voxtype-tui 0.2
+(`voxtype_tui.features`, `.history`, `.learned`, `.learn_everywhere`). The
+bridge detects each module with `importlib.util.find_spec` (no import on
+`status`), lists them in `status.capabilities`, and on an older voxtype-tui
+every op below answers `{ok:false, error:"needs voxtype-tui 0.2 or newer",
+op, unavailable:"needs voxtype-tui 0.2 or newer"}` without touching disk. The
+panel greys the matching rows and shows the same sentence. Shapes are frozen
+(build contract A12); ids match `^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$`.
+
+| Op | Args | Result |
+|---|---|---|
+| `features.get` | — | `{ok, features, available:{usage, history, archive, learning, everywhere}, reasons:{feature:str}}` — `features` is voxtype-tui's settings block (keep days, archive dir, learning on/off…). |
+| `features.set` | `{patch:{group:{key:value}}}` — only `usage.{enabled, typing_wpm 5–300}`, `history.{enabled, keep_days 7/30/90/365/null}`, `archive.{enabled, dir, save_audio, save_text}`, `learning.{enabled, everywhere, notify}`; each leaf type-checked (`bool` never passes as a day count); `archive.dir` must be an existing absolute folder and is stored resolved | same as `features.get` + `restart_needed, daemon_stale`. A write op: refused while voxtype-tui is open, because it can rewire the `[output]` hooks in config.toml. |
+| `usage.summary` | `{days?}` (default 365, clamped 1–3660) | `{ok, enabled, days:[{date, dictations, words, seconds}], totals:{dictations, words, seconds, wpm, saved_seconds}, hours:[24], models:[{engine, model, dictations}], since, health}` — `wpm`/`saved_seconds` may be `null`. |
+| `history.list` | `{before?:id, limit?}` (limit 1–50, default 30) | `{ok, enabled, keep_days, items:[record], next:id|null}` — records carry `raw`, `final`, `model`, `duration_s`, `app`. |
+| `history.delete` | `{id}` | `{ok, removed}` |
+| `history.clear` | — | `{ok, removed}` |
+| `learn.list` | — | `{ok, enabled, everywhere, entries:[entry], counts:{active, suggested, dormant, rejected}}` |
+| `learn.submit` | `{id, edited, kind?:"spelling"|"sounds_like"|"replace"}` (edited ≤ 4096 chars) | `{ok, candidates:[{heard, written, kind}], applied:[entry]}` — the History › Fix a word path. Learned entries live in learned.json, apart from the user's own lists. |
+| `learn.accept` | `{id}` | `{ok, entry?}` |
+| `learn.reject` | `{id}` | `{ok, entry?}` |
+| `learn.promote` | `{id}` — copies the entry into the user's vocabulary / dictionary through the same save path as `vocab.add` / `dict.upsert` (a write op) | `{ok, entry?}` + the usual save reply (`snapshot, daemon_stale, …`) when the lists changed |
+| `learn.forget` | `{id}` | `{ok, entry?}` |
+| `learn.reset` | — | `{ok, removed}` |
+| `learn.everywhere.preview` | — | `{ok, files:[{path, action, diff}], needs_relogin, enabled}` — exactly what Learn everywhere would write (each `diff` capped at 4000 chars); nothing is written. |
+| `learn.everywhere.set` | `{enabled}` | `{ok, enabled, needs_relogin?, files?:[path]}` |
+| `daemon.set_login` | `{enabled}` — `systemctl --user enable|disable voxtype` (never starts or stops it) | `{ok, starts_at_login, message}` |
+| `shortcuts.list` | — | `{ok, bindings:[{keys, action:"toggle"|"start"|"stop", source:"hyprland"|"voxtype", release?}]}` — Hyprland binds from `hyprctl binds -j` (classic `exec, voxtype record …` binds and Omarchy 4's Lua binds matched by their "dictation" description) plus voxtype's own hotkey when it is enabled. |
+| `archive.pick_dir` | — | `{ok, dir|null}` — headless form of the panel's folder chooser: runs the fixed `zenity --file-selection --directory` argv; Cancel → `dir:null`; anything but an existing absolute folder is refused. The panel itself runs the same argv from Service.qml after hiding, then saves it with `features.set`. |
+
 ### Extra models (newer voxtype-tui)
 
 When the installed voxtype-tui has `voxtype_tui.extra_models` (feature-detected;

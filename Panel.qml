@@ -316,12 +316,17 @@ Panel {
         refreshAll();
         Qt.callLater(function() { keyCatcher.forceActiveFocus() });
     }
-    // Esc: leave Fix, then a drill-in, then close.
     function close() {
+        if (confirmation.opened) return;
+        controller.hide();
+    }
+    // Esc steps out one level: Fix, then a drill-in, then the panel. A click
+    // outside the panel still closes it outright (KeyboardPanel → close()).
+    function goBack() {
         if (confirmation.opened) return;
         if (fixStage !== "") { cancelFix(); return; }
         if (back()) return;
-        controller.hide();
+        close();
     }
     function closeForPopoutSwitch() {
         // The bar transfers ownership immediately; a file chooser opened by
@@ -1241,7 +1246,7 @@ Panel {
                     else root.moveCursorH(dx);
                 }
                 onActivateRequested: root.activateCursor()
-                onCloseRequested: root.close()
+                onCloseRequested: root.goBack()
                 onDeleteRequested: root.deleteSelected()
                 onTabRequested: function(direction) { root.cycleSection(direction) }
                 onTextKey: function(t) { root.handleTextKey(t) }

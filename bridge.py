@@ -430,6 +430,7 @@ EXTRA_SETTING_TYPES: dict[str, str] = {
     "audio.duck_media_volume_percent": "int",
     "audio.duck_media_fade_ms": "int",
     "osd.enabled": "bool",
+    "osd.frontend": "str",
     "osd.layout": "str",
     "osd.position": "str",
     "osd.palette": "str",
@@ -448,6 +449,7 @@ for _k, _v in EXTRA_SETTING_TYPES.items():
 
 # Enumerations from `voxtype config schema` (voxtype 1.1.1).
 SETTING_ENUMS: dict[str, tuple[str, ...]] = {
+    "osd.frontend": ("gtk4", "native", "quickshell"),
     "osd.layout": ("compact", "wide", "minimal", "tile", "orb", "custom"),
     "osd.position": ("bottom-center", "top-center", "bottom-left", "bottom-right", "top-left", "top-right"),
     "osd.palette": ("omarchy", "fallback", "package", "custom"),
@@ -1339,6 +1341,9 @@ REDACTED_IMPORT_PATHS = frozenset({
     "output.post_process.command",
     "output.pre_output_command",
     "output.post_output_command",
+    # A shell command too; voxtype-tui 0.2 adds it to SECRET_PATHS (its
+    # insights hooks own it), older releases do not list it.
+    "output.pre_recording_command",
 })
 
 
@@ -2119,9 +2124,12 @@ def op_record_toggle(args: dict, paths: Paths) -> dict[str, Any]:
 
 # Shown wherever a new section needs a voxtype-tui that has the module.
 NEEDS_TUI_02 = "needs voxtype-tui 0.2 or newer"
+# Panel-facing capability -> the voxtype-tui module behind it. Usage and
+# History share the `insights` facade (one call per op, A12 bodies without
+# `ok`); auto-learn ships `learned` and `learn_everywhere`.
 INSIGHT_MODULES = {
-    "features": "voxtype_tui.features",
-    "history": "voxtype_tui.history",
+    "features": "voxtype_tui.insights",
+    "history": "voxtype_tui.insights",
     "learned": "voxtype_tui.learned",
     "everywhere": "voxtype_tui.learn_everywhere",
 }
@@ -2156,32 +2164,35 @@ def _insight(key: str):
     return importlib.import_module(INSIGHT_MODULES[key])
 
 
-def _api(mod: Any, *names: str) -> Callable[..., Any]:
-    """First callable of ``names`` on ``mod``. Absent → unavailable (an API
-    mismatch must never look like an empty result)."""
-    for name in names:
-        fn = getattr(mod, name, None)
-        if callable(fn):
-            return fn
-    raise BridgeError(f"{mod.__name__} has no {names[0]}()", unavailable=NEEDS_TUI_02)
+def _api(mod: Any, name: str) -> Callable[..., Any]:
+    """``mod.name`` or a refusal: an API mismatch must never look like an
+    empty result."""
+    fn = getattr(mod, name, None)
+    if not callable(fn):
+        raise BridgeError(f"{mod.__name__} has no {name}()", unavailable=NEEDS_TUI_02)
+    return fn
 
 
-def _accepts(fn: Callable[..., Any], name: str) -> bool:
-    import inspect
-
+def _call(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Run a voxtype-tui API call with its documented error mapping:
+    ``ValueError`` -> ``{ok:false, error}``; ``insights.Unavailable(reason)``
+    -> ``{ok:false, error, unavailable}`` (the class is matched by name so
+    the learned / everywhere modules may raise their own)."""
     try:
-        params = inspect.signature(fn).parameters
-    except (TypeError, ValueError):
-        return False
-    return name in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+        return fn(*args, **kwargs)
+    except ValueError as exc:
+        raise BridgeError(str(exc) or "invalid request") from exc
+    except Exception as exc:
+        if type(exc).__name__ == "Unavailable":
+            reason = str(exc) or NEEDS_TUI_02
+            raise BridgeError(reason, unavailable=reason) from exc
+        raise
 
 
-def _as_dict(value: Any) -> dict[str, Any]:
-    if isinstance(value, dict):
-        return value
-    if hasattr(value, "__dict__"):
-        return dict(vars(value))
-    raise BridgeError("unexpected response from voxtype-tui")
+def _body(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise BridgeError("unexpected response from voxtype-tui")
+    return {k: v for k, v in value.items() if k != "ok"}
 
 
 def _require_id(args: dict, key: str = "id") -> str:
@@ -2189,11 +2200,6 @@ def _require_id(args: dict, key: str = "id") -> str:
     if not _RECORD_ID_RE.match(val):
         raise BridgeError(f"'{key}' is not a valid id")
     return val
-
-
-def _features_load() -> dict[str, Any]:
-    mod = _insight("features")
-    return _as_dict(_api(mod, "load")())
 
 
 def _config_hooks(paths: Paths) -> dict[str, Any]:
@@ -2209,69 +2215,28 @@ def _config_hooks(paths: Paths) -> dict[str, Any]:
     }
 
 
-POSTPROCESS_OURS = "voxtype-tui-postprocess"
-
-
-def _availability(paths: Paths, feats: dict[str, Any]) -> tuple[dict[str, bool], dict[str, str]]:
-    """Per-feature availability. voxtype-tui's own verdict wins when it has
-    one (``hooks.availability`` / ``features.availability``); otherwise the
-    bridge applies DESIGN A3/A6: a foreign post-process command means no
-    text capture, and a missing module means an older voxtype-tui."""
-    caps = _capabilities()
-    for modname, fname in (("voxtype_tui.hooks", "availability"), ("voxtype_tui.features", "availability")):
-        import importlib.util
-
-        try:
-            spec = importlib.util.find_spec(modname)
-        except (ImportError, ValueError):
-            spec = None
-        if spec is None:
-            continue
-        import importlib
-
-        fn = getattr(importlib.import_module(modname), fname, None)
-        if not callable(fn):
-            continue
-        try:
-            res = fn()
-        except TypeError:
-            res = None
-        except Exception:  # noqa: BLE001 — fall back to the bridge's own rule
-            res = None
-        if isinstance(res, dict) and isinstance(res.get("available"), dict):
-            avail = {k: bool(v) for k, v in res["available"].items()}
-            reasons = {k: str(v) for k, v in (res.get("reasons") or {}).items() if v}
-            for k in ("usage", "history", "archive", "learning", "everywhere"):
-                avail.setdefault(k, False)
-            return avail, reasons
-    avail = {
-        "usage": caps["history"],
-        "history": caps["history"],
-        "archive": caps["history"],
-        "learning": caps["learned"],
-        "everywhere": caps["everywhere"],
+def _features_reply(res: Any) -> dict[str, Any]:
+    body = _body(res)
+    avail = body.get("available") if isinstance(body.get("available"), dict) else {}
+    return {
+        "ok": True,
+        "features": body.get("features") if isinstance(body.get("features"), dict) else {},
+        "available": {k: bool(avail.get(k, False)) for k in ("usage", "history", "archive", "learning", "everywhere")},
+        "reasons": {str(k): str(v) for k, v in (body.get("reasons") or {}).items() if v},
     }
-    reasons = {k: NEEDS_TUI_02 for k, ok in avail.items() if not ok}
-    pp = _config_hooks(paths)["output.post_process.command"]
-    if isinstance(pp, str) and pp.strip() and pp.strip().split()[0].rsplit("/", 1)[-1] != POSTPROCESS_OURS:
-        for k in ("usage", "history", "archive"):
-            if avail[k]:
-                avail[k] = False
-                reasons[k] = "your own post-process command is set"
-    return avail, reasons
 
 
-def _features_reply(paths: Paths, feats: dict[str, Any]) -> dict[str, Any]:
-    avail, reasons = _availability(paths, feats)
-    return {"ok": True, "features": feats, "available": avail, "reasons": reasons}
+def _config_arg(paths: Paths) -> dict[str, Any]:
+    return {"config_path": paths.config}
 
 
 def op_features_get(args: dict, paths: Paths) -> dict[str, Any]:
-    return _features_reply(paths, _features_load())
+    mod = _insight("features")
+    return _features_reply(_call(_api(mod, "get_features"), **_config_arg(paths)))
 
 
 # What a panel patch may touch, and the type each leaf must have. Anything
-# else is refused before voxtype-tui sees it.
+# else is refused before voxtype-tui sees it (voxtype-tui validates again).
 FEATURE_PATCH_TYPES: dict[str, Any] = {
     "usage": {"enabled": bool, "typing_wpm": int},
     "history": {"enabled": bool, "keep_days": (int, type(None))},
@@ -2279,6 +2244,7 @@ FEATURE_PATCH_TYPES: dict[str, Any] = {
     "learning": {"enabled": bool, "everywhere": bool, "notify": bool},
 }
 KEEP_DAYS_CHOICES = (7, 30, 90, 365, None)
+TYPING_WPM_RANGE = (10, 200)
 
 
 def _validate_feature_patch(patch: Any) -> dict[str, Any]:
@@ -2301,8 +2267,9 @@ def _validate_feature_patch(patch: Any) -> dict[str, Any]:
     if "keep_days" in hist and hist["keep_days"] not in KEEP_DAYS_CHOICES:
         raise BridgeError("history.keep_days must be 7, 30, 90, 365 or null (forever)")
     wpm = (patch.get("usage") or {}).get("typing_wpm")
-    if wpm is not None and not 5 <= wpm <= 300:
-        raise BridgeError("usage.typing_wpm must be between 5 and 300")
+    lo, hi = TYPING_WPM_RANGE
+    if wpm is not None and not lo <= wpm <= hi:
+        raise BridgeError(f"usage.typing_wpm must be between {lo} and {hi}")
     arch = patch.get("archive") or {}
     if arch.get("dir") is not None:
         raw = arch["dir"]
@@ -2318,80 +2285,64 @@ def _validate_feature_patch(patch: Any) -> dict[str, Any]:
 def op_features_set(args: dict, paths: Paths) -> dict[str, Any]:
     patch = _validate_feature_patch(args.get("patch"))
     mod = _insight("features")
+    fn = _api(mod, "set_features")
     before = _config_hooks(paths)
     before_mtime = _mtime(paths.config)
-    feats = _as_dict(_api(mod, "update")(patch))
+    res = _call(fn, patch, **_config_arg(paths))
     after = _config_hooks(paths)
     changed = sorted(k for k in before if before[k] != after[k])
-    out = _features_reply(paths, feats)
+    out = _features_reply(res)
+    # voxtype reads its hooks at start: a rewired hook needs a restart.
+    if not changed and isinstance(res, dict) and res.get("restart_needed") is True:
+        changed = ["output.pre_recording_command"]
     out["restart_needed"] = changed
     out["daemon_stale"] = bool(changed) or _mtime(paths.config) != before_mtime
     return out
 
 
-def _days_arg(args: dict) -> int:
-    val = args.get("days", 365)
-    if isinstance(val, bool) or not isinstance(val, int) or not 1 <= val <= USAGE_DAYS_MAX:
-        raise BridgeError(f"'days' must be 1–{USAGE_DAYS_MAX}")
+def _int_arg(args: dict, key: str, default: int, lo: int, hi: int) -> int:
+    val = args.get(key, default)
+    if isinstance(val, bool) or not isinstance(val, int) or not lo <= val <= hi:
+        raise BridgeError(f"'{key}' must be {lo}–{hi}")
     return val
 
 
-def _feature_enabled(group: str) -> bool:
-    try:
-        feats = _features_load()
-    except BridgeError:
-        return False
-    return bool((feats.get(group) or {}).get("enabled", True))
-
-
 def op_usage_summary(args: dict, paths: Paths) -> dict[str, Any]:
-    days = _days_arg(args)
+    days = _int_arg(args, "days", 365, 1, USAGE_DAYS_MAX)
     mod = _insight("history")
-    res = _as_dict(_api(mod, "summary", "usage_summary")(days))
-    res = {k: v for k, v in res.items() if k != "ok"}
-    res.setdefault("enabled", _feature_enabled("usage"))
-    return {"ok": True, **res}
+    return {"ok": True, **_body(_call(_api(mod, "usage_summary"), days))}
 
 
 def op_history_list(args: dict, paths: Paths) -> dict[str, Any]:
-    before = args.get("before")
-    if before is not None:
-        before = _require_id(args, "before")
-    limit = args.get("limit", 30)
-    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= HISTORY_PAGE_MAX:
-        raise BridgeError(f"'limit' must be 1–{HISTORY_PAGE_MAX}")
+    before = _require_id(args, "before") if args.get("before") is not None else None
+    limit = _int_arg(args, "limit", 30, 1, HISTORY_PAGE_MAX)
     mod = _insight("history")
-    fn = _api(mod, "list_records", "list")
-    res = fn(before=before, limit=limit) if _accepts(fn, "before") else fn(before, limit)
-    res = _as_dict(res) if not isinstance(res, list) else {"items": res, "next": None}
-    feats = {}
-    try:
-        feats = _features_load()
-    except BridgeError:
-        pass
-    hist = feats.get("history") or {}
+    body = _body(_call(_api(mod, "history_list"), before, limit))
+    items = [i for i in (body.get("items") or []) if isinstance(i, dict)][:limit]
+    nxt = body.get("next")
     return {
         "ok": True,
-        "enabled": bool(res.get("enabled", hist.get("enabled", True))),
-        "keep_days": res.get("keep_days", hist.get("keep_days", 30)),
-        "items": list(res.get("items") or [])[:limit],
-        "next": res.get("next"),
+        "enabled": bool(body.get("enabled", True)),
+        "keep_days": body.get("keep_days"),
+        "items": items,
+        "next": nxt if isinstance(nxt, str) and _RECORD_ID_RE.match(nxt) else None,
     }
+
+
+def _removed(res: Any) -> int:
+    val = res.get("removed") if isinstance(res, dict) else res
+    return int(val) if isinstance(val, int) and not isinstance(val, bool) else 0
 
 
 def op_history_delete(args: dict, paths: Paths) -> dict[str, Any]:
     rid = _require_id(args)
     mod = _insight("history")
-    res = _api(mod, "delete", "delete_record")(rid)
-    removed = res.get("removed") if isinstance(res, dict) else res
-    return {"ok": True, "removed": int(removed or 0)}
+    return {"ok": True, "removed": _removed(_call(_api(mod, "history_delete"), rid))}
 
 
 def op_history_clear(args: dict, paths: Paths) -> dict[str, Any]:
     mod = _insight("history")
-    res = _api(mod, "clear")()
-    removed = res.get("removed") if isinstance(res, dict) else res
-    return {"ok": True, "removed": int(removed or 0)}
+    return {"ok": True, "removed": _removed(_call(_api(mod, "history_clear")))}
 
 
 LEARN_STATES = ("active", "suggested", "dormant", "rejected", "promoted")
@@ -2399,47 +2350,19 @@ LEARN_STATES = ("active", "suggested", "dormant", "rejected", "promoted")
 
 def op_learn_list(args: dict, paths: Paths) -> dict[str, Any]:
     mod = _insight("learned")
-    data = _as_dict(_api(mod, "load")())
-    entries = [e if isinstance(e, dict) else _as_dict(e) for e in (data.get("entries") or [])]
-    counts = {s: 0 for s in ("active", "suggested", "dormant", "rejected")}
-    for e in entries:
-        if e.get("state") in counts:
-            counts[e["state"]] += 1
-    feats: dict[str, Any] = {}
-    try:
-        feats = _features_load()
-    except BridgeError:
-        pass
-    learning = feats.get("learning") or {}
+    body = _body(_call(_api(mod, "list_entries")))
+    entries = [e for e in (body.get("entries") or []) if isinstance(e, dict)]
+    counts = {s: 0 for s in LEARN_STATES}
+    for k, v in (body.get("counts") or {}).items():
+        if k in counts and isinstance(v, int) and not isinstance(v, bool):
+            counts[k] = v
     return {
         "ok": True,
-        "enabled": bool(learning.get("enabled", data.get("enabled", True))),
-        "everywhere": bool(learning.get("everywhere", False)),
+        "enabled": bool(body.get("enabled", True)),
+        "everywhere": bool(body.get("everywhere", False)),
         "entries": entries,
         "counts": counts,
     }
-
-
-def _history_record(rid: str) -> dict[str, Any]:
-    mod = _insight("history")
-    get = getattr(mod, "get", None) or getattr(mod, "get_record", None)
-    if callable(get):
-        rec = get(rid)
-        if rec:
-            return _as_dict(rec)
-        raise BridgeError("that dictation is no longer in your history")
-    fn = _api(mod, "list_records", "list")
-    before = None
-    for _ in range(40):  # bounded walk: 40 pages × 50
-        res = fn(before=before, limit=HISTORY_PAGE_MAX) if _accepts(fn, "before") else fn(before, HISTORY_PAGE_MAX)
-        res = _as_dict(res) if not isinstance(res, list) else {"items": res, "next": None}
-        for item in res.get("items") or []:
-            if isinstance(item, dict) and item.get("id") == rid:
-                return item
-        before = res.get("next")
-        if not before:
-            break
-    raise BridgeError("that dictation is no longer in your history")
 
 
 def op_learn_submit(args: dict, paths: Paths) -> dict[str, Any]:
@@ -2451,72 +2374,117 @@ def op_learn_submit(args: dict, paths: Paths) -> dict[str, Any]:
     if kind is not None and kind not in LEARN_KINDS:
         raise BridgeError(f"'kind' must be one of {', '.join(LEARN_KINDS)}")
     mod = _insight("learned")
-    record = _history_record(rid)
-    fn = _api(mod, "submit_correction")
-    kwargs: dict[str, Any] = {}
-    if _accepts(fn, "source"):
-        kwargs["source"] = "fix"
-    if kind is not None and _accepts(fn, "kind"):
-        kwargs["kind"] = kind
-    res = _as_dict(fn(record, edited, **kwargs))
-    return {
+    res = _call(_api(mod, "submit_correction"), rid, edited, "fix", kind=kind)
+    if not isinstance(res, dict):
+        raise BridgeError("unexpected response from voxtype-tui")
+    if res.get("ok") is False:
+        raise BridgeError(str(res.get("reason") or res.get("error") or "nothing to learn"))
+    out: dict[str, Any] = {
         "ok": True,
-        "candidates": list(res.get("candidates") or []),
-        "applied": list(res.get("applied") or []),
+        "candidates": [c for c in (res.get("candidates") or []) if isinstance(c, dict)],
+        "applied": [e for e in (res.get("applied") or []) if isinstance(e, dict)],
+        "skipped": [x for x in (res.get("skipped") or []) if isinstance(x, dict)],
     }
+    if res.get("reason"):
+        out["reason"] = str(res["reason"])
+    return out
 
 
-def _learn_entry_op(verb: str, *aliases: str) -> Callable[[dict, Paths], dict[str, Any]]:
+def _learn_decision(verb: str) -> Callable[[dict, Paths], dict[str, Any]]:
+    """accept / reject: the entry, or None for an unknown id."""
     def op(args: dict, paths: Paths) -> dict[str, Any]:
         eid = _require_id(args)
-        mod = _insight("learned")
-        fn = _api(mod, verb, *aliases)
-        if _accepts(fn, "state"):
-            # Promote writes the user's own vocabulary / dictionary through
-            # the same AppState path vocab.add / dict.upsert use.
-            st = _load_state(paths)
-            res = fn(eid, state=st)
-            out = _save_and_reply(st) if st.dirty else {"ok": True}
-        else:
-            res = fn(eid)
-            out = {"ok": True}
-        if isinstance(res, dict):
-            out["entry"] = res.get("entry", res)
-        return out
+        res = _call(_api(_insight("learned"), verb), eid)
+        if not isinstance(res, dict):
+            raise BridgeError("no such learned entry")
+        return {"ok": True, "entry": res}
     op.__name__ = f"op_learn_{verb}"
     return op
 
 
-def op_learn_reset(args: dict, paths: Paths) -> dict[str, Any]:
+def op_learn_forget(args: dict, paths: Paths) -> dict[str, Any]:
+    eid = _require_id(args)
+    if _call(_api(_insight("learned"), "forget"), eid) is not True:
+        raise BridgeError("no such learned entry")
+    return {"ok": True, "removed": 1}
+
+
+def op_learn_promote(args: dict, paths: Paths) -> dict[str, Any]:
+    """Copy a learned entry into the user's own vocabulary / dictionary.
+    The additions go through the bridge's AppState path (the same one
+    vocab.add / dict.upsert use), so the save, sidecar and stale reply are
+    identical; learned.promote only decides what to add and marks the
+    entry promoted."""
+    eid = _require_id(args)
     mod = _insight("learned")
-    res = _api(mod, "reset")()
-    removed = res.get("removed") if isinstance(res, dict) else res
-    return {"ok": True, "removed": int(removed or 0) if not isinstance(removed, bool) else 0}
+    fn = _api(mod, "promote")
+    additions = _api(mod, "user_additions")
+    saved: dict[str, Any] = {}
+
+    def add_to_user(entry: Any) -> dict[str, Any]:
+        from voxtype_tui import sidecar
+
+        add = additions(entry)
+        st = _load_state(paths)
+        done: dict[str, list] = {"vocab": [], "rules": []}
+        for phrase in add.get("vocab") or []:
+            if isinstance(phrase, str) and st.add_vocab(phrase):
+                done["vocab"].append(phrase.strip())
+        # Never rewrite a rule the user already has for the same words.
+        have = {r.from_text.casefold() for r in st.sc.replacements}
+        for pair in add.get("rules") or []:
+            if not (isinstance(pair, (list, tuple)) and len(pair) == 2 and all(isinstance(x, str) and x.strip() for x in pair)):
+                continue
+            frm, to = pair[0].strip(), pair[1]
+            if frm.casefold() in have:
+                continue
+            st.upsert_replacement(frm, to, sidecar.DEFAULT_CATEGORY)
+            have.add(frm.casefold())
+            done["rules"].append([frm, to])
+        if st.dirty:
+            saved.update(_save_and_reply(st))
+        return done
+
+    res = _call(fn, eid, add_to_user=add_to_user)
+    if not isinstance(res, dict) or res.get("ok") is False:
+        raise BridgeError(str((res or {}).get("error") or "could not add it to your words"))
+    out = {**saved, "ok": True}
+    out["entry"] = res.get("entry")
+    out["added"] = res.get("added") or {"vocab": [], "rules": []}
+    return out
+
+
+def op_learn_reset(args: dict, paths: Paths) -> dict[str, Any]:
+    return {"ok": True, "removed": _removed(_call(_api(_insight("learned"), "reset")))}
+
+
+EVERYWHERE_ACTIONS = ("create", "append", "remove", "none")
 
 
 def op_learn_everywhere_preview(args: dict, paths: Paths) -> dict[str, Any]:
-    mod = _insight("everywhere")
-    res = _as_dict(_api(mod, "preview")())
+    body = _body(_call(_api(_insight("everywhere"), "preview")))
     files = []
-    for f in res.get("files") or []:
-        f = f if isinstance(f, dict) else _as_dict(f)
-        files.append({"path": str(f.get("path", "")), "action": str(f.get("action", "")), "diff": str(f.get("diff", ""))[:4000]})
-    return {"ok": True, "files": files, "needs_relogin": bool(res.get("needs_relogin", True)),
-            "enabled": bool(res.get("enabled", False))}
+    for f in body.get("files") or []:
+        if not isinstance(f, dict):
+            continue
+        row = {"path": str(f.get("path", "")), "action": str(f.get("action", "")), "diff": str(f.get("diff", ""))[:4000]}
+        if f.get("reason"):
+            row["reason"] = str(f["reason"])
+        files.append(row)
+    return {"ok": True, "files": files, "needs_relogin": bool(body.get("needs_relogin", True)),
+            "enabled": bool(body.get("enabled", False))}
 
 
 def op_learn_everywhere_set(args: dict, paths: Paths) -> dict[str, Any]:
     enabled = args.get("enabled")
     if not isinstance(enabled, bool):
         raise BridgeError("'enabled' must be true or false")
-    mod = _insight("everywhere")
-    fn = _api(mod, "enable" if enabled else "disable")
-    res = fn()
-    out: dict[str, Any] = {"ok": True, "enabled": enabled}
-    if isinstance(res, dict):
-        out["needs_relogin"] = bool(res.get("needs_relogin", True))
-        out["files"] = [str(f.get("path", f)) if isinstance(f, dict) else str(f) for f in (res.get("files") or [])]
-    return out
+    res = _call(_api(_insight("everywhere"), "set_enabled"), enabled)
+    if not isinstance(res, dict) or res.get("ok") is False:
+        raise BridgeError(str((res or {}).get("error") or "could not change Learn everywhere"))
+    files = [{"path": str(f.get("path", "")), "action": str(f.get("action", ""))} for f in res.get("files") or [] if isinstance(f, dict)]
+    return {"ok": True, "enabled": bool(res.get("enabled", enabled)), "files": files,
+            "needs_relogin": bool(res.get("needs_relogin", True))}
 
 
 def op_daemon_set_login(args: dict, paths: Paths) -> dict[str, Any]:
@@ -2673,10 +2641,10 @@ OPS: dict[str, Callable[[dict, Paths], dict[str, Any]]] = {
     "history.clear": op_history_clear,
     "learn.list": op_learn_list,
     "learn.submit": op_learn_submit,
-    "learn.accept": _learn_entry_op("accept"),
-    "learn.reject": _learn_entry_op("reject"),
-    "learn.promote": _learn_entry_op("promote"),
-    "learn.forget": _learn_entry_op("forget", "delete"),
+    "learn.accept": _learn_decision("accept"),
+    "learn.reject": _learn_decision("reject"),
+    "learn.promote": op_learn_promote,
+    "learn.forget": op_learn_forget,
     "learn.reset": op_learn_reset,
     "learn.everywhere.preview": op_learn_everywhere_preview,
     "learn.everywhere.set": op_learn_everywhere_set,

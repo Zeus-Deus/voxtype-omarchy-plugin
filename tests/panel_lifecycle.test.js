@@ -682,7 +682,7 @@ test('footer hints mirror the live key bindings: every hinted key is bound and e
   assert.match(textKeys, /t === "r" \|\| t === "R"/, 'r is global');
   // Catcher-level verbs available everywhere.
   const catcher = {Enter: /onActivateRequested: root\.activateCursor\(\)/, x: /onDeleteRequested: root\.deleteSelected\(\)/, Tab: /onTabRequested/,
-                   '↑↓': /onMoveRequested/, '←→': /else root\.moveCursorH\(dx\)/, Esc: /onCloseRequested: root\.close\(\)/,
+                   '↑↓': /onMoveRequested/, '←→': /else root\.moveCursorH\(dx\)/, Esc: /onCloseRequested: root\.goBack\(\)/,
                    'Ctrl+R': /Qt\.Key_R\) \{ restartDaemon\(\)/, '1–4': /Model\.sectionForKey\(t\)/};
   const pages = Model.SECTIONS.map(s => ({page: s, section: s, view: ''}))
     .concat(Object.keys(Model.DRILLS).map(v => ({page: v, section: Model.DRILLS[v], view: v})));
@@ -1051,4 +1051,30 @@ test('loadModels derives the engine itself: inside onEngineChanged the modelsVie
   h.root.snapshot = {settings: {engine: 'whisper'}};
   h.root.loadModels();
   assert.deepEqual(JSON.parse(JSON.stringify(h.requests.pop())), {op: 'models.list', engine: 'whisper'});
+});
+
+test('Esc steps out one level (Fix, drill-in, panel); an outside click closes outright', () => {
+  const h = panelHarness();
+  let hidden = 0;
+  h.root.controller = {hide() { hidden++; }};
+  h.root.section = 'settings';
+  h.root.view = 'models';
+  h.root.goBack();
+  assert.equal(h.root.view, '', 'Esc in Manage models returns to Settings');
+  assert.equal(h.root.section, 'settings', 'the tab stays');
+  assert.equal(hidden, 0);
+  h.root.goBack();
+  assert.equal(hidden, 1, 'Esc on a top page closes the panel');
+  // The shell's dismiss area calls close(): that never just pops a level.
+  h.root.view = 'advanced';
+  h.root.close();
+  assert.equal(hidden, 2);
+  // Fix a word is cancelled before anything else.
+  h.root.view = '';
+  h.root.section = 'history';
+  h.root.fixStage = 'pick'; h.root.fixId = 'r1';
+  h.root.goBack();
+  assert.equal(h.root.fixStage, '');
+  assert.equal(hidden, 2);
+  assert.match(panel, /onCloseRequested: root\.goBack\(\)/);
 });
