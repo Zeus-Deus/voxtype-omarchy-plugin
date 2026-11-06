@@ -320,11 +320,12 @@ Panel {
         if (confirmation.opened) return;
         controller.hide();
     }
-    // Esc steps out one level: Fix, then a drill-in, then the panel. A click
-    // outside the panel still closes it outright (KeyboardPanel → close()).
+    // Esc steps out one level: Fix, an open dictation, a drill-in, then the
+    // panel. A click outside still closes it outright (KeyboardPanel → close()).
     function goBack() {
         if (confirmation.opened) return;
         if (fixStage !== "") { cancelFix(); return; }
+        if (section === "history" && expandedId !== "") { expandedId = ""; return; }
         if (back()) return;
         close();
     }
@@ -1114,7 +1115,7 @@ Panel {
                 var applied = result.applied || [];
                 var cands = result.candidates || [];
                 root.cancelFix();
-                root.showNotice(applied.length ? "Learned " + Model.learnSummary(applied) : (cands.length ? "Suggested " + Model.learnSummary(cands) + " · review it in Words" : "Nothing new to learn from that"));
+                root.showNotice(Model.learnNotice(result));
                 root.loadLearned();
             }
             else if (op === "learn.accept" || op === "learn.reject" || op === "learn.forget" || op === "learn.reset") {
@@ -1230,7 +1231,9 @@ Panel {
         open: root.opened
         focusTarget: keyCatcher
         contentWidth: fittedContentWidth(Style.space(560))
-        contentHeight: fittedContentHeight(Style.space(520))
+        // Tall enough for Home's hero, the year and three recent lines;
+        // fittedContentHeight still caps it to the screen.
+        contentHeight: fittedContentHeight(Style.space(640))
 
         FocusScope {
             id: keys
@@ -1569,7 +1572,6 @@ Panel {
                                             Stat { value: root.usageNumbers.words; label: "words" }
                                             Stat { value: root.usageNumbers.wpm; label: "wpm" }
                                             Text {
-                                                anchors.baseline: parent.children[0].baseline
                                                 visible: root.usageNumbers.saved !== ""
                                                 textFormat: Text.PlainText; text: root.usageNumbers.saved
                                                 color: Commons.Color.accent; font.family: root.fontFamily; font.pixelSize: Style.font.subtitle; font.bold: true
@@ -1741,7 +1743,7 @@ Panel {
                                     EditField {
                                         id: wordsField
                                         onPasteRequested: root.requestPaste(wordsField)
-                                        width: parent.width - tokenMeter.width - parent.spacing
+                                        width: parent.width
                                         placeholderText: "Add a word, or heard → written · type to search"
                                         foreground: root.foreground
                                         hasCursor: root.cursorIs("search")
@@ -1751,14 +1753,6 @@ Panel {
                                         Keys.onReturnPressed: root.addWord()
                                         Keys.onEscapePressed: function(event) { if (text !== "") text = ""; else keyCatcher.forceActiveFocus(); event.accepted = true }
                                         Keys.onDownPressed: function(event) { keyCatcher.forceActiveFocus(); root.setCursor("rows", 0); event.accepted = true }
-                                    }
-                                    Text {
-                                        id: tokenMeter
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        text: "prompt " + Model.tokenMeter(root.vocabTokens, root.vocabTokenLimit)
-                                        textFormat: Text.PlainText
-                                        color: Model.tokenLevel(root.vocabTokens, root.vocabTokenLimit) === "urgent" ? root.urgent : (Model.tokenLevel(root.vocabTokens, root.vocabTokenLimit) === "amber" ? Commons.Color.accent : root.muted)
-                                        font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true
                                     }
                                 }
                                 ButtonGroup {
@@ -1775,13 +1769,60 @@ Panel {
                                     onHovered: function(i, h) { if (h) root.setCursor("filter", -1) }
                                     onChanged: function(v) { root.wordFilter = v }
                                 }
-                                Repeater {
-                                    model: root.wordsView.mine
-                                    delegate: WordRow {
-                                        required property var modelData
-                                        required property int index
-                                        word: modelData
-                                        rowIndex: index
+                                // Column heads, with the vocabulary's share of the
+                                // model prompt on the right (learned words cost none).
+                                Item {
+                                    visible: root.wordsView.mine.length > 0
+                                    width: parent.width
+                                    height: tokenMeter.implicitHeight
+                                    Text {
+                                        x: Style.space(12) + parent.width * 0.32 - width
+                                        textFormat: Text.PlainText; text: "HEARD"
+                                        color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true
+                                    }
+                                    Text {
+                                        x: Style.space(12) + parent.width * 0.32 + Style.space(30)
+                                        textFormat: Text.PlainText; text: "WRITTEN"
+                                        color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true
+                                    }
+                                    Row {
+                                        anchors.right: parent.right; anchors.rightMargin: Style.space(10)
+                                        spacing: Style.space(6)
+                                        Text {
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            textFormat: Text.PlainText; text: "prompt"
+                                            color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption
+                                        }
+                                        Rectangle {
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            width: Style.space(44); height: Math.max(2, Style.space(4)); radius: height / 2
+                                            color: Style.hoverFillFor(root.foreground, Commons.Color.accent)
+                                            Rectangle {
+                                                width: parent.width * Math.min(1, root.vocabTokens / Math.max(1, root.vocabTokenLimit)); height: parent.height; radius: parent.radius
+                                                color: tokenMeter.color
+                                            }
+                                        }
+                                        Text {
+                                            id: tokenMeter
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            text: Model.tokenMeter(root.vocabTokens, root.vocabTokenLimit)
+                                            textFormat: Text.PlainText
+                                            color: Model.tokenLevel(root.vocabTokens, root.vocabTokenLimit) === "urgent" ? root.urgent : (Model.tokenLevel(root.vocabTokens, root.vocabTokenLimit) === "amber" ? Commons.Color.accent : root.muted)
+                                            font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true
+                                        }
+                                    }
+                                }
+                                Column {
+                                    width: parent.width
+                                    spacing: 0
+                                    Repeater {
+                                        model: root.wordsView.mine
+                                        delegate: WordRow {
+                                            required property var modelData
+                                            required property int index
+                                            word: modelData
+                                            rowIndex: index
+                                        }
                                     }
                                 }
                                 // Learned words: kept apart from yours; accept, promote, reject.
@@ -1806,13 +1847,17 @@ Panel {
                                         onClicked: root.resetLearned()
                                     }
                                 }
-                                Repeater {
-                                    model: root.wordsView.learned
-                                    delegate: WordRow {
-                                        required property var modelData
-                                        required property int index
-                                        word: modelData
-                                        rowIndex: root.wordsView.mine.length + index
+                                Column {
+                                    width: parent.width
+                                    spacing: 0
+                                    Repeater {
+                                        model: root.wordsView.learned
+                                        delegate: WordRow {
+                                            required property var modelData
+                                            required property int index
+                                            word: modelData
+                                            rowIndex: root.wordsView.mine.length + index
+                                        }
                                     }
                                 }
                                 EmptyState {
@@ -1959,7 +2004,13 @@ Panel {
                                     value: root.featureValue("learning", "everywhere", false) === true ? "on" : "off"
                                     hint: "also from browsers and apps"
                                 }
-                                EverywhereCard { visible: root.everywhereOpen }
+                                EverywhereCard {
+                                    id: everywhereCard
+                                    visible: root.everywhereOpen
+                                    // Opened below the fold, and it grows when the preview arrives.
+                                    onVisibleChanged: if (visible) Qt.callLater(root.ensureVisible, everywhereCard)
+                                    onImplicitHeightChanged: if (visible) Qt.callLater(root.ensureVisible, everywhereCard)
+                                }
                                 SettingsGroup { title: "MORE" }
                                 SimpleRow { key: "drill.advanced"; label: "All Voxtype settings"; kind: "drill"; badge: root.advancedChanged > 0 ? root.advancedChanged + " changed" : ""; value: "hotkey, audio, output, GPU…" }
                                 SimpleRow { key: "drill.backup"; label: "Backup"; kind: "drill"; value: "export / import" }
@@ -2884,7 +2935,7 @@ Panel {
         property int rowIndex: -1
         readonly property bool learned: word.kind === "learned"
         width: parent ? parent.width : implicitWidth
-        implicitHeight: Style.space(36)
+        implicitHeight: Style.spacing.popupRowHeight
         hasCursor: root.page === "words" && root.rowHasCursor(rowIndex)
         foreground: root.foreground
         onHasCursorChanged: if (hasCursor) root.ensureVisible(wordRow)
@@ -2895,7 +2946,7 @@ Panel {
             width: parent.width * 0.32
             horizontalAlignment: Text.AlignRight
             textFormat: Text.PlainText; elide: Text.ElideLeft
-            text: wordRow.word.heard ? Model.sanitize(wordRow.word.heard, 80) : "·"
+            text: wordRow.word.heard ? Model.sanitize(wordRow.word.heard, 80) : "–"
             color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body
         }
         Text {
@@ -2940,7 +2991,7 @@ Panel {
         property bool expanded: false
         signal picked()
         width: parent ? parent.width : implicitWidth
-        implicitHeight: Style.space(34)
+        implicitHeight: Style.spacing.popupRowHeight
         hasCursor: root.page === pageName && root.rowHasCursor(rowIndex)
         current: expanded
         foreground: root.foreground
@@ -3072,7 +3123,13 @@ Panel {
                     }
                 }
                 Row {
+                    id: teachRow
                     spacing: Style.space(10)
+                    // Keep the whole Fix block on screen as it opens and moves on.
+                    Connections {
+                        target: root
+                        function onFixStageChanged() { if (detail.fixing) Qt.callLater(root.ensureVisible, teachRow) }
+                    }
                     Text { anchors.verticalCenter: parent.verticalCenter; textFormat: Text.PlainText; text: "teach as"; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body }
                     ButtonGroup {
                         anchors.verticalCenter: parent.verticalCenter

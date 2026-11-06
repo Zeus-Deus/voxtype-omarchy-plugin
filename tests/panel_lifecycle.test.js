@@ -195,7 +195,7 @@ test('confirmation messages and row text strip bidi/control characters from untr
 
 test('every row text binding for bridge strings goes through Model.sanitize', () => {
   // Words rows (vocabulary, rules and learned entries share WordRow).
-  assert.match(panel, /text: wordRow\.word\.heard \? Model\.sanitize\(wordRow\.word\.heard, 80\) : "·"/);
+  assert.match(panel, /text: wordRow\.word\.heard \? Model\.sanitize\(wordRow\.word\.heard, 80\) : "–"/);
   assert.match(panel, /text: Model\.sanitize\(wordRow\.word\.written, 120\)/);
   assert.match(panel, /text: Model\.sanitize\(modelRow\.modelData\.name, 120\)/);
   // History rows, the expanded text, the raw-vs-final words and Fix tokens.
@@ -1073,8 +1073,14 @@ test('Esc steps out one level (Fix, drill-in, panel); an outside click closes ou
   h.root.view = '';
   h.root.section = 'history';
   h.root.fixStage = 'pick'; h.root.fixId = 'r1';
+  h.root.expandedId = 'r1';
   h.root.goBack();
   assert.equal(h.root.fixStage, '');
+  assert.equal(h.root.expandedId, 'r1', 'Fix first');
+  h.root.goBack();
+  assert.equal(h.root.expandedId, '', 'then the open dictation');
   assert.equal(hidden, 2);
+  h.root.goBack();
+  assert.equal(hidden, 3, 'then the panel');
   assert.match(panel, /onCloseRequested: root\.goBack\(\)/);
 });

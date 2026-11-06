@@ -1361,6 +1361,19 @@ function findRecord(items, id) {
 }
 
 // "Omashi → Omarchy" for the footer after a Fix.
+// The one-line answer to History › Fix: what was learned, what was only
+// suggested, or voxtype-tui's reason for learning nothing ("an ordinary
+// word …"), so the user knows to pick "replace" or leave it.
+function learnNotice(result) {
+    var r = result || {};
+    if ((r.applied || []).length) return "Learned " + learnSummary(r.applied);
+    if ((r.candidates || []).length) return "Suggested " + learnSummary(r.candidates) + " · review it in Words";
+    var skipped = (r.skipped || [])[0];
+    var why = skipped && skipped.reason ? skipped.reason : r.reason;
+    if (why) return "Not learned: " + sanitize(why, 70);
+    return "Nothing new to learn from that";
+}
+
 function learnSummary(entries) {
     var e = (entries || [])[0];
     if (!e) return "";

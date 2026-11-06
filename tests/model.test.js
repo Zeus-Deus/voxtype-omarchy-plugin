@@ -511,3 +511,13 @@ test('a down Qwen3-ASR server is a warning only while voxtype runs', () => {
   assert.equal(Model.notices(off, {}).length, 0);
   assert.equal(Model.asrDown({daemon: {active: true}}), false, 'older bridge: no asr block');
 });
+
+test('learnNotice: learned, suggested, or voxtype-tui\'s reason for learning nothing', () => {
+  assert.equal(Model.learnNotice({applied: [{heard: ['Super Whisper'], written: 'Superwhisper'}]}), 'Learned Super Whisper → Superwhisper');
+  assert.equal(Model.learnNotice({applied: [], candidates: [{heard: 'omashi', written: 'Omarchy'}]}), 'Suggested omashi → Omarchy · review it in Words');
+  assert.equal(Model.learnNotice({applied: [], candidates: [], skipped: [{heard: 'Tictation', written: 'dictation', reason: 'an ordinary word (grammar or wording, not vocabulary)'}]}),
+    'Not learned: an ordinary word (grammar or wording, not vocabulary)');
+  assert.equal(Model.learnNotice({applied: [], reason: 'learning is off'}), 'Not learned: learning is off');
+  assert.equal(Model.learnNotice({applied: [], skipped: [{reason: 'x\u202e\u0007y'}]}), 'Not learned: xy', 'reasons are sanitized');
+  assert.equal(Model.learnNotice({}), 'Nothing new to learn from that');
+});
