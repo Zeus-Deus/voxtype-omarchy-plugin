@@ -3552,7 +3552,7 @@ def insights(monkeypatch: pytest.MonkeyPatch):
         calls.append(("history_list", before, limit))
         return {"enabled": True, "keep_days": 30, "items": [record] * 60, "next": "../../etc"}
 
-    def usage_summary(days=365):
+    def usage_summary(days=365, config_path=None):
         calls.append(("usage_summary", days))
         if days == 2:
             raise Unavailable("your own post-process command is set")

@@ -127,6 +127,9 @@ Panel {
     readonly property bool archiveOn: !!(feat.archive && feat.archive.enabled)
     readonly property bool learningOn: !(feat.learning && feat.learning.enabled === false)
     readonly property bool usageReady: !!caps.history && usage !== null && usage.enabled !== false
+    // The switches are on but voxtype does not call voxtype-tui yet (right
+    // after an upgrade). Enter / click on Home's usage card connects it.
+    readonly property bool wiringPending: usageReady && Model.pendingWiring(usage.health).length > 0
     readonly property string usageMessage: !caps.history ? "Usage " + Model.NEEDS_TUI_02 + "." : (unavailable["usage.summary"] ? "Usage: " + unavailable["usage.summary"] : (usage && usage.enabled === false ? "Usage counting is off · turn it on in Settings" : "Reading usage…"))
     readonly property int advancedChanged: Model.changedCount(config, Model.ADVANCED_PATHS)
     readonly property var simpleTargets: Model.simpleSettingsTargets({whisper: engine === "whisper", archiveOn: archiveOn, learningOn: learningOn && !!caps.features, everywhereAvailable: !!featureAvail.everywhere})
@@ -623,6 +626,12 @@ Panel {
         if (refocus) keyCatcher.forceActiveFocus();
     }
     // ---- Settings (simple rows) ----------------------------------------------
+    // Re-saving the current usage switch makes voxtype-tui wire its hooks;
+    // the reply marks the daemon stale, so the hero then says Restart.
+    function connectVoxtype() {
+        if (locked || !caps.features || features === null) return;
+        setFeature("usage", "enabled", featureValue("usage", "enabled", true) === true);
+    }
     function setFeature(group, key, value) {
         if (locked || !caps.features) return;
         var patch = {};
@@ -787,7 +796,7 @@ Panel {
             else if (key === "power") togglePower();
             else if (key === "restart") restartDaemon();
             else if (key === "download") openDrill("models");
-            else if (key === "usage") openDrill("usage");
+            else if (key === "usage") { if (wiringPending) connectVoxtype(); else openDrill("usage"); }
             else if (key === "rows") openRecent(recentItems[cursorIndex]);
             else if (key === "test") testField.forceActiveFocus();
         } else if (page === "words") {
@@ -1553,7 +1562,7 @@ Panel {
                                     foreground: root.foreground
                                     implicitHeight: usageColumn.implicitHeight + Style.space(24)
                                     onHasCursorChanged: if (hasCursor) root.ensureVisible(usageCard)
-                                    MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onEntered: root.setCursor("usage", -1); onClicked: root.openDrill("usage") }
+                                    MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onEntered: root.setCursor("usage", -1); onClicked: if (root.wiringPending) root.connectVoxtype(); else root.openDrill("usage") }
                                     Column {
                                         id: usageColumn
                                         anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
@@ -1583,6 +1592,13 @@ Panel {
                                             textFormat: Text.PlainText
                                             text: root.usageMessage
                                             color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body
+                                        }
+                                        Text {
+                                            visible: root.wiringPending
+                                            width: parent.width; wrapMode: Text.WordWrap
+                                            textFormat: Text.PlainText
+                                            text: Model.healthLine({pending_wiring: root.usage ? root.usage.health.pending_wiring : []}) + " · Enter connects it"
+                                            color: Commons.Color.accent; font.family: root.fontFamily; font.pixelSize: Style.font.caption
                                         }
                                     }
                                 }

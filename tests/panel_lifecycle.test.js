@@ -1084,3 +1084,31 @@ test('Esc steps out one level (Fix, drill-in, panel); an outside click closes ou
   assert.equal(hidden, 3, 'then the panel');
   assert.match(panel, /onCloseRequested: root\.goBack\(\)/);
 });
+
+test('Home usage card: Enter connects Voxtype while its hooks are pending, else opens Usage', () => {
+  const h = panelHarness();
+  h.root.status = Object.assign({}, h.root.status, {capabilities: {history: true, features: true}});
+  h.root.features = {features: {usage: {enabled: true}}, available: {}, reasons: {}};
+  h.root.usage = {enabled: true, days: [], totals: {}, health: {pending_wiring: ['capture', 'duration'], unavailable: []}};
+  assert.equal(h.root.wiringPending, true);
+  h.root.setCursor('usage', -1);
+  h.root.activateCursor();
+  const req = h.requests.filter(r => r.op === 'features.set').pop();
+  assert.deepEqual(JSON.parse(JSON.stringify(req && req.patch)), {usage: {enabled: true}}, "re-saves the current switch, nothing else");
+  assert.equal(h.root.page, 'home', 'stays on Home');
+  // The reply marks the daemon stale: the hero asks for a restart.
+  h.complete('features.set', {ok: true, features: {usage: {enabled: true}}, available: {}, reasons: {}, restart_needed: ['output.pre_recording_command'], daemon_stale: true}, req);
+  assert.ok(h.root.restartNeeded.includes('output.pre_recording_command'));
+  h.root.usage = {enabled: true, days: [], totals: {}, health: {pending_wiring: [], unavailable: []}};
+  assert.equal(h.root.wiringPending, false);
+  h.root.setCursor('usage', -1);
+  h.root.activateCursor();
+  assert.equal(h.root.page, 'usage');
+  // A user who turned usage off keeps it off.
+  const h2 = panelHarness();
+  h2.root.status = Object.assign({}, h2.root.status, {capabilities: {history: true, features: true}});
+  h2.root.features = {features: {usage: {enabled: false}, history: {enabled: true}}, available: {}, reasons: {}};
+  h2.root.usage = {enabled: true, days: [], totals: {}, health: {pending_wiring: ['capture']}};
+  h2.root.connectVoxtype();
+  assert.deepEqual(JSON.parse(JSON.stringify(h2.requests.filter(r => r.op === "features.set").pop().patch)), {usage: {enabled: false}});
+});

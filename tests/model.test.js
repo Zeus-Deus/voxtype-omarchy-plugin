@@ -521,3 +521,18 @@ test('learnNotice: learned, suggested, or voxtype-tui\'s reason for learning not
   assert.equal(Model.learnNotice({applied: [], skipped: [{reason: 'x\u202e\u0007y'}]}), 'Not learned: xy', 'reasons are sanitized');
   assert.equal(Model.learnNotice({}), 'Nothing new to learn from that');
 });
+
+test('healthLine says Voxtype is not connected instead of listing each pending hook', () => {
+  const un = f => ({feature: f, reason: 'not connected to Voxtype yet'});
+  assert.equal(Model.healthLine({pending_wiring: ['capture', 'duration'], unavailable: [un('capture'), un('duration')]}),
+    "Not counting yet: Voxtype isn't connected");
+  assert.equal(Model.healthLine({pending_wiring: ['duration'], unavailable: [un('duration')]}),
+    'Durations start once Voxtype is connected');
+  assert.equal(Model.healthLine({pending_wiring: ['learning'], unavailable: [un('learning')]}),
+    'Learning in apps starts once Voxtype is connected');
+  // Other reasons still show; junk in pending_wiring is ignored.
+  assert.equal(Model.healthLine({pending_wiring: [7, null], unavailable: [{feature: 'archive', reason: 'pw-record missing'}]}),
+    'archive: pw-record missing');
+  same(Model.pendingWiring({pending_wiring: 'capture'}), []);
+  assert.equal(Model.healthLine({unavailable: [], failures: []}), '');
+});

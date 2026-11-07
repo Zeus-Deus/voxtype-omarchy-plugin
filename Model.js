@@ -1222,11 +1222,22 @@ function hourBars(hours) {
 }
 
 // A11 health: silent failure must never read as zero usage.
+// Features whose voxtype hook is not wired yet (voxtype-tui 0.2 reports this
+// right after an upgrade, before anything saved the config).
+function pendingWiring(health) {
+    var p = health && health.pending_wiring;
+    return Array.isArray(p) ? p.filter(function(f) { return typeof f === "string"; }) : [];
+}
+
 function healthLine(health) {
     if (!health) return "";
     var parts = [];
-    var un = health.unavailable || [];
-    for (var i = 0; i < un.length && i < 2; i++) if (un[i] && un[i].reason) parts.push(sanitize(un[i].feature, 20) + ": " + sanitize(un[i].reason, 60));
+    var pending = pendingWiring(health);
+    if (pending.indexOf("capture") >= 0) parts.push("Not counting yet: Voxtype isn't connected");
+    else if (pending.indexOf("duration") >= 0) parts.push("Durations start once Voxtype is connected");
+    else if (pending.length) parts.push("Learning in apps starts once Voxtype is connected");
+    var un = (health.unavailable || []).filter(function(u) { return u && pending.indexOf(u.feature) < 0; });
+    for (var i = 0; i < un.length && i < 2; i++) if (un[i].reason) parts.push(sanitize(un[i].feature, 20) + ": " + sanitize(un[i].reason, 60));
     if (health.dropped) parts.push(health.dropped + " dictation" + (health.dropped === 1 ? "" : "s") + " not counted");
     var f = health.failures || [];
     if (f.length) parts.push("last error: " + sanitize(f[f.length - 1].msg || f[f.length - 1].where, 60));

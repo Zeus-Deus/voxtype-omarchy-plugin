@@ -2310,7 +2310,7 @@ def _int_arg(args: dict, key: str, default: int, lo: int, hi: int) -> int:
 def op_usage_summary(args: dict, paths: Paths) -> dict[str, Any]:
     days = _int_arg(args, "days", 365, 1, USAGE_DAYS_MAX)
     mod = _insight("history")
-    return {"ok": True, **_body(_call(_api(mod, "usage_summary"), days))}
+    return {"ok": True, **_body(_call(_api(mod, "usage_summary"), days, **_config_arg(paths)))}
 
 
 def op_history_list(args: dict, paths: Paths) -> dict[str, Any]:
