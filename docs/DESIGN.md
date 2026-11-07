@@ -121,9 +121,9 @@ panel greys the matching rows and shows the same sentence. Shapes are frozen
 | Op | Args | Result |
 |---|---|---|
 | `features.get` | — | `{ok, features, available:{usage, history, archive, learning, everywhere}, reasons:{feature:str}}` — `features` is voxtype-tui's settings block (keep days, archive dir, learning on/off…). |
-| `features.set` | `{patch:{group:{key:value}}}` — only `usage.{enabled, typing_wpm 5–300}`, `history.{enabled, keep_days 7/30/90/365/null}`, `archive.{enabled, dir, save_audio, save_text}`, `learning.{enabled, everywhere, notify}`; each leaf type-checked (`bool` never passes as a day count); `archive.dir` must be an existing absolute folder and is stored resolved | same as `features.get` + `restart_needed, daemon_stale`. A write op: refused while voxtype-tui is open, because it can rewire the `[output]` hooks in config.toml. |
+| `features.set` | `{patch:{group:{key:value}}}` — only `usage.{enabled, typing_wpm 5–300}`, `history.{enabled, keep_days 7/30/90/365/null}`, `archive.{enabled, dir, save_audio, save_text}`, `learning.{enabled, everywhere, notify}`; each leaf type-checked (`bool` never passes as a day count); `archive.dir` must be an existing absolute folder and is stored resolved | same as `features.get` + `restart_needed, daemon_stale`, and `wiring_error` (capped string) when voxtype-tui saved the switches but could not rewire voxtype's hooks — the panel then warns instead of saying Saved. A write op: refused while voxtype-tui is open, because it can rewire the `[output]` hooks in config.toml. |
 | `usage.summary` | `{days?}` (default 365, clamped 1–3660) | `{ok, enabled, days:[{date, dictations, words, seconds}], totals:{dictations, words, seconds, wpm, saved_seconds}, hours:[24], models:[{engine, model, dictations}], since, health}` — `wpm`/`saved_seconds` may be `null`. |
-| `history.list` | `{before?:id, limit?}` (limit 1–50, default 30) | `{ok, enabled, keep_days, items:[record], next:id|null}` — records carry `raw`, `final`, `model`, `duration_s`, `app`. |
+| `history.list` | `{before?:id, limit?}` (limit 1–50, default 30) | `{ok, enabled, keep_days, items:[record], next:id|null}` — records carry `raw`, `final`, `model`, `duration_s`, `app`. A page never exceeds the response cap: it holds the largest prefix that fits (`HISTORY_PAGE_BUDGET_BYTES`) and `next` is then its last id. A record above `HISTORY_RECORD_MAX_BYTES` keeps the first `HISTORY_TEXT_MAX_CHARS` of `raw`/`final` with `truncated:true` (the panel shows only the start and turns Fix a word off for it); if still too large only `{id, ts?, raw:"", final:"", truncated:true, oversized:true}` is sent. |
 | `history.delete` | `{id}` | `{ok, removed}` |
 | `history.clear` | — | `{ok, removed}` |
 | `learn.list` | — | `{ok, enabled, everywhere, entries:[entry], counts:{active, suggested, dormant, rejected}}` |
@@ -224,7 +224,7 @@ the panel. A click outside the panel still closes it outright.
 1. **Home** — the state in one word, "Press <shortcut> and talk · <model>",
    Record, **Turn off / Turn on** (`o`; `daemon.stop` / `daemon.start`, asks
    first if a dictation is in progress), Restart, missing-model banner, the
-   year heatmap (52 × 7, accent levels) with today / words / wpm / time saved,
+   last-12-months heatmap (52 × 7, accent levels) with today / words / wpm / time saved,
    the last three dictations (Enter opens them in History) and the "test a
    phrase" field. `u` → **Usage** drill-in (`usage.summary`): totals, saved
    time versus `usage.typing_wpm`, hour-of-day bars, per-model counts, the
@@ -232,7 +232,9 @@ the panel. A click outside the panel still closes it outright.
 2. **Words** — vocabulary and dictionary rules as one list, sorted by what is
    written: `heard → written` + a tag (spelling / replace / capitalization).
    One field adds (`Codemux` → `vocab.add`; `code mucks → Codemux` →
-   `dict.upsert`) and searches. Filter chips, Shift+letter jumps, `c` cycles a
+   `dict.upsert`) and searches. Filter chips, Shift+letter jumps (before `R`
+   records; not `X`, which the kit key catcher reads as Delete), hover
+   delete on word and rule rows, `c` cycles a
    rule's category, `x` deletes (confirm). Column heads carry the prompt
    meter `n / 224` (amber ≥ 200, urgent ≥ 224). Learned entries
    (`learn.list`) are a separate group that never mixes with the user's own
@@ -248,7 +250,7 @@ the panel. A click outside the panel still closes it outright.
    **Clear all** (confirm) close the list.
 4. **Settings** — simple rows, everyday first: model, Manage models, language
    (‹ › cycles Whisper ISO codes + auto), shortcut (read-only, from Hyprland),
-   mode; while dictating: indicator, sounds, other audio (pause / lower);
+   hotkey mode (Voxtype's own hotkey); while dictating: indicator, sounds, other audio (pause / lower);
    text: insert by, spoken punctuation, filler words; system: start at login
    (`daemon.set_login`); history & usage: count usage, save history, keep for
    (7 / 30 / 90 / 365 days / forever), archive (folder via the zenity

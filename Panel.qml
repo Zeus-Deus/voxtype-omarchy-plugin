@@ -80,6 +80,9 @@ Panel {
     property var usage: null
     property var historyList: []
     property var historyNext: null
+    // The `before` cursor of the "Load older" request in flight ("" = none):
+    // one request per cursor, so a double click cannot append a page twice.
+    property string historyMoreCursor: ""
     property bool historyLoaded: false
     property var learnedState: null
     property var everywherePreview: null
@@ -114,12 +117,20 @@ Panel {
     readonly property var homeHero: Model.homeState(status, shortcutInfo.primary)
     readonly property var myWords: Model.wordRows(vocabulary, replacements)
     readonly property var learnedWords: Model.learnedRows(learnedState ? learnedState.entries : [])
+    // Everything learned.json holds (rejected/promoted tombstones too), so
+    // Reset all stays reachable when no visible learned row is left.
+    readonly property int learnedTotal: Model.learnedTotal(learnedState)
+    readonly property bool learnedGroupShown: (wordFilter === "all" || wordFilter === "learned") && (wordsView.learned.length > 0 || learnedTotal > 0 || wordFilter === "learned")
     readonly property var wordsView: Model.filterWords(myWords, learnedWords, wordFilter, wordsField.text)
     readonly property var historyView: Model.historyRows(historyList, historySearch.text, null)
     readonly property var historyItems: Model.historyItems(historyView)
     readonly property var recentItems: Model.historyItems(Model.historyRows(historyList.slice(0, 3), "", null))
     readonly property var fixRecord: Model.findRecord(historyList, fixId)
-    readonly property var fixTokens: Model.fixTokens(Model.recordText(fixRecord))
+    readonly property string fixText: Model.recordText(fixRecord)
+    readonly property var fixTokens: Model.fixTokens(fixText)
+    // The words the Fix card renders: a window that follows the pick, so a
+    // long dictation stays light and every word is still reachable.
+    readonly property var fixWindow: Model.fixWindow(fixTokens, fixStart, fixEnd, Model.FIX_SHOWN_MAX)
     readonly property var usageNumbers: Model.usageNumbers(usage, null)
     readonly property var featureAvail: features && features.available ? features.available : ({})
     readonly property var featureReasons: features && features.reasons ? features.reasons : ({})
@@ -184,7 +195,7 @@ Panel {
             t.push("test");
             return t;
         }
-        if (name === "words") return learnedWords.length > 0 ? ["search", "filter", "rows", "learn.reset"] : ["search", "filter", "rows"];
+        if (name === "words") return learnedGroupShown && learnedTotal > 0 ? ["search", "filter", "rows", "learn.reset"] : ["search", "filter", "rows"];
         if (name === "history") {
             var h = ["search", "rows"];
             if (historyNext) h.push("more");
@@ -389,9 +400,10 @@ Panel {
     // The new sections ask only once `status` said the module exists, so an
     // older voxtype-tui never sees these ops (and never shows an error).
     function loadUsage() { if (caps.history) { service.cancelQueued("usage.summary"); service.run({op: "usage.summary", days: 365}); } }
-    function loadHistory() { if (caps.history) { service.cancelQueued("history.list"); service.run({op: "history.list", limit: Model.HISTORY_PAGE}); } }
+    function loadHistory() { if (caps.history) { service.cancelQueued("history.list"); historyMoreCursor = ""; service.run({op: "history.list", limit: Model.HISTORY_PAGE}); } }
     function loadMoreHistory() {
-        if (!caps.history || !historyNext) return;
+        if (!caps.history || !historyNext || historyMoreCursor === historyNext) return;
+        historyMoreCursor = historyNext;
         service.run({op: "history.list", limit: Model.HISTORY_PAGE, before: historyNext});
     }
     function loadLearned() { if (caps.learned) service.run({op: "learn.list"}); }
@@ -523,8 +535,10 @@ Panel {
         ask("learn.forget", {id: w.entryId}, "Forget “" + Model.sanitize(w.heard, 40) + " → " + Model.sanitize(w.written, 40) + "”?\nIt can be learned again from a later correction.", "Forget");
     }
     function resetLearned() {
-        if (learnedWords.length === 0) return;
-        ask("learn.reset", {}, "Delete all " + learnedWords.length + " learned words?\nYour own words stay as they are.", "Delete all");
+        var total = learnedTotal;
+        if (total === 0) return;
+        var hidden = Math.max(0, total - learnedWords.length);
+        ask("learn.reset", {}, "Delete all " + total + " learned words" + (hidden > 0 ? " (" + hidden + " rejected or promoted)" : "") + "?\nThey can be learned again. Your own words stay as they are.", "Delete all");
     }
     function jumpToLetter(letter) {
         var i = Model.letterIndex(wordsView.rows, letter);
@@ -539,8 +553,18 @@ Panel {
     }
     function toggleExpand(item) {
         if (!item) return;
-        if (fixId !== "" && fixId !== item.id) cancelFix();
+        // Collapsing the dictation being fixed ends Fix too: a hidden pick
+        // would keep swallowing arrows and section keys.
+        if (fixId !== "" && (fixId !== item.id || expandedId === item.id)) cancelFix();
         expandedId = expandedId === item.id ? "" : item.id;
+    }
+    // Fix lives inside its open dictation: when that collapses, scrolls
+    // out of the filtered list or leaves the loaded history, Fix ends.
+    function dropStaleFix() {
+        if (fixId === "" && fixStage === "") return;
+        var shown = false;
+        for (var i = 0; i < historyItems.length; i++) if (historyItems[i].id === fixId) { shown = true; break; }
+        if (expandedId !== fixId || !shown || fixRecord === null) cancelFix();
     }
     function openRecent(item) {
         if (!item) return;
@@ -548,11 +572,11 @@ Panel {
         expandedId = item.id;
         for (var i = 0; i < historyItems.length; i++) if (historyItems[i].id === item.id) { setCursor("rows", i); break; }
     }
-    function copyHistory() {
-        var item = cursorHistoryItem();
+    function copyHistory() { copyRecord(cursorHistoryItem()) }
+    function copyRecord(item) {
         if (!item) return;
         if (!service.copy(Model.recordText(item.record))) return;
-        showNotice("Copied");
+        showNotice(item.record && item.record.truncated ? "Copied the part shown · this dictation is too long to load in full" : "Copied");
     }
     function deleteHistory(item) {
         if (!item) return;
@@ -566,9 +590,17 @@ Panel {
     function startFix() {
         var item = cursorHistoryItem();
         if (!item && expandedId !== "") item = {id: expandedId};
+        startFixFor(item);
+    }
+    function startFixFor(item) {
         if (!item || locked) return;
         if (!caps.learned) { showNotice("Fix a word " + Model.NEEDS_TUI_02); return; }
         if (learningOn === false) { showNotice("Learning is off · turn it on in Settings"); return; }
+        var rec = Model.findRecord(historyList, item.id);
+        // A shortened record is not the stored text: an edit of it would
+        // read as a rewrite. learn.submit also caps the edited text.
+        if (rec && rec.truncated) { showNotice("This dictation is too long to fix here"); return; }
+        if (rec && Model.recordText(rec).length > Model.FIX_TEXT_MAX_CHARS) { showNotice("This dictation is too long to fix here"); return; }
         expandedId = item.id;
         fixId = item.id;
         fixStart = 0;
@@ -611,8 +643,10 @@ Panel {
         if (fixId === "" || written === "" || locked) return;
         var heard = Model.spanText(fixTokens, fixStart, fixEnd);
         if (written === heard) { showNotice("Type how it should be written"); return; }
-        var edited = Model.fixedText(fixTokens, fixStart, fixEnd, written);
+        // The stored text with only the picked span replaced.
+        var edited = Model.fixedText(fixText, fixTokens, fixStart, fixEnd, written);
         if (edited === null) return;
+        if (edited.length > Model.FIX_TEXT_MAX_CHARS) { showNotice("This dictation is too long to fix here"); return; }
         service.run({op: "learn.submit", id: fixId, edited: edited, kind: fixKind});
     }
     function cancelFix() {
@@ -1002,11 +1036,15 @@ Panel {
         else if (t === "u" && (page === "settings" || page === "advanced")) resetCursorSetting();
         else if (t === "u" && page === "home") openDrill("usage");
         else if (t === "o" && page === "home") togglePower();
-        else if (t === "r" || t === "R") toggleRecord();
+        // Capitals jump on Words before any letter action (Shift+R jumps to
+        // R there; r still records). Shift+X never arrives: the kit key
+        // catcher turns it into Delete.
         else if (page === "words" && /^[A-Z]$/.test(t)) jumpToLetter(t);
+        else if (t === "r" || t === "R") toggleRecord();
     }
     onWordsViewChanged: clampCursor()
-    onHistoryItemsChanged: clampCursor()
+    onHistoryItemsChanged: { clampCursor(); dropStaleFix() }
+    onExpandedIdChanged: dropStaleFix()
     onModelRowsChanged: clampCursor()
     onEngineChanged: {
         if (browseEngine === engine) browseEngine = "";
@@ -1028,6 +1066,9 @@ Panel {
         pollState: true
         pollIntervalMs: 1500
         onCompleted: function(op, result, req) {
+            // Whatever came back, the "Load older" request for this cursor
+            // is no longer in flight.
+            if (op === "history.list" && req.before && root.historyMoreCursor === req.before) root.historyMoreCursor = "";
             if (Model.isTuiMissing(result)) { root.tuiMissing = true; root.errorText = ""; return; }
             // An older voxtype-tui (or one without a feature) answers the new
             // ops with `unavailable`: the section says so, no error line.
@@ -1098,15 +1139,27 @@ Panel {
                     if (need.length === 0) need.push("output");
                     root.restartNeeded = need;
                 }
-                root.notice = "Saved";
-                noticeTimer.restart();
+                // Switches saved, hooks not rewired: capture may still be
+                // disconnected, so this is a warning, not "Saved".
+                if (typeof result.wiring_error === "string" && result.wiring_error !== "") {
+                    root.notice = "";
+                    root.errorText = "Saved, but Voxtype is not connected: " + Model.sanitize(result.wiring_error, 160);
+                } else {
+                    root.notice = "Saved";
+                    noticeTimer.restart();
+                }
                 if (req.patch && (req.patch.history || req.patch.usage)) { root.loadHistory(); root.loadUsage(); }
             }
             else if (op === "usage.summary") root.usage = result;
             else if (op === "history.list") {
                 // A page with `before` appends; anything else replaces.
                 var items = result.items || [];
-                if (req.before) root.historyList = root.historyList.concat(items);
+                if (req.before) {
+                    // Only the page that continues the list as it is now;
+                    // a record already shown is never added twice.
+                    if (req.before !== root.historyNext) return;
+                    root.historyList = Model.appendHistory(root.historyList, items);
+                }
                 else if (!Model.sameList(root.historyList, items, true)) root.historyList = items;
                 root.historyNext = result.next || null;
                 root.historyLoaded = true;
@@ -1552,8 +1605,8 @@ Panel {
                                     }
                                 }
 
-                                // This year: heatmap + four numbers. Enter opens Usage.
-                                SectionHead { title: "THIS YEAR"; trailing: "usage ›"; onTrailingClicked: root.openDrill("usage") }
+                                // The last 12 months (rolling): heatmap + four numbers. Enter opens Usage.
+                                SectionHead { title: "LAST 12 MONTHS"; trailing: "usage ›"; onTrailingClicked: root.openDrill("usage") }
                                 CursorSurface {
                                     id: usageCard
                                     width: parent.width
@@ -1702,6 +1755,16 @@ Panel {
                                                 }
                                             }
                                         }
+                                        // A minimal time axis under the bars: 00 · 12 · 23.
+                                        Item {
+                                            id: hourAxis
+                                            width: hourRow.width
+                                            height: hourAxisStart.implicitHeight
+                                            readonly property real slot: (hourRow.width + hourRow.spacing) / 24
+                                            Text { id: hourAxisStart; x: 0; textFormat: Text.PlainText; text: "00"; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+                                            Text { x: hourAxis.slot * 12; textFormat: Text.PlainText; text: "12"; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+                                            Text { anchors.right: parent.right; textFormat: Text.PlainText; text: "23"; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+                                        }
                                         Text { textFormat: Text.PlainText; text: hourRow.bars.busiest; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body }
                                     }
                                     Column {
@@ -1843,7 +1906,7 @@ Panel {
                                 }
                                 // Learned words: kept apart from yours; accept, promote, reject.
                                 Item {
-                                    visible: root.wordsView.learned.length > 0 || (root.wordFilter === "learned")
+                                    visible: root.learnedGroupShown
                                     width: parent.width
                                     height: learnedHead.implicitHeight + Style.space(10)
                                     PanelSectionHeader {
@@ -1854,7 +1917,7 @@ Panel {
                                     }
                                     Button {
                                         anchors.right: parent.right; anchors.bottom: parent.bottom
-                                        visible: root.learnedWords.length > 0
+                                        visible: root.learnedTotal > 0
                                         text: "Reset all"; bordered: true
                                         hasCursor: root.cursorIs("learn.reset")
                                         foreground: root.foreground; fontFamily: root.fontFamily; fontSize: Style.font.caption
@@ -1885,7 +1948,7 @@ Panel {
                                 Text {
                                     width: parent.width; wrapMode: Text.WordWrap
                                     textFormat: Text.PlainText
-                                    text: !root.caps.learned ? "Learning from your corrections " + Model.NEEDS_TUI_02 + "." : (root.learningOn ? "Shift+letter jumps · learned words apply without a restart" : "Learning is off · learned words are paused")
+                                    text: !root.caps.learned ? "Learning from your corrections " + Model.NEEDS_TUI_02 + "." : (root.learningOn ? "Shift+letter jumps (not X, which deletes) · learned words apply without a restart" : "Learning is off · learned words are paused")
                                     color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption
                                 }
                             }
@@ -1988,7 +2051,7 @@ Panel {
                                 SimpleRow { key: "drill.models"; label: "Manage models"; kind: "drill"; value: Model.modelsSummary(root.modelsEngine === root.engine ? root.modelRows : []) }
                                 SimpleRow { key: "language"; label: "Language"; kind: "cycle"; visible: root.engine === "whisper"; value: Model.optionLabel(Model.LANGUAGES, String(Model.settingOr(root.config, "whisper.language"))) }
                                 SimpleRow { key: "shortcut"; label: "Shortcut"; kind: "keycap"; value: root.shortcutInfo.primary !== "" ? root.shortcutInfo.primary : "none"; hint: root.shortcutInfo.hold !== "" ? "hold " + root.shortcutInfo.hold : "" }
-                                SimpleRow { key: "mode"; label: "Mode"; kind: "cycle"; value: Model.optionLabel(Model.HOTKEY_MODE_OPTIONS, String(Model.settingOr(root.config, "hotkey.mode"))) }
+                                SimpleRow { key: "mode"; label: "Hotkey mode"; hint: "Voxtype's own hotkey"; kind: "cycle"; value: Model.optionLabel(Model.HOTKEY_MODE_OPTIONS, String(Model.settingOr(root.config, "hotkey.mode"))) }
                                 SettingsGroup { title: "WHILE DICTATING" }
                                 SimpleRow { key: "indicator"; label: "Indicator"; kind: "cycle"; value: Model.optionLabel(Model.INDICATOR_OPTIONS, Model.indicatorValue(root.config)) }
                                 SimpleRow { key: "sounds"; label: "Sounds"; kind: "toggle"; checked: Model.settingOr(root.config, "audio.feedback.enabled") === true }
@@ -2932,7 +2995,7 @@ Panel {
             Text {
                 visible: simple.kind === "cycle" || simple.kind === "drill"
                 anchors.verticalCenter: parent.verticalCenter
-                textFormat: Text.PlainText; text: simple.value
+                textFormat: Text.PlainText; text: Model.sanitize(simple.value, 60)
                 color: simple.kind === "drill" ? root.muted : root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body
             }
             Text {
@@ -2941,7 +3004,7 @@ Panel {
                 textFormat: Text.PlainText; text: "›"; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body
                 MouseArea { anchors.fill: parent; anchors.margins: -Style.space(4); onClicked: simple.kind === "cycle" ? root.cycleSimple(simple.key, 1) : root.activateSimple(simple.key) }
             }
-            Keycap { visible: simple.kind === "keycap"; anchors.verticalCenter: parent.verticalCenter; text: simple.value }
+            Keycap { visible: simple.kind === "keycap"; anchors.verticalCenter: parent.verticalCenter; text: Model.sanitize(simple.value, 60) }
             ToggleSwitch {
                 visible: simple.kind === "toggle"
                 anchors.verticalCenter: parent.verticalCenter
@@ -2990,8 +3053,18 @@ Panel {
             id: wordTags
             anchors.right: parent.right; anchors.rightMargin: Style.space(10); anchors.verticalCenter: parent.verticalCenter
             spacing: Style.space(6)
-            Tag { text: wordRow.word.tag || ""; tone: "muted" }
-            Tag { visible: wordRow.learned; text: wordRow.word.stateLabel || ""; tone: wordRow.word.state === "suggested" ? "muted" : "accent" }
+            Tag { anchors.verticalCenter: parent.verticalCenter; text: wordRow.word.tag || ""; tone: "muted" }
+            Tag { anchors.verticalCenter: parent.verticalCenter; visible: wordRow.learned; text: wordRow.word.stateLabel || ""; tone: wordRow.word.state === "suggested" ? "muted" : "accent" }
+            // Mouse deletion, as in the old Vocabulary/Dictionary rows: the
+            // same confirmation as x (ConfirmDialog, Cancel first).
+            PanelActionButton {
+                visible: wordRow.hasCursor && (wordRow.word.kind === "vocab" || wordRow.word.kind === "rule")
+                anchors.verticalCenter: parent.verticalCenter
+                iconText: "󰆴"; foreground: root.foreground; hoverColor: root.urgent
+                tooltipText: wordRow.word.kind === "rule" ? "x · delete rule" : "x · remove word"
+                enabled: !service.mutating
+                onClicked: { root.setCursor("rows", wordRow.rowIndex); root.deleteSelected() }
+            }
         }
     }
     component Tag: Rectangle {
@@ -3063,6 +3136,14 @@ Panel {
                 text: Model.sanitize(Model.recordText(detail.record), 2000)
                 color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.subtitle
             }
+            // The bridge shortened a dictation too large for one response.
+            Text {
+                visible: detail.record.truncated === true
+                width: parent.width; wrapMode: Text.WordWrap
+                textFormat: Text.PlainText
+                text: detail.record.oversized === true ? "Too large to load here · open it with voxtype-tui" : "Only the start is shown · too long to load in full, so Fix a word is off for it"
+                color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption
+            }
             // What Voxtype heard, changed words in the accent colour.
             Flow {
                 visible: detail.rewritten
@@ -3090,11 +3171,11 @@ Panel {
                 visible: !detail.fixing
                 spacing: Style.space(8)
                 Button { text: "Copy"; iconText: "󰆏"; bordered: true; foreground: root.foreground; fontFamily: root.fontFamily; fontSize: Style.font.bodySmall; tooltipText: "c · copy the text"
-                    onClicked: { if (service.copy(Model.recordText(detail.record))) root.showNotice("Copied") } }
+                    onClicked: root.copyRecord(detail.item) }
                 Button { text: "Fix a word"; iconText: "󰏫"; bordered: true; foreground: root.foreground; fontFamily: root.fontFamily; fontSize: Style.font.bodySmall
-                    enabled: !!root.caps.learned && root.learningOn
-                    tooltipText: !root.caps.learned ? "Fix a word " + Model.NEEDS_TUI_02 : (root.learningOn ? "f · teach Voxtype the right word" : "Learning is off in Settings")
-                    onClicked: { root.expandedId = detail.item.id; root.fixId = detail.item.id; root.fixStart = 0; root.fixEnd = 0; root.fixStage = "pick"; keyCatcher.forceActiveFocus() } }
+                    enabled: !!root.caps.learned && root.learningOn && detail.record.truncated !== true
+                    tooltipText: !root.caps.learned ? "Fix a word " + Model.NEEDS_TUI_02 : (detail.record.truncated === true ? "Too long to fix here" : (root.learningOn ? "f · teach Voxtype the right word" : "Learning is off in Settings"))
+                    onClicked: root.startFixFor(detail.item) }
                 Button { text: "Delete"; iconText: "󰆴"; bordered: true; foreground: root.foreground; fontFamily: root.fontFamily; fontSize: Style.font.bodySmall; tooltipText: "x · delete from history"
                     onClicked: root.deleteHistory(detail.item) }
             }
@@ -3112,8 +3193,13 @@ Panel {
                 Flow {
                     width: parent.width
                     spacing: Style.space(4)
+                    Text {
+                        visible: detail.fixing && root.fixWindow.from > 0
+                        textFormat: Text.PlainText; text: "… " + root.fixWindow.from + " words before"
+                        color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption
+                    }
                     Repeater {
-                        model: detail.fixing ? root.fixTokens : []
+                        model: detail.fixing ? root.fixWindow.tokens : []
                         delegate: Button {
                             required property var modelData
                             readonly property bool inSpan: modelData.index >= root.fixStart && modelData.index <= root.fixEnd
@@ -3125,6 +3211,11 @@ Panel {
                             horizontalPadding: Style.space(5)
                             onClicked: root.pickFixWord(modelData.index, root.fixStage === "pick" && modelData.index === root.fixEnd + 1)
                         }
+                    }
+                    Text {
+                        visible: detail.fixing && root.fixWindow.to < root.fixTokens.length
+                        textFormat: Text.PlainText; text: (root.fixTokens.length - root.fixWindow.to) + " more words · → reaches them"
+                        color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption
                     }
                 }
                 Row {

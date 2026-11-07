@@ -19,6 +19,19 @@ var MODIFIER_LABELS = {LEFTCTRL: "Ctrl", LEFTALT: "Alt", LEFTSHIFT: "Shift", LEF
 
 function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
 
+// Lists read back from a QML `var` property (bridge data stored on the
+// panel) arrive as Qt sequence objects: Array.isArray() is false for them in
+// the running shell although they index like arrays. Test for a list with
+// isList() and copy it into a real Array with toList() before using Array
+// methods on it.
+function isList(x) { return x !== null && x !== undefined && typeof x === "object" && typeof x.length === "number"; }
+function toList(x) {
+    var out = [];
+    if (!isList(x)) return out;
+    for (var i = 0; i < x.length; i++) out.push(x[i]);
+    return out;
+}
+
 // Bridge output is attacker-influenced text from a child process: cap it,
 // parse strictly, and never trust `ok` from a non-zero exit.
 function parseResponse(text, code, timedOut) {
@@ -515,7 +528,9 @@ function hintPairs(section, context) {
     if (section === "home") return move.concat([["r", "record"], ["o", "on/off"], ["u", "usage"], ["Ctrl+R", "restart"], ["1–4", "sections"]]);
     // A learned row has its own verbs; the footer follows the cursor.
     if (section === "words" && c.rowKind === "learned") return [["Enter", "accept"], ["p", "promote"], ["x", "reject"], ["d", "forget"]];
-    if (section === "words") return move.concat([["/", "search"], ["a", "add"], ["c", "type"], ["x", "delete"], ["A–Z", "jump"]]);
+    // Shift+X is the kit key catcher's Delete (it never reaches the panel as
+    // a letter), so the jump covers every other capital.
+    if (section === "words") return move.concat([["/", "search"], ["a", "add"], ["c", "type"], ["x", "delete"], ["Shift+A–Z", "jump (not X)"]]);
     if (section === "history") return move.concat([["Enter", "open"], ["c", "copy"], ["f", "fix"], ["x", "delete"]]);
     if (section === "settings") return move.concat([["←→", "change"], ["Enter", "open"], ["u", "reset"], ["1–4", "sections"]]);
     return [];
@@ -873,7 +888,7 @@ function learnedRows(entries) {
         var e = entries[i];
         if (!e || typeof e.id !== "string" || typeof e.written !== "string") continue;
         if (e.state === "rejected" || e.state === "promoted") continue;
-        var heard = Array.isArray(e.heard) ? e.heard.join(", ") : String(e.heard || "");
+        var heard = isList(e.heard) ? toList(e.heard).join(", ") : String(e.heard || "");
         out.push({id: "l:" + e.id, entryId: e.id, kind: "learned", heard: heard, written: e.written,
                   tag: WORD_TAGS[e.kind] || String(e.kind || ""), state: String(e.state || ""),
                   stateLabel: LEARN_STATE_LABELS[e.state] || String(e.state || "")});
@@ -886,6 +901,16 @@ function learnedRows(entries) {
         return x < y ? -1 : (x > y ? 1 : 0);
     });
     return out;
+}
+
+// Everything learned.json holds, rejected and promoted tombstones included
+// (learn.reset clears those too): from learn.list's counts, else entries.
+function learnedTotal(state) {
+    if (!state) return 0;
+    var c = state.counts || {};
+    var sum = 0;
+    for (var k in c) if (typeof c[k] === "number" && c[k] > 0) sum += c[k];
+    return Math.max(sum, (state.entries || []).length);
 }
 
 function matchesQuery(row, q) {
@@ -1006,6 +1031,22 @@ function historyRows(items, query, now) {
     return out;
 }
 
+// An older page appended to the loaded list: records already shown (same
+// id) are not added again.
+function appendHistory(list, items) {
+    var seen = {};
+    var out = toList(list);
+    for (var i = 0; i < out.length; i++) if (out[i] && typeof out[i].id === "string") seen[out[i].id] = true;
+    var add = toList(items);
+    for (var j = 0; j < add.length; j++) {
+        var rec = add[j];
+        if (!rec || typeof rec.id !== "string" || seen[rec.id]) continue;
+        seen[rec.id] = true;
+        out.push(rec);
+    }
+    return out;
+}
+
 function historyItems(rows) {
     var out = [];
     for (var i = 0; i < (rows || []).length; i++) if (rows[i].type === "item") out.push(rows[i]);
@@ -1054,16 +1095,38 @@ function changedByRules(raw, finalText) { return String(raw || "").trim() !== St
 // ---- Fix a word -------------------------------------------------------------
 
 // The words of a dictation as clickable tokens: leading/trailing
-// punctuation is kept aside so "Omashi." offers "Omashi".
+// punctuation is kept aside so "Omashi." offers "Omashi". `start`/`end` are
+// offsets into the original text, so a fix replaces only the picked span.
 var FIX_EDGE = /^([\"'“”‘’«»(\[{¿¡]*)(.*?)([\"'“”‘’«»)\]}.,!?;:…]*)$/;
+// learn.submit refuses a longer edited text (bridge LEARN_EDIT_MAX_CHARS).
+var FIX_TEXT_MAX_CHARS = 4096;
+// How many words the Fix card shows at once; the window follows the pick.
+var FIX_SHOWN_MAX = 200;
 function fixTokens(text) {
-    var parts = String(text || "").split(/\s+/).filter(function(w) { return w !== ""; });
+    var s = String(text || "");
+    var re = /\S+/g;
     var out = [];
-    for (var i = 0; i < parts.length && i < 200; i++) {
-        var m = FIX_EDGE.exec(parts[i]);
-        out.push({index: i, raw: parts[i], lead: m ? m[1] : "", word: m ? m[2] : parts[i], trail: m ? m[3] : ""});
+    var m;
+    while ((m = re.exec(s)) !== null) {
+        var e = FIX_EDGE.exec(m[0]);
+        out.push({index: out.length, raw: m[0], lead: e ? e[1] : "", word: e ? e[2] : m[0], trail: e ? e[3] : "",
+                  start: m.index, end: m.index + m[0].length});
     }
     return out;
+}
+
+// The slice of tokens the Fix card renders: at most `max`, always holding
+// the picked span, so every word of a long dictation can be reached.
+function fixWindow(tokens, start, end, max) {
+    var list = toList(tokens);
+    var n = list.length;
+    var cap = max || FIX_SHOWN_MAX;
+    if (n <= cap) return {from: 0, to: n, tokens: list};
+    var s = clamp(Math.min(start, end), 0, n - 1), e = clamp(Math.max(start, end), 0, n - 1);
+    var from = clamp(Math.floor((s + e + 1) / 2) - Math.floor(cap / 2), 0, n - cap);
+    if (s < from) from = s;
+    if (e >= from + cap) from = e - cap + 1;
+    return {from: from, to: from + cap, tokens: list.slice(from, from + cap)};
 }
 
 function clampSpan(tokens, start, end) {
@@ -1081,18 +1144,18 @@ function spanText(tokens, start, end) {
     return words.join(" ");
 }
 
-// The whole dictation with the chosen span replaced; punctuation that
-// framed the span stays ("Omashi." -> "Omarchy.").
-function fixedText(tokens, start, end, replacement) {
+// The original dictation with only the chosen span replaced: every other
+// character (spacing, line breaks, words after the span) is the original
+// text, and punctuation that framed the span stays ("Omashi." -> "Omarchy.").
+// `tokens` must come from fixTokens(text).
+function fixedText(text, tokens, start, end, replacement) {
+    var s = String(text || "");
     var sp = clampSpan(tokens, start, end);
     var rep = String(replacement || "").replace(/[\r\n\t]+/g, " ").replace(UNSAFE_CHARS, "").trim();
     if (sp.start < 0 || rep === "") return null;
-    var out = [];
-    for (var i = 0; i < tokens.length; i++) {
-        if (i < sp.start || i > sp.end) { out.push(tokens[i].raw); continue; }
-        if (i === sp.start) out.push(tokens[sp.start].lead + rep + tokens[sp.end].trail);
-    }
-    return out.join(" ");
+    var a = tokens[sp.start], b = tokens[sp.end];
+    if (typeof a.start !== "number" || typeof b.end !== "number" || s.slice(a.start, a.end) !== a.raw || s.slice(b.start, b.end) !== b.raw) return null;
+    return s.slice(0, a.start + a.lead.length) + rep + s.slice(b.end - b.trail.length);
 }
 
 var FIX_KINDS = [{value: "sounds_like", label: "sounds like"}, {value: "replace", label: "replace"}, {value: "spelling", label: "spelling"}];
@@ -1115,9 +1178,13 @@ function cycleValue(options, current, delta) {
     return list[(idx + delta + list.length) % list.length].value;
 }
 
+// A row's display label. A value outside the known options comes from the
+// config file (bridge data): it is sanitized and capped here, at the
+// rendering boundary; writes keep using the raw setting value.
+var OPTION_LABEL_MAX = 40;
 function optionLabel(options, value, fallback) {
-    for (var i = 0; i < (options || []).length; i++) if (JSON.stringify(options[i].value) === JSON.stringify(value)) return options[i].label;
-    return fallback !== undefined ? fallback : String(value);
+    for (var i = 0; i < (options || []).length; i++) if (JSON.stringify(options[i].value) === JSON.stringify(value)) return sanitize(options[i].label, OPTION_LABEL_MAX);
+    return sanitize(fallback !== undefined ? fallback : String(value), OPTION_LABEL_MAX);
 }
 
 // ---- Usage -----------------------------------------------------------------
@@ -1226,7 +1293,10 @@ function hourBars(hours) {
 // right after an upgrade, before anything saved the config).
 function pendingWiring(health) {
     var p = health && health.pending_wiring;
-    return Array.isArray(p) ? p.filter(function(f) { return typeof f === "string"; }) : [];
+    var out = [];
+    if (!isList(p)) return out;
+    for (var i = 0; i < p.length; i++) if (typeof p[i] === "string") out.push(p[i]);
+    return out;
 }
 
 function healthLine(health) {
@@ -1236,10 +1306,10 @@ function healthLine(health) {
     if (pending.indexOf("capture") >= 0) parts.push("Not counting yet: Voxtype isn't connected");
     else if (pending.indexOf("duration") >= 0) parts.push("Durations start once Voxtype is connected");
     else if (pending.length) parts.push("Learning in apps starts once Voxtype is connected");
-    var un = (health.unavailable || []).filter(function(u) { return u && pending.indexOf(u.feature) < 0; });
+    var un = toList(health.unavailable).filter(function(u) { return u && pending.indexOf(u.feature) < 0; });
     for (var i = 0; i < un.length && i < 2; i++) if (un[i].reason) parts.push(sanitize(un[i].feature, 20) + ": " + sanitize(un[i].reason, 60));
     if (health.dropped) parts.push(health.dropped + " dictation" + (health.dropped === 1 ? "" : "s") + " not counted");
-    var f = health.failures || [];
+    var f = toList(health.failures);
     if (f.length) parts.push("last error: " + sanitize(f[f.length - 1].msg || f[f.length - 1].where, 60));
     return parts.join(" · ");
 }
@@ -1388,7 +1458,7 @@ function learnNotice(result) {
 function learnSummary(entries) {
     var e = (entries || [])[0];
     if (!e) return "";
-    var heard = Array.isArray(e.heard) ? e.heard[0] : e.heard;
+    var heard = isList(e.heard) ? e.heard[0] : e.heard;
     var s = (heard ? sanitize(heard, 30) + " → " : "") + sanitize(e.written, 30);
     return entries.length > 1 ? s + " +" + (entries.length - 1) : s;
 }

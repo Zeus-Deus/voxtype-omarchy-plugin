@@ -536,3 +536,48 @@ test('healthLine says Voxtype is not connected instead of listing each pending h
   same(Model.pendingWiring({pending_wiring: 'capture'}), []);
   assert.equal(Model.healthLine({unavailable: [], failures: []}), '');
 });
+
+// A Qt sequence read back from a QML `var` property: indexable, has a
+// length, but Array.isArray() is false and Array methods may be missing.
+const qtList = (...items) => Object.assign({length: items.length}, items);
+
+test('bridge lists that arrive as Qt sequences (not JS Arrays) are still read', () => {
+  assert.equal(Array.isArray(qtList('a')), false);
+  same(Model.pendingWiring({pending_wiring: qtList('capture', 'duration', 7)}), ['capture', 'duration']);
+  assert.equal(Model.healthLine({pending_wiring: qtList('capture', 'duration'),
+                                 unavailable: qtList({feature: 'capture', reason: 'x'}, {feature: 'archive', reason: 'pw-record missing'}),
+                                 failures: qtList({msg: 'old'}, {msg: 'last'})}),
+               "Not counting yet: Voxtype isn't connected · archive: pw-record missing · last error: last");
+  const rows = Model.learnedRows(qtList({id: 'l1', kind: 'sounds_like', written: 'Omarchy', heard: qtList('oh marchy', 'omashi'), state: 'active'}));
+  assert.equal(rows[0].heard, 'oh marchy, omashi');
+  assert.equal(Model.learnSummary(qtList({heard: qtList('omashi'), written: 'Omarchy'})), 'omashi → Omarchy');
+  assert.equal(Model.isList('abc'), false, 'a string is not a list');
+  same(Model.appendHistory(qtList({id: 'a'}), qtList({id: 'a'}, {id: 'b'})).map(r => r.id), ['a', 'b']);
+  assert.equal(Model.fixWindow(qtList({index: 0}, {index: 1}), 0, 0, 200).tokens.length, 2);
+});
+
+test('fixTokens keeps offsets; fixedText replaces only the picked span of the original text', () => {
+  const text = '  «Omashi.»  menu\n\nopen   it';
+  const t = Model.fixTokens(text);
+  same(t.map(x => x.word), ['Omashi', 'menu', 'open', 'it']);
+  assert.equal(text.slice(t[0].start, t[0].end), '«Omashi.»');
+  assert.equal(Model.fixedText(text, t, 0, 0, 'Omarchy'), '  «Omarchy.»  menu\n\nopen   it');
+  assert.equal(Model.fixedText(text, t, 1, 2, 'menu, open'), '  «Omashi.»  menu, open   it');
+  assert.equal(Model.fixedText(text, t, 0, 0, '  '), null, 'blank replacement');
+  assert.equal(Model.fixedText('other text', t, 0, 0, 'x'), null, 'tokens from another text are refused');
+  const long = Array.from({length: 450}, (_, i) => 'w' + i).join(' ');
+  const lt = Model.fixTokens(long);
+  assert.equal(lt.length, 450, 'no 200-word cap');
+  assert.equal(Model.fixedText(long, lt, 400, 400, 'X'), long.replace('w400', 'X'));
+  const w = Model.fixWindow(lt, 400, 401, 200);
+  assert.ok(w.to - w.from === 200 && w.from <= 400 && w.to > 401 && w.tokens[0].index === w.from);
+  same(Model.fixWindow(lt, 0, 0, 200).from, 0);
+  same(Model.fixWindow(lt, 449, 449, 200).to, 450);
+});
+
+test('learnedTotal counts tombstones too; appendHistory drops repeated ids', () => {
+  assert.equal(Model.learnedTotal(null), 0);
+  assert.equal(Model.learnedTotal({entries: [], counts: {active: 0, rejected: 2, promoted: 1, junk: true}}), 3);
+  assert.equal(Model.learnedTotal({entries: [{id: 'a'}], counts: {}}), 1);
+  same(Model.appendHistory([{id: 'a'}, {id: 'b'}], [{id: 'b'}, {id: 'c'}, {id: 'c'}, null, {id: 3}]).map(r => r.id), ['a', 'b', 'c']);
+});

@@ -695,7 +695,7 @@ test('footer hints mirror the live key bindings: every hinted key is bound and e
       for (const [key] of pairs) {
         if (catcher[key]) { assert.match(panel, catcher[key], key + ' in ' + page); continue; }
         if (key === '/' || key === 'r') continue;
-        if (key === 'A–Z') { assert.match(textKeys, /page === "words" && \/\^\[A-Z\]\$\/\.test\(t\)\) jumpToLetter\(t\)/); continue; }
+        if (key === 'Shift+A–Z') { assert.match(textKeys, /page === "words" && \/\^\[A-Z\]\$\/\.test\(t\)\) jumpToLetter\(t\)/); continue; }
         assert.ok(bound[page] && bound[page].has(key), page + ' hints "' + key + '" but handleTextKey does not bind it');
       }
       if (editing) assert.ok(pairs.some(p => p[0] === 'Esc'), 'editing: Esc leaves the field');
@@ -1111,4 +1111,193 @@ test('Home usage card: Enter connects Voxtype while its hooks are pending, else 
   h2.root.usage = {enabled: true, days: [], totals: {}, health: {pending_wiring: ['capture']}};
   h2.root.connectVoxtype();
   assert.deepEqual(JSON.parse(JSON.stringify(h2.requests.filter(r => r.op === "features.set").pop().patch)), {usage: {enabled: false}});
+});
+
+const record = (id, text, extra) => Object.assign({id, ts: '2026-11-06T20:35:53Z', raw: text, final: text}, extra || {});
+
+test('Fix a word submits the stored text with only the picked span replaced, also past word 200', () => {
+  const words = Array.from({length: 250}, (_, i) => 'w' + i);
+  words[230] = 'omashi.';
+  // Original spacing (double spaces, a line break) must survive untouched.
+  const text = words.slice(0, 120).join(' ') + '\n\n' + words.slice(120).join('  ');
+  const h = panelHarness();
+  h.root.status = Object.assign({}, h.root.status, {capabilities: {history: true, learned: true}});
+  h.root.section = 'history';
+  h.root.historyList = [record('r1', text)];
+  h.root.fixField = field();
+  h.root.startFixFor({id: 'r1'});
+  assert.equal(h.root.fixStage, 'pick');
+  assert.equal(h.root.fixTokens.length, 250, 'every word is a token');
+  for (let i = 0; i < 230; i++) h.root.moveCursor(1);
+  assert.equal(h.root.fixStart, 230, 'word 231 is reachable with the arrows');
+  const win = h.root.fixWindow;
+  assert.ok(win.tokens.length <= h.root.Model.FIX_SHOWN_MAX && win.from <= 230 && win.to > 230, 'the shown window holds the pick');
+  h.root.activateCursor();
+  assert.equal(h.root.fixStage, 'type');
+  assert.equal(h.root.fixField.text, 'omashi');
+  h.root.fixField.text = 'Omarchy';
+  h.root.submitFix();
+  const req = h.requests.filter(r => r.op === 'learn.submit').pop();
+  assert.equal(req.edited, text.replace('omashi.', 'Omarchy.'), 'one span changed, nothing else');
+});
+
+test('Fix a word refuses a shortened or over-long dictation instead of submitting a rewrite', () => {
+  const h = panelHarness();
+  h.root.status = Object.assign({}, h.root.status, {capabilities: {history: true, learned: true}});
+  h.root.section = 'history';
+  h.root.historyList = [record('r1', 'cut text', {truncated: true}), record('r2', 'x '.repeat(3000))];
+  h.root.startFixFor({id: 'r1'});
+  assert.equal(h.root.fixStage, '');
+  assert.match(h.root.notice, /too long to fix/);
+  h.root.startFixFor({id: 'r2'});
+  assert.equal(h.root.fixStage, '');
+  assert.match(panel, /enabled: !!root\.caps\.learned && root\.learningOn && detail\.record\.truncated !== true/);
+  assert.match(panel, /onClicked: root\.startFixFor\(detail\.item\)/, 'the Fix button goes through the same checks');
+});
+
+test('collapsing or losing the dictation being fixed ends Fix, so keys are not swallowed', () => {
+  const h = panelHarness();
+  h.root.status = Object.assign({}, h.root.status, {capabilities: {history: true, learned: true}});
+  h.root.section = 'history';
+  h.root.historyList = [record('r1', 'open the omashi menu'), record('r2', 'second one')];
+  h.root.setCursor('rows', 0);
+  h.root.startFix();
+  assert.equal(h.root.fixStage, 'pick');
+  // Click the same dictation's header: it collapses and Fix ends.
+  h.root.toggleExpand(h.root.historyItems[0]);
+  assert.equal(h.root.expandedId, '');
+  assert.equal(h.root.fixStage, '');
+  assert.equal(h.root.fixId, '');
+  h.root.handleTextKey('4');
+  assert.equal(h.root.section, 'settings', 'section keys work again');
+  // The dictation disappears (deleted, filtered out): Fix ends too.
+  h.root.section = 'history';
+  h.root.setCursor('rows', 1);
+  h.root.startFix();
+  assert.equal(h.root.fixId, 'r2');
+  h.root.historyList = [record('r1', 'open the omashi menu')];
+  h.root.dropStaleFix();
+  assert.equal(h.root.fixStage, '');
+  assert.match(panel, /onHistoryItemsChanged: \{ clampCursor\(\); dropStaleFix\(\) \}/);
+  assert.match(panel, /onExpandedIdChanged: dropStaleFix\(\)/);
+});
+
+test('Load older: one request per cursor, late or repeated pages never duplicate records', () => {
+  const h = panelHarness();
+  h.root.status = Object.assign({}, h.root.status, {capabilities: {history: true}});
+  h.root.section = 'history';
+  h.root.historyList = [record('r3', 'c'), record('r2', 'b')];
+  h.root.historyNext = 'r2';
+  h.root.loadMoreHistory();
+  h.root.loadMoreHistory();
+  const more = h.requests.filter(r => r.op === 'history.list' && r.before);
+  assert.equal(more.length, 1, 'a second click while the first is in flight sends nothing');
+  const page = {ok: true, enabled: true, keep_days: 30, items: [record('r2', 'b'), record('r1', 'a')], next: null};
+  h.complete('history.list', page, more[0]);
+  assert.deepEqual([...h.root.historyList.map(r => r.id)], ['r3', 'r2', 'r1'], 'deduplicated by id');
+  assert.equal(h.root.historyMoreCursor, '');
+  // A duplicate reply for the old cursor (e.g. queued before the fix) is ignored.
+  h.complete('history.list', page, more[0]);
+  assert.deepEqual([...h.root.historyList.map(r => r.id)], ['r3', 'r2', 'r1']);
+  // A failed page frees the cursor, so the user can retry.
+  h.root.historyNext = 'r1';
+  h.root.loadMoreHistory();
+  const retry = h.requests.filter(r => r.op === 'history.list' && r.before).pop();
+  h.complete('history.list', {ok: false, error: 'boom'}, retry);
+  assert.equal(h.root.historyMoreCursor, '');
+  h.root.loadMoreHistory();
+  assert.equal(h.requests.filter(r => r.op === 'history.list' && r.before === 'r1').length, 2);
+});
+
+test('features.set with a wiring_error warns instead of a plain Saved', () => {
+  const h = panelHarness();
+  h.root.status = Object.assign({}, h.root.status, {capabilities: {features: true}});
+  const req = {op: 'features.set', patch: {learning: {enabled: true}}};
+  h.complete('features.set', {ok: true, features: {}, available: {}, reasons: {}, restart_needed: [], daemon_stale: false,
+    wiring_error: "could not update voxtype's config: \u202eboom\nline"}, req);
+  assert.notEqual(h.root.notice, 'Saved');
+  assert.match(h.root.errorText, /^Saved, but Voxtype is not connected: could not update voxtype's config: boom line$/);
+  h.complete('features.set', {ok: true, features: {}, available: {}, reasons: {}, restart_needed: [], daemon_stale: false}, req);
+  assert.equal(h.root.notice, 'Saved');
+  assert.equal(h.root.errorText, '');
+});
+
+test('Reset all stays reachable when only rejected or promoted entries remain', () => {
+  const h = panelHarness();
+  h.root.status = Object.assign({}, h.root.status, {capabilities: {learned: true}});
+  h.root.section = 'words';
+  h.root.learnedState = {ok: true, entries: [{id: 'l1', kind: 'spelling', written: 'Omarchy', heard: ['omashi'], state: 'rejected'}],
+                         counts: {active: 0, suggested: 0, dormant: 0, rejected: 1, promoted: 0}};
+  assert.equal(h.root.learnedWords.length, 0, 'the tombstone is not a visible row');
+  assert.equal(h.root.learnedTotal, 1);
+  assert.ok(h.root.targetsFor('words').includes('learn.reset'));
+  h.root.resetLearned();
+  assert.equal(h.root.confirmAction, 'learn.reset');
+  assert.equal(h.root.confirmation.selectedIndex, 0, 'Cancel first');
+  assert.match(h.root.confirmation.message, /1 learned words \(1 rejected or promoted\)/);
+  assert.match(panel, /visible: root\.learnedGroupShown/);
+  assert.match(panel, /visible: root\.learnedTotal > 0\n\s*text: "Reset all"/);
+});
+
+test('Words rows offer a hover delete for words and rules through the x confirmation', () => {
+  const row = panel.slice(panel.indexOf('component WordRow'), panel.indexOf('component Tag'));
+  assert.match(row, /PanelActionButton \{\n\s*visible: wordRow\.hasCursor && \(wordRow\.word\.kind === "vocab" \|\| wordRow\.word\.kind === "rule"\)/);
+  assert.match(row, /hoverColor: root\.urgent/);
+  assert.match(row, /onClicked: \{ root\.setCursor\("rows", wordRow\.rowIndex\); root\.deleteSelected\(\) \}/);
+  const h = panelHarness();
+  h.root.section = 'words';
+  h.root.snapshot = {vocabulary: [{phrase: 'Codemux'}], replacements: [{from: 'code mucks', to: 'Codemux', category: 'Replacement'}], settings: {}};
+  const asked = [];
+  for (const i of [0, 1]) {
+    h.root.setCursor('rows', i); h.root.deleteSelected();
+    asked.push(h.root.confirmAction);
+    assert.equal(h.root.confirmation.selectedIndex, 0, 'Cancel first');
+    h.root.confirmation.opened = false;
+  }
+  assert.deepEqual(asked.sort(), ['dict.remove', 'vocab.remove']);
+});
+
+test('Shift+letter jumps on Words before r records; Shift+X stays the kit Delete and the hints say so', () => {
+  const h = panelHarness();
+  let records = 0;
+  h.root.service.toggleRecord = () => { records++; return true; };
+  h.root.section = 'words';
+  h.root.snapshot = {vocabulary: [{phrase: 'Alpha'}, {phrase: 'Rust'}, {phrase: 'Zed'}], replacements: [], settings: {}};
+  h.root.handleTextKey('R');
+  assert.equal(records, 0, 'Shift+R does not record on Words');
+  assert.equal(h.root.cursorIndex, 1, 'it jumps to R');
+  h.root.handleTextKey('r');
+  assert.equal(records, 1, 'r still records');
+  h.root.section = 'home';
+  h.root.handleTextKey('R');
+  assert.equal(records, 2, 'Shift+R records outside Words');
+  const kit = '/usr/share/omarchy/shell/Ui/PanelKeyCatcher.qml';
+  if (fs.existsSync(kit)) assert.match(fs.readFileSync(kit, 'utf8'), /event\.text === "X"/, 'the kit still eats X as Delete');
+  const hint = h.root.Model.hintPairs('words', {cursorActive: true}).find(p => p[0] === 'Shift+A–Z');
+  assert.deepEqual(JSON.parse(JSON.stringify(hint)), ['Shift+A–Z', 'jump (not X)']);
+  assert.match(read('README.md'), /Shift\+letter, not X/);
+});
+
+test('Settings labels: unknown values are sanitized at render, Voxtype hotkey mode is named as such', () => {
+  const {Model} = panelHarness().root;
+  assert.equal(Model.optionLabel(Model.LANGUAGES, 'xx\u202e\u2066evil\nline'), 'xxevil line');
+  assert.equal(Model.optionLabel(Model.LANGUAGES, 'q'.repeat(200)).length, Model.OPTION_LABEL_MAX);
+  assert.equal(Model.optionLabel(Model.LANGUAGES, 'de'), 'German');
+  const simple = panel.slice(panel.indexOf('component SimpleRow'), panel.indexOf('component WordRow'));
+  assert.match(simple, /text: Model\.sanitize\(simple\.value, 60\)/);
+  assert.match(simple, /Keycap \{[^\n]*text: Model\.sanitize\(simple\.value, 60\)/);
+  assert.match(panel, /SimpleRow \{ key: "mode"; label: "Hotkey mode"; hint: "Voxtype's own hotkey"/);
+  // Writes keep the raw value: cycling from an unknown language goes to the list.
+  const h = panelHarness();
+  h.root.section = 'settings';
+  h.root.snapshot = {settings: {'whisper.language': 'xx\u202e'}};
+  h.root.cycleSimple('language', 1);
+  assert.equal(h.requests.pop().value, 'auto');
+});
+
+test('Home says LAST 12 MONTHS and the Usage hour chart has a 00 / 12 / 23 axis', () => {
+  assert.match(panel, /SectionHead \{ title: "LAST 12 MONTHS"/);
+  assert.doesNotMatch(panel, /"THIS YEAR"/);
+  const axis = panel.slice(panel.indexOf('id: hourAxis'), panel.indexOf('text: hourRow.bars.busiest'));
+  for (const t of ['"00"', '"12"', '"23"']) assert.ok(axis.includes('text: ' + t), t);
 });
