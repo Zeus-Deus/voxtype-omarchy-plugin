@@ -1143,7 +1143,10 @@ Panel {
                 // disconnected, so this is a warning, not "Saved".
                 if (typeof result.wiring_error === "string" && result.wiring_error !== "") {
                     root.notice = "";
-                    root.errorText = "Saved, but Voxtype is not connected: " + Model.sanitize(result.wiring_error, 160);
+                    // voxtype-tui's text is technical ("could not update voxtype's config: <toml error>"):
+                    // one plain line, the cause only when it is already short.
+                    var cause = Model.shortDetail(String(result.wiring_error).replace(/^could not update voxtype's config: /, ""), 50);
+                    root.errorText = "Saved, but Voxtype's config couldn't be updated, so it isn't connected yet" + (cause ? " (" + cause + ")" : "");
                 } else {
                     root.notice = "Saved";
                     noticeTimer.restart();
@@ -1650,7 +1653,7 @@ Panel {
                                             visible: root.wiringPending
                                             width: parent.width; wrapMode: Text.WordWrap
                                             textFormat: Text.PlainText
-                                            text: Model.healthLine({pending_wiring: root.usage ? root.usage.health.pending_wiring : []}) + " · Enter connects it"
+                                            text: Model.healthLine({pending_wiring: root.usage && root.usage.health ? root.usage.health.pending_wiring : []}) + " · Enter connects it"
                                             color: Commons.Color.accent; font.family: root.fontFamily; font.pixelSize: Style.font.caption
                                         }
                                     }

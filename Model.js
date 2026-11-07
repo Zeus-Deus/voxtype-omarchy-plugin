@@ -1310,8 +1310,24 @@ function healthLine(health) {
     for (var i = 0; i < un.length && i < 2; i++) if (un[i].reason) parts.push(sanitize(un[i].feature, 20) + ": " + sanitize(un[i].reason, 60));
     if (health.dropped) parts.push(health.dropped + " dictation" + (health.dropped === 1 ? "" : "s") + " not counted");
     var f = toList(health.failures);
-    if (f.length) parts.push("last error: " + sanitize(f[f.length - 1].msg || f[f.length - 1].where, 60));
+    if (f.length) parts.push(failureLine(f[f.length - 1]));
     return parts.join(" · ");
+}
+
+// One short human line for a voxtype-tui failure record: where it happened in
+// plain words, plus its message only when that is already short. A long
+// technical message is dropped, never cut mid-sentence.
+var FAILURE_PLACES = {"post-process": "while capturing", "post-output": "after a dictation", "pre-recording": "at recording start",
+                      "archive": "saving the archive", "learn_watch": "while learning", "features.set": "updating Voxtype's config",
+                      "maintain": "tidying history"};
+function shortDetail(text, max) {
+    var s = sanitize(text, max + 1);
+    return s !== "" && s.length <= max && String(text).indexOf("\n") < 0 ? s : "";
+}
+function failureLine(f) {
+    var place = f && FAILURE_PLACES[f.where] ? FAILURE_PLACES[f.where] : "";
+    var detail = shortDetail(f && f.msg, 40);
+    return "Last problem" + (place ? " " + place : "") + (detail ? ": " + detail : "");
 }
 
 // ---- Settings (simple rows) --------------------------------------------------

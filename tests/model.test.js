@@ -547,7 +547,7 @@ test('bridge lists that arrive as Qt sequences (not JS Arrays) are still read', 
   assert.equal(Model.healthLine({pending_wiring: qtList('capture', 'duration'),
                                  unavailable: qtList({feature: 'capture', reason: 'x'}, {feature: 'archive', reason: 'pw-record missing'}),
                                  failures: qtList({msg: 'old'}, {msg: 'last'})}),
-               "Not counting yet: Voxtype isn't connected · archive: pw-record missing · last error: last");
+               "Not counting yet: Voxtype isn't connected · archive: pw-record missing · Last problem: last");
   const rows = Model.learnedRows(qtList({id: 'l1', kind: 'sounds_like', written: 'Omarchy', heard: qtList('oh marchy', 'omashi'), state: 'active'}));
   assert.equal(rows[0].heard, 'oh marchy, omashi');
   assert.equal(Model.learnSummary(qtList({heard: qtList('omashi'), written: 'Omarchy'})), 'omashi → Omarchy');
@@ -580,4 +580,14 @@ test('learnedTotal counts tombstones too; appendHistory drops repeated ids', () 
   assert.equal(Model.learnedTotal({entries: [], counts: {active: 0, rejected: 2, promoted: 1, junk: true}}), 3);
   assert.equal(Model.learnedTotal({entries: [{id: 'a'}], counts: {}}), 1);
   same(Model.appendHistory([{id: 'a'}, {id: 'b'}], [{id: 'b'}, {id: 'c'}, {id: 'c'}, null, {id: 3}]).map(r => r.id), ['a', 'b', 'c']);
+});
+
+test('a failure is one short human line: plain place, message only when short, never cut mid-sentence', () => {
+  assert.equal(Model.failureLine({where: 'archive', msg: 'pw-record exited 1'}), 'Last problem saving the archive: pw-record exited 1');
+  const long = "module 'voxtype_tui.learn_watch' has no attribute 'on_post_output' while handling the record";
+  assert.equal(Model.failureLine({where: 'learn_watch', msg: long}), 'Last problem while learning');
+  assert.equal(Model.failureLine({where: 'post-output', msg: 'Traceback\nline 2'}), 'Last problem after a dictation');
+  assert.equal(Model.failureLine({where: 'something-new', msg: ''}), 'Last problem');
+  assert.ok(!/…/.test(Model.healthLine({failures: [{where: 'archive', msg: long}]})), 'nothing is cut with an ellipsis');
+  assert.equal(Model.shortDetail('a\u202eb', 10), 'ab');
 });

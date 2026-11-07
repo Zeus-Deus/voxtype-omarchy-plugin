@@ -1216,7 +1216,11 @@ test('features.set with a wiring_error warns instead of a plain Saved', () => {
   h.complete('features.set', {ok: true, features: {}, available: {}, reasons: {}, restart_needed: [], daemon_stale: false,
     wiring_error: "could not update voxtype's config: \u202eboom\nline"}, req);
   assert.notEqual(h.root.notice, 'Saved');
-  assert.match(h.root.errorText, /^Saved, but Voxtype is not connected: could not update voxtype's config: boom line$/);
+  assert.equal(h.root.errorText, "Saved, but Voxtype's config couldn't be updated, so it isn't connected yet",
+    'a multi-line technical cause is dropped, not cut');
+  h.complete('features.set', {ok: true, features: {}, available: {}, reasons: {}, restart_needed: [], daemon_stale: false,
+    wiring_error: "could not update voxtype's config: disk full"}, req);
+  assert.equal(h.root.errorText, "Saved, but Voxtype's config couldn't be updated, so it isn't connected yet (disk full)");
   h.complete('features.set', {ok: true, features: {}, available: {}, reasons: {}, restart_needed: [], daemon_stale: false}, req);
   assert.equal(h.root.notice, 'Saved');
   assert.equal(h.root.errorText, '');
