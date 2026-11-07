@@ -3703,6 +3703,71 @@ def test_history_list_bounds_and_ids(env: Env, insights):
     assert env.ok("history.clear")["removed"] == 7
 
 
+def test_history_list_page_fits_the_response_cap_and_pages_on(env: Env, insights, monkeypatch: pytest.MonkeyPatch):
+    """Thirty 40,000-character dictations exceed the 2 MB cap: the bridge
+    sends the largest prefix that fits and `next` continues after it, so
+    the panel always gets past a page of long dictations."""
+    big = [{"id": f"20261106T2035{i:02d}Z-1a2b", "raw": "w" * 40_000, "final": "W" * 40_000} for i in range(30, 0, -1)]
+    store = {"items": big}
+
+    def history_list(before=None, limit=20):
+        items = [i for i in store["items"] if before is None or i["id"] < before]
+        page = items[:limit]
+        return {"enabled": True, "keep_days": 30, "items": page, "next": page[-1]["id"] if len(items) > limit else None}
+
+    monkeypatch.setattr(insights, "history_list", history_list)
+    seen: list[str] = []
+    before = None
+    for _ in range(10):
+        args = {"limit": 30} if before is None else {"limit": 30, "before": before}
+        text = bridge.encode_response(bridge.handle({"op": "history.list", **args}))
+        assert len(text.encode("utf-8")) <= bridge.MAX_RESPONSE_BYTES
+        res = json.loads(text)
+        assert res["ok"] is True, res
+        assert res["items"], "every page carries at least one record"
+        assert all(len(i["raw"]) == 40_000 and "truncated" not in i for i in res["items"])
+        seen += [i["id"] for i in res["items"]]
+        before = res["next"]
+        if before is None:
+            break
+    assert seen == [i["id"] for i in big], "every record once, in order"
+
+
+def test_history_list_cuts_an_oversized_record_instead_of_failing(env: Env, insights, monkeypatch: pytest.MonkeyPatch):
+    huge = {"id": "20261106T203553Z-aaaa", "ts": "2026-11-06T20:35:53Z", "raw": "é" * 1_000_000, "final": "x" * 1_000_000}
+    odd = {"id": "20261106T203552Z-bbbb", "raw": "ok", "final": "ok", "app": {"class": "y" * 1_000_000}}
+    small = {"id": "20261106T203551Z-cccc", "raw": "short", "final": "short"}
+    monkeypatch.setattr(insights, "history_list", lambda before=None, limit=20: {
+        "enabled": True, "keep_days": 30, "items": [huge, odd, small], "next": None})
+    text = bridge.encode_response(bridge.handle({"op": "history.list"}))
+    res = json.loads(text)
+    assert res["ok"] is True and len(text.encode("utf-8")) <= bridge.MAX_RESPONSE_BYTES
+    first, second, third = res["items"]
+    assert first["truncated"] is True and first["id"] == huge["id"] and first["ts"] == huge["ts"]
+    assert first["raw"] == "é" * bridge.HISTORY_TEXT_MAX_CHARS and first["final"] == "x" * bridge.HISTORY_TEXT_MAX_CHARS
+    assert second == {"id": odd["id"], "raw": "", "final": "", "truncated": True, "oversized": True}, "a marker, never an error page"
+    assert third == small and res["next"] is None
+
+
+def test_features_set_keeps_voxtype_tui_wiring_error(env: Env, insights, monkeypatch: pytest.MonkeyPatch):
+    """voxtype-tui saves the switches but reports that the hooks could not
+    be rewired: the reply carries that warning instead of a plain success."""
+    plain = insights.set_features
+
+    def failing(patch, config_path=None):
+        out = plain(patch, config_path=config_path)
+        out["wiring_error"] = "could not update voxtype's config: " + "boom " * 200
+        return out
+
+    monkeypatch.setattr(insights, "set_features", failing)
+    res = env.ok("features.set", patch={"usage": {"enabled": True}})
+    assert res["wiring_error"].startswith("could not update voxtype's config: boom")
+    assert len(res["wiring_error"]) <= bridge.WIRING_ERROR_MAX_CHARS
+    assert res["features"]["usage"]["enabled"] is True
+    monkeypatch.setattr(insights, "set_features", plain)
+    assert "wiring_error" not in env.ok("features.set", patch={"usage": {"enabled": True}})
+
+
 def test_learn_list_counts_and_entries(env: Env, learned):
     res = env.ok("learn.list")
     assert [e["id"] for e in res["entries"]] == ["l_7f3a0c12de", "l_aaaa"], "non-dict entries are dropped"
@@ -3807,3 +3872,18 @@ def test_real_learned_ops_round_trip(env: Env):
     assert env.ok("learn.reset")["removed"] == 0
     prev = env.ok("learn.everywhere.preview")
     assert prev["files"] and all(f["action"] in bridge.EVERYWHERE_ACTIONS for f in prev["files"])
+
+
+@pytest.mark.skipif(importlib.util.find_spec("voxtype_tui.insights") is None, reason="needs voxtype-tui 0.2 (insights)")
+def test_real_features_set_reports_wiring_error(env: Env, monkeypatch: pytest.MonkeyPatch):
+    """Real voxtype-tui 0.2: the switches save, rewiring voxtype's hooks
+    fails, and the bridge passes voxtype-tui's warning on."""
+    from voxtype_tui import hooks
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("voxtype rejected the config\nsecond line")
+
+    monkeypatch.setattr(hooks, "sync_config", broken)
+    res = env.ok("features.set", patch={"history": {"keep_days": 90}})
+    assert res["features"]["history"]["keep_days"] == 90, "the switch itself was saved"
+    assert "voxtype rejected the config" in res["wiring_error"] and "second line" not in res["wiring_error"]

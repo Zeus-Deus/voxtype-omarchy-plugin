@@ -2134,6 +2134,13 @@ INSIGHT_MODULES = {
     "everywhere": "voxtype_tui.learn_everywhere",
 }
 HISTORY_PAGE_MAX = 50
+# A page is cut to what fits the response cap (with room for the envelope);
+# a single record above HISTORY_RECORD_MAX_BYTES has raw/final cut to
+# HISTORY_TEXT_MAX_CHARS and carries `truncated: true`.
+HISTORY_PAGE_BUDGET_BYTES = MAX_RESPONSE_BYTES - 64_000
+HISTORY_RECORD_MAX_BYTES = 160_000
+HISTORY_TEXT_MAX_CHARS = 16_000
+WIRING_ERROR_MAX_CHARS = 300
 USAGE_DAYS_MAX = 3660
 LEARN_KINDS = ("spelling", "sounds_like", "replace")
 LEARN_EDIT_MAX_CHARS = 4096
@@ -2297,6 +2304,11 @@ def op_features_set(args: dict, paths: Paths) -> dict[str, Any]:
         changed = ["output.pre_recording_command"]
     out["restart_needed"] = changed
     out["daemon_stale"] = bool(changed) or _mtime(paths.config) != before_mtime
+    # The switches were saved but voxtype's hooks could not be rewired
+    # (voxtype-tui retries on the next save): the panel must not say "Saved".
+    wiring = res.get("wiring_error") if isinstance(res, dict) else None
+    if wiring:
+        out["wiring_error"] = str(wiring)[:WIRING_ERROR_MAX_CHARS]
     return out
 
 
@@ -2320,13 +2332,59 @@ def op_history_list(args: dict, paths: Paths) -> dict[str, Any]:
     body = _body(_call(_api(mod, "history_list"), before, limit))
     items = [i for i in (body.get("items") or []) if isinstance(i, dict)][:limit]
     nxt = body.get("next")
+    nxt = nxt if isinstance(nxt, str) and _RECORD_ID_RE.match(nxt) else None
+    # Item count alone does not bound the bytes: keep the largest prefix that
+    # fits the response cap and page on from its last record, so a page of
+    # long dictations never turns into an error the panel cannot get past.
+    page: list[dict] = []
+    used = 0
+    for item in items:
+        rec, size = _history_record(item)
+        if page and used + size > HISTORY_PAGE_BUDGET_BYTES:
+            last = page[-1].get("id")
+            nxt = last if isinstance(last, str) and _RECORD_ID_RE.match(last) else None
+            break
+        page.append(rec)
+        used += size
     return {
         "ok": True,
         "enabled": bool(body.get("enabled", True)),
         "keep_days": body.get("keep_days"),
-        "items": items,
-        "next": nxt if isinstance(nxt, str) and _RECORD_ID_RE.match(nxt) else None,
+        "items": page,
+        "next": nxt,
     }
+
+
+def _json_size(value: Any) -> int:
+    try:
+        text = json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return MAX_RESPONSE_BYTES
+    return len(text.encode("utf-8", "surrogatepass")) + 2
+
+
+def _history_record(item: dict) -> tuple[dict, int]:
+    """One record as sent, and its serialised size. A record too large on
+    its own keeps its first HISTORY_TEXT_MAX_CHARS of raw/final and says
+    `truncated: true`; if that is still too large, only its id and time
+    are sent, marked `oversized: true`."""
+    size = _json_size(item)
+    if size <= HISTORY_RECORD_MAX_BYTES:
+        return item, size
+    out = dict(item)
+    out["truncated"] = True
+    for key in ("raw", "final"):
+        if isinstance(out.get(key), str):
+            out[key] = out[key][:HISTORY_TEXT_MAX_CHARS]
+    size = _json_size(out)
+    if size <= HISTORY_RECORD_MAX_BYTES:
+        return out, size
+    rid = item.get("id")
+    stub = {"id": rid if isinstance(rid, str) and len(rid) <= 80 else None,
+            "raw": "", "final": "", "truncated": True, "oversized": True}
+    if isinstance(item.get("ts"), str) and len(item["ts"]) <= 64:
+        stub["ts"] = item["ts"]
+    return stub, _json_size(stub)
 
 
 def _removed(res: Any) -> int:
