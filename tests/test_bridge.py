@@ -2275,7 +2275,7 @@ def test_import_reads_the_chosen_file_once(env: Env, monkeypatch):
 
 
 def test_import_apply_refusal_shape(env: Env):
-    """C3: the refusal payload the QML lane renders."""
+    """The refusal payload the panel renders."""
     p = _bundle(env, settings={"output": {"pre_recording_command": "evil"}})
     res = env.apply("fail", path=str(p), include_settings=True)
     assert set(res) == {"ok", "error", "dangerous", "diff", "warnings"}
@@ -3501,7 +3501,7 @@ def test_without_extra_models_the_bridge_behaves_as_before(env: Env, monkeypatch
 
 # ---------------------------------------------------------------------------
 # Insights ops (usage, history, learning): voxtype-tui 0.2 modules, faked
-# with the documented L1 facade / L2 learned APIs.
+# with the documented insights facade and learned APIs.
 # ---------------------------------------------------------------------------
 
 INSIGHT_OPS = [

@@ -115,8 +115,8 @@ bridge detects each module with `importlib.util.find_spec` (no import on
 `status`), lists them in `status.capabilities`, and on an older voxtype-tui
 every op below answers `{ok:false, error:"needs voxtype-tui 0.2 or newer",
 op, unavailable:"needs voxtype-tui 0.2 or newer"}` without touching disk. The
-panel greys the matching rows and shows the same sentence. Shapes are frozen
-(build contract A12); ids match `^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$`.
+panel greys the matching rows and shows the same sentence. Shapes are fixed;
+ids match `^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$`.
 
 | Op | Args | Result |
 |---|---|---|

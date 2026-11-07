@@ -2125,7 +2125,7 @@ def op_record_toggle(args: dict, paths: Paths) -> dict[str, Any]:
 # Shown wherever a new section needs a voxtype-tui that has the module.
 NEEDS_TUI_02 = "needs voxtype-tui 0.2 or newer"
 # Panel-facing capability -> the voxtype-tui module behind it. Usage and
-# History share the `insights` facade (one call per op, A12 bodies without
+# History share the `insights` facade (one call per op, bodies without
 # `ok`); auto-learn ships `learned` and `learn_everywhere`.
 INSIGHT_MODULES = {
     "features": "voxtype_tui.insights",

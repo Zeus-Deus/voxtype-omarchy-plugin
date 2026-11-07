@@ -1288,7 +1288,7 @@ function hourBars(hours) {
     return {bars: bars, busiest: best >= 0 ? "busiest at " + pad2(best) + ":00" : ""};
 }
 
-// A11 health: silent failure must never read as zero usage.
+// Health: silent failure must never read as zero usage.
 // Features whose voxtype hook is not wired yet (voxtype-tui 0.2 reports this
 // right after an upgrade, before anything saved the config).
 function pendingWiring(health) {
