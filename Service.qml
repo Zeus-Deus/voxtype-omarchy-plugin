@@ -164,8 +164,12 @@ Item {
     // The panel is a full-screen overlay layer, so the file chooser is only
     // reachable once the panel hides. The caller owns that handoff; this only
     // reports the chosen path (exit 0) or the cancel/failure case.
-    function pick() {
+    // `kind`: "bundle" (import a voxtype-tui bundle) or "dir" (the archive
+    // folder). Both are fixed argv; only the dialog differs.
+    property string pickKind: "bundle"
+    function pick(kind) {
         if (picking) return false;
+        pickKind = kind === "dir" ? "dir" : "bundle";
         picking = true;
         pickerStarted = false;
         pickCancelRequested = false;
@@ -340,7 +344,9 @@ Item {
 
     Process {
         id: picker
-        command: ["zenity", "--file-selection", "--title=Import a voxtype-tui bundle", "--file-filter=JSON bundles | *.json"]
+        command: root.pickKind === "dir"
+                 ? ["zenity", "--file-selection", "--directory", "--title=Choose a folder for your Voxtype archive"]
+                 : ["zenity", "--file-selection", "--title=Import a voxtype-tui bundle", "--file-filter=JSON bundles | *.json"]
         stdout: StdioCollector { id: pickerOutput; waitForEnd: true }
         stderr: StdioCollector { waitForEnd: true }
         onStarted: root.pickerStarted = true

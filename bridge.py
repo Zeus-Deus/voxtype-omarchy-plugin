@@ -151,6 +151,9 @@ WRITE_OPS: frozenset[str] = frozenset({
     "settings.set", "settings.unset",
     "models.set_active", "models.delete", "gpu.set_device",
     "import.apply",
+    # features.set can rewire the [output] hooks in config.toml; promote
+    # adds to the user's own vocabulary / dictionary.
+    "features.set", "learn.promote",
 })
 
 
@@ -415,6 +418,49 @@ SETTING_TYPES: dict[str, str] = {
     "vad.threshold": "float",
 }
 
+# Stock voxtype 1.1 keys the redesigned panel exposes (indicator, other
+# audio, filler words, notifications, clipboard details). Older voxtype-tui
+# releases do not list them in settings.py, so they are kept apart:
+# tests/test_bridge.py pins SETTING_TYPES == the TUI's own list and
+# EXTRA_SETTING_TYPES against `voxtype config schema`. AppState.set_setting
+# writes any dotted path, so they work with voxtype-tui 0.1.9 as well.
+EXTRA_SETTING_TYPES: dict[str, str] = {
+    "audio.pause_media": "bool",
+    "audio.duck_media": "bool",
+    "audio.duck_media_volume_percent": "int",
+    "audio.duck_media_fade_ms": "int",
+    "osd.enabled": "bool",
+    "osd.frontend": "str",
+    "osd.layout": "str",
+    "osd.position": "str",
+    "osd.palette": "str",
+    "osd.opacity": "float",
+    "text.filter_filler_words": "bool",
+    "output.restore_clipboard": "bool",
+    "output.shift_enter_newlines": "bool",
+    "output.notification.on_recording_start": "bool",
+    "output.notification.on_recording_stop": "bool",
+    "output.notification.on_transcription": "bool",
+    "output.notification.on_no_speech": "bool",
+    "output.notification.urgency": "str",
+}
+for _k, _v in EXTRA_SETTING_TYPES.items():
+    SETTING_TYPES.setdefault(_k, _v)
+
+# Enumerations from `voxtype config schema` (voxtype 1.1.1).
+SETTING_ENUMS: dict[str, tuple[str, ...]] = {
+    "osd.frontend": ("gtk4", "native", "quickshell"),
+    "osd.layout": ("compact", "wide", "minimal", "tile", "orb", "custom"),
+    "osd.position": ("bottom-center", "top-center", "bottom-left", "bottom-right", "top-left", "top-right"),
+    "osd.palette": ("omarchy", "fallback", "package", "custom"),
+    "output.notification.urgency": ("low", "normal", "critical"),
+}
+SETTING_RANGES: dict[str, tuple[float, float]] = {
+    "audio.duck_media_volume_percent": (0, 150),
+    "audio.duck_media_fade_ms": (0, 5000),
+    "osd.opacity": (0.0, 1.0),
+}
+
 SECRET_SETTINGS = frozenset({"whisper.remote_api_key"})
 
 # Tables the TUI treats as required once `engine` is set. Verified against
@@ -474,6 +520,14 @@ def _validate_setting(path: str, value: Any, paths: Paths) -> None:
     """Mirror the range/enum guards the TUI applies before set_setting.
     ``voxtype -c <tmp> config`` remains the authoritative validator at
     save time; these just give earlier, friendlier errors."""
+    if path in SETTING_ENUMS and value not in SETTING_ENUMS[path]:
+        raise BridgeError(f"'{path}' must be one of {', '.join(SETTING_ENUMS[path])}")
+    if path in SETTING_RANGES:
+        lo, hi = SETTING_RANGES[path]
+        if not lo <= value <= hi:
+            raise BridgeError(f"'{path}' must be between {lo:g} and {hi:g}")
+    if path in EXTRA_SETTING_TYPES:
+        return
     from voxtype_tui import settings
 
     if path == "engine" and value not in settings.ENGINES:
@@ -987,6 +1041,8 @@ def op_status(args: dict, paths: Paths) -> dict[str, Any]:
         "install_terminal_available": shutil.which("omarchy-launch-floating-terminal-with-presentation") is not None,
         "picker_available": shutil.which("zenity") is not None,
         "tui_open_pid": tui_lock_holder(paths),
+        # Which new sections this voxtype-tui supports (find_spec only).
+        "capabilities": _capabilities(),
     }
     if asr is not None:
         out["asr"] = asr
@@ -1285,6 +1341,9 @@ REDACTED_IMPORT_PATHS = frozenset({
     "output.post_process.command",
     "output.pre_output_command",
     "output.post_output_command",
+    # A shell command too; voxtype-tui 0.2 adds it to SECRET_PATHS (its
+    # insights hooks own it), older releases do not list it.
+    "output.pre_recording_command",
 })
 
 
@@ -2060,6 +2119,544 @@ def op_record_toggle(args: dict, paths: Paths) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Insights: usage, history, learning (voxtype-tui 0.2+, feature-detected)
+# ---------------------------------------------------------------------------
+
+# Shown wherever a new section needs a voxtype-tui that has the module.
+NEEDS_TUI_02 = "needs voxtype-tui 0.2 or newer"
+# Panel-facing capability -> the voxtype-tui module behind it. Usage and
+# History share the `insights` facade (one call per op, bodies without
+# `ok`); auto-learn ships `learned` and `learn_everywhere`.
+INSIGHT_MODULES = {
+    "features": "voxtype_tui.insights",
+    "history": "voxtype_tui.insights",
+    "learned": "voxtype_tui.learned",
+    "everywhere": "voxtype_tui.learn_everywhere",
+}
+HISTORY_PAGE_MAX = 50
+# A page is cut to what fits the response cap (with room for the envelope);
+# a single record above HISTORY_RECORD_MAX_BYTES has raw/final cut to
+# HISTORY_TEXT_MAX_CHARS and carries `truncated: true`.
+HISTORY_PAGE_BUDGET_BYTES = MAX_RESPONSE_BYTES - 64_000
+HISTORY_RECORD_MAX_BYTES = 160_000
+HISTORY_TEXT_MAX_CHARS = 16_000
+WIRING_ERROR_MAX_CHARS = 300
+USAGE_DAYS_MAX = 3660
+LEARN_KINDS = ("spelling", "sounds_like", "replace")
+LEARN_EDIT_MAX_CHARS = 4096
+_RECORD_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$")
+
+
+def _module_present(key: str) -> bool:
+    """find_spec only: no import, so ``status`` can afford it."""
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec(INSIGHT_MODULES[key]) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _capabilities() -> dict[str, bool]:
+    return {k: _module_present(k) for k in INSIGHT_MODULES}
+
+
+def _insight(key: str):
+    """The voxtype-tui module behind a new section, or a refusal carrying
+    ``unavailable`` so the panel shows "needs voxtype-tui 0.2+"."""
+    if not _module_present(key):
+        raise BridgeError(NEEDS_TUI_02, unavailable=NEEDS_TUI_02)
+    import importlib
+
+    return importlib.import_module(INSIGHT_MODULES[key])
+
+
+def _api(mod: Any, name: str) -> Callable[..., Any]:
+    """``mod.name`` or a refusal: an API mismatch must never look like an
+    empty result."""
+    fn = getattr(mod, name, None)
+    if not callable(fn):
+        raise BridgeError(f"{mod.__name__} has no {name}()", unavailable=NEEDS_TUI_02)
+    return fn
+
+
+def _call(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Run a voxtype-tui API call with its documented error mapping:
+    ``ValueError`` -> ``{ok:false, error}``; ``insights.Unavailable(reason)``
+    -> ``{ok:false, error, unavailable}`` (the class is matched by name so
+    the learned / everywhere modules may raise their own)."""
+    try:
+        return fn(*args, **kwargs)
+    except ValueError as exc:
+        raise BridgeError(str(exc) or "invalid request") from exc
+    except Exception as exc:
+        if type(exc).__name__ == "Unavailable":
+            reason = str(exc) or NEEDS_TUI_02
+            raise BridgeError(reason, unavailable=reason) from exc
+        raise
+
+
+def _body(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise BridgeError("unexpected response from voxtype-tui")
+    return {k: v for k, v in value.items() if k != "ok"}
+
+
+def _require_id(args: dict, key: str = "id") -> str:
+    val = _require_str(args, key).strip()
+    if not _RECORD_ID_RE.match(val):
+        raise BridgeError(f"'{key}' is not a valid id")
+    return val
+
+
+def _config_hooks(paths: Paths) -> dict[str, Any]:
+    """The hook commands that decide what the new features can see."""
+    cfg = _config_dict(paths)
+    out = cfg.get("output") or {}
+    pp = out.get("post_process") or {}
+    return {
+        "output.post_process.command": pp.get("command"),
+        "output.pre_recording_command": out.get("pre_recording_command"),
+        "output.pre_output_command": out.get("pre_output_command"),
+        "output.post_output_command": out.get("post_output_command"),
+    }
+
+
+def _features_reply(res: Any) -> dict[str, Any]:
+    body = _body(res)
+    avail = body.get("available") if isinstance(body.get("available"), dict) else {}
+    return {
+        "ok": True,
+        "features": body.get("features") if isinstance(body.get("features"), dict) else {},
+        "available": {k: bool(avail.get(k, False)) for k in ("usage", "history", "archive", "learning", "everywhere")},
+        "reasons": {str(k): str(v) for k, v in (body.get("reasons") or {}).items() if v},
+    }
+
+
+def _config_arg(paths: Paths) -> dict[str, Any]:
+    return {"config_path": paths.config}
+
+
+def op_features_get(args: dict, paths: Paths) -> dict[str, Any]:
+    mod = _insight("features")
+    return _features_reply(_call(_api(mod, "get_features"), **_config_arg(paths)))
+
+
+# What a panel patch may touch, and the type each leaf must have. Anything
+# else is refused before voxtype-tui sees it (voxtype-tui validates again).
+FEATURE_PATCH_TYPES: dict[str, Any] = {
+    "usage": {"enabled": bool, "typing_wpm": int},
+    "history": {"enabled": bool, "keep_days": (int, type(None))},
+    "archive": {"enabled": bool, "dir": (str, type(None)), "save_audio": bool, "save_text": bool},
+    "learning": {"enabled": bool, "everywhere": bool, "notify": bool},
+}
+KEEP_DAYS_CHOICES = (7, 30, 90, 365, None)
+TYPING_WPM_RANGE = (10, 200)
+
+
+def _validate_feature_patch(patch: Any) -> dict[str, Any]:
+    if not isinstance(patch, dict) or not patch:
+        raise BridgeError("'patch' must be a non-empty object")
+    for group, leaves in patch.items():
+        allowed = FEATURE_PATCH_TYPES.get(group)
+        if allowed is None or not isinstance(leaves, dict) or not leaves:
+            raise BridgeError(f"cannot change features.{group}")
+        for key, value in leaves.items():
+            kind = allowed.get(key)
+            if kind is None:
+                raise BridgeError(f"cannot change features.{group}.{key}")
+            kinds = kind if isinstance(kind, tuple) else (kind,)
+            # bool is an int subclass: True must not pass as a day count.
+            ok = (bool in kinds) if isinstance(value, bool) else isinstance(value, tuple(k for k in kinds if k is not bool))
+            if not ok:
+                raise BridgeError(f"features.{group}.{key} has the wrong type")
+    hist = patch.get("history") or {}
+    if "keep_days" in hist and hist["keep_days"] not in KEEP_DAYS_CHOICES:
+        raise BridgeError("history.keep_days must be 7, 30, 90, 365 or null (forever)")
+    wpm = (patch.get("usage") or {}).get("typing_wpm")
+    lo, hi = TYPING_WPM_RANGE
+    if wpm is not None and not lo <= wpm <= hi:
+        raise BridgeError(f"usage.typing_wpm must be between {lo} and {hi}")
+    arch = patch.get("archive") or {}
+    if arch.get("dir") is not None:
+        raw = arch["dir"]
+        if "\x00" in raw or not raw.startswith(("/", "~")):
+            raise BridgeError("archive folder must be an absolute path")
+        p = Path(raw).expanduser()
+        if not p.is_dir():
+            raise BridgeError("archive folder does not exist")
+        arch["dir"] = str(p.resolve())
+    return patch
+
+
+def op_features_set(args: dict, paths: Paths) -> dict[str, Any]:
+    patch = _validate_feature_patch(args.get("patch"))
+    mod = _insight("features")
+    fn = _api(mod, "set_features")
+    before = _config_hooks(paths)
+    before_mtime = _mtime(paths.config)
+    res = _call(fn, patch, **_config_arg(paths))
+    after = _config_hooks(paths)
+    changed = sorted(k for k in before if before[k] != after[k])
+    out = _features_reply(res)
+    # voxtype reads its hooks at start: a rewired hook needs a restart.
+    if not changed and isinstance(res, dict) and res.get("restart_needed") is True:
+        changed = ["output.pre_recording_command"]
+    out["restart_needed"] = changed
+    out["daemon_stale"] = bool(changed) or _mtime(paths.config) != before_mtime
+    # The switches were saved but voxtype's hooks could not be rewired
+    # (voxtype-tui retries on the next save): the panel must not say "Saved".
+    wiring = res.get("wiring_error") if isinstance(res, dict) else None
+    if wiring:
+        out["wiring_error"] = str(wiring)[:WIRING_ERROR_MAX_CHARS]
+    return out
+
+
+def _int_arg(args: dict, key: str, default: int, lo: int, hi: int) -> int:
+    val = args.get(key, default)
+    if isinstance(val, bool) or not isinstance(val, int) or not lo <= val <= hi:
+        raise BridgeError(f"'{key}' must be {lo}–{hi}")
+    return val
+
+
+def op_usage_summary(args: dict, paths: Paths) -> dict[str, Any]:
+    days = _int_arg(args, "days", 365, 1, USAGE_DAYS_MAX)
+    mod = _insight("history")
+    return {"ok": True, **_body(_call(_api(mod, "usage_summary"), days, **_config_arg(paths)))}
+
+
+def op_history_list(args: dict, paths: Paths) -> dict[str, Any]:
+    before = _require_id(args, "before") if args.get("before") is not None else None
+    limit = _int_arg(args, "limit", 30, 1, HISTORY_PAGE_MAX)
+    mod = _insight("history")
+    body = _body(_call(_api(mod, "history_list"), before, limit))
+    items = [i for i in (body.get("items") or []) if isinstance(i, dict)][:limit]
+    nxt = body.get("next")
+    nxt = nxt if isinstance(nxt, str) and _RECORD_ID_RE.match(nxt) else None
+    # Item count alone does not bound the bytes: keep the largest prefix that
+    # fits the response cap and page on from its last record, so a page of
+    # long dictations never turns into an error the panel cannot get past.
+    page: list[dict] = []
+    used = 0
+    for item in items:
+        rec, size = _history_record(item)
+        if page and used + size > HISTORY_PAGE_BUDGET_BYTES:
+            last = page[-1].get("id")
+            nxt = last if isinstance(last, str) and _RECORD_ID_RE.match(last) else None
+            break
+        page.append(rec)
+        used += size
+    return {
+        "ok": True,
+        "enabled": bool(body.get("enabled", True)),
+        "keep_days": body.get("keep_days"),
+        "items": page,
+        "next": nxt,
+    }
+
+
+def _json_size(value: Any) -> int:
+    try:
+        text = json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return MAX_RESPONSE_BYTES
+    return len(text.encode("utf-8", "surrogatepass")) + 2
+
+
+def _history_record(item: dict) -> tuple[dict, int]:
+    """One record as sent, and its serialised size. A record too large on
+    its own keeps its first HISTORY_TEXT_MAX_CHARS of raw/final and says
+    `truncated: true`; if that is still too large, only its id and time
+    are sent, marked `oversized: true`."""
+    size = _json_size(item)
+    if size <= HISTORY_RECORD_MAX_BYTES:
+        return item, size
+    out = dict(item)
+    out["truncated"] = True
+    for key in ("raw", "final"):
+        if isinstance(out.get(key), str):
+            out[key] = out[key][:HISTORY_TEXT_MAX_CHARS]
+    size = _json_size(out)
+    if size <= HISTORY_RECORD_MAX_BYTES:
+        return out, size
+    rid = item.get("id")
+    stub = {"id": rid if isinstance(rid, str) and len(rid) <= 80 else None,
+            "raw": "", "final": "", "truncated": True, "oversized": True}
+    if isinstance(item.get("ts"), str) and len(item["ts"]) <= 64:
+        stub["ts"] = item["ts"]
+    return stub, _json_size(stub)
+
+
+def _removed(res: Any) -> int:
+    val = res.get("removed") if isinstance(res, dict) else res
+    return int(val) if isinstance(val, int) and not isinstance(val, bool) else 0
+
+
+def op_history_delete(args: dict, paths: Paths) -> dict[str, Any]:
+    rid = _require_id(args)
+    mod = _insight("history")
+    return {"ok": True, "removed": _removed(_call(_api(mod, "history_delete"), rid))}
+
+
+def op_history_clear(args: dict, paths: Paths) -> dict[str, Any]:
+    mod = _insight("history")
+    return {"ok": True, "removed": _removed(_call(_api(mod, "history_clear")))}
+
+
+LEARN_STATES = ("active", "suggested", "dormant", "rejected", "promoted")
+
+
+def op_learn_list(args: dict, paths: Paths) -> dict[str, Any]:
+    mod = _insight("learned")
+    body = _body(_call(_api(mod, "list_entries")))
+    entries = [e for e in (body.get("entries") or []) if isinstance(e, dict)]
+    counts = {s: 0 for s in LEARN_STATES}
+    for k, v in (body.get("counts") or {}).items():
+        if k in counts and isinstance(v, int) and not isinstance(v, bool):
+            counts[k] = v
+    return {
+        "ok": True,
+        "enabled": bool(body.get("enabled", True)),
+        "everywhere": bool(body.get("everywhere", False)),
+        "entries": entries,
+        "counts": counts,
+    }
+
+
+def op_learn_submit(args: dict, paths: Paths) -> dict[str, Any]:
+    rid = _require_id(args)
+    edited = _require_str(args, "edited")
+    if len(edited) > LEARN_EDIT_MAX_CHARS:
+        raise BridgeError("the edited text is too long")
+    kind = args.get("kind")
+    if kind is not None and kind not in LEARN_KINDS:
+        raise BridgeError(f"'kind' must be one of {', '.join(LEARN_KINDS)}")
+    mod = _insight("learned")
+    res = _call(_api(mod, "submit_correction"), rid, edited, "fix", kind=kind)
+    if not isinstance(res, dict):
+        raise BridgeError("unexpected response from voxtype-tui")
+    if res.get("ok") is False:
+        raise BridgeError(str(res.get("reason") or res.get("error") or "nothing to learn"))
+    out: dict[str, Any] = {
+        "ok": True,
+        "candidates": [c for c in (res.get("candidates") or []) if isinstance(c, dict)],
+        "applied": [e for e in (res.get("applied") or []) if isinstance(e, dict)],
+        "skipped": [x for x in (res.get("skipped") or []) if isinstance(x, dict)],
+    }
+    if res.get("reason"):
+        out["reason"] = str(res["reason"])
+    return out
+
+
+def _learn_decision(verb: str) -> Callable[[dict, Paths], dict[str, Any]]:
+    """accept / reject: the entry, or None for an unknown id."""
+    def op(args: dict, paths: Paths) -> dict[str, Any]:
+        eid = _require_id(args)
+        res = _call(_api(_insight("learned"), verb), eid)
+        if not isinstance(res, dict):
+            raise BridgeError("no such learned entry")
+        return {"ok": True, "entry": res}
+    op.__name__ = f"op_learn_{verb}"
+    return op
+
+
+def op_learn_forget(args: dict, paths: Paths) -> dict[str, Any]:
+    eid = _require_id(args)
+    if _call(_api(_insight("learned"), "forget"), eid) is not True:
+        raise BridgeError("no such learned entry")
+    return {"ok": True, "removed": 1}
+
+
+def op_learn_promote(args: dict, paths: Paths) -> dict[str, Any]:
+    """Copy a learned entry into the user's own vocabulary / dictionary.
+    The additions go through the bridge's AppState path (the same one
+    vocab.add / dict.upsert use), so the save, sidecar and stale reply are
+    identical; learned.promote only decides what to add and marks the
+    entry promoted."""
+    eid = _require_id(args)
+    mod = _insight("learned")
+    fn = _api(mod, "promote")
+    additions = _api(mod, "user_additions")
+    saved: dict[str, Any] = {}
+
+    def add_to_user(entry: Any) -> dict[str, Any]:
+        from voxtype_tui import sidecar
+
+        add = additions(entry)
+        st = _load_state(paths)
+        done: dict[str, list] = {"vocab": [], "rules": []}
+        for phrase in add.get("vocab") or []:
+            if isinstance(phrase, str) and st.add_vocab(phrase):
+                done["vocab"].append(phrase.strip())
+        # Never rewrite a rule the user already has for the same words.
+        have = {r.from_text.casefold() for r in st.sc.replacements}
+        for pair in add.get("rules") or []:
+            if not (isinstance(pair, (list, tuple)) and len(pair) == 2 and all(isinstance(x, str) and x.strip() for x in pair)):
+                continue
+            frm, to = pair[0].strip(), pair[1]
+            if frm.casefold() in have:
+                continue
+            st.upsert_replacement(frm, to, sidecar.DEFAULT_CATEGORY)
+            have.add(frm.casefold())
+            done["rules"].append([frm, to])
+        if st.dirty:
+            saved.update(_save_and_reply(st))
+        return done
+
+    res = _call(fn, eid, add_to_user=add_to_user)
+    if not isinstance(res, dict) or res.get("ok") is False:
+        raise BridgeError(str((res or {}).get("error") or "could not add it to your words"))
+    out = {**saved, "ok": True}
+    out["entry"] = res.get("entry")
+    out["added"] = res.get("added") or {"vocab": [], "rules": []}
+    return out
+
+
+def op_learn_reset(args: dict, paths: Paths) -> dict[str, Any]:
+    return {"ok": True, "removed": _removed(_call(_api(_insight("learned"), "reset")))}
+
+
+EVERYWHERE_ACTIONS = ("create", "append", "remove", "none")
+
+
+def op_learn_everywhere_preview(args: dict, paths: Paths) -> dict[str, Any]:
+    body = _body(_call(_api(_insight("everywhere"), "preview")))
+    files = []
+    for f in body.get("files") or []:
+        if not isinstance(f, dict):
+            continue
+        row = {"path": str(f.get("path", "")), "action": str(f.get("action", "")), "diff": str(f.get("diff", ""))[:4000]}
+        if f.get("reason"):
+            row["reason"] = str(f["reason"])
+        files.append(row)
+    return {"ok": True, "files": files, "needs_relogin": bool(body.get("needs_relogin", True)),
+            "enabled": bool(body.get("enabled", False))}
+
+
+def op_learn_everywhere_set(args: dict, paths: Paths) -> dict[str, Any]:
+    enabled = args.get("enabled")
+    if not isinstance(enabled, bool):
+        raise BridgeError("'enabled' must be true or false")
+    res = _call(_api(_insight("everywhere"), "set_enabled"), enabled)
+    if not isinstance(res, dict) or res.get("ok") is False:
+        raise BridgeError(str((res or {}).get("error") or "could not change Learn everywhere"))
+    files = [{"path": str(f.get("path", "")), "action": str(f.get("action", ""))} for f in res.get("files") or [] if isinstance(f, dict)]
+    return {"ok": True, "enabled": bool(res.get("enabled", enabled)), "files": files,
+            "needs_relogin": bool(res.get("needs_relogin", True))}
+
+
+def op_daemon_set_login(args: dict, paths: Paths) -> dict[str, Any]:
+    """Start at login = the unit's enablement. Unlike Turn off/on this is
+    persistent; it never starts or stops the running daemon."""
+    enabled = args.get("enabled")
+    if not isinstance(enabled, bool):
+        raise BridgeError("'enabled' must be true or false")
+    verb = "enable" if enabled else "disable"
+    code, out, err = _run(["systemctl", "--user", verb, "voxtype"], timeout=10)
+    unit = _unit_info()
+    if code != 0:
+        raise BridgeError((err or out).strip() or f"systemctl {verb} failed", starts_at_login=unit.starts_at_login)
+    return {"ok": True, "starts_at_login": unit.starts_at_login, "message": (err or out).strip() or "ok"}
+
+
+# Hyprland modmask bits (hyprctl binds -j), in the order Omarchy writes them.
+_HYPR_MODS = ((64, "Super"), (4, "Ctrl"), (8, "Alt"), (1, "Shift"))
+_SHORTCUT_ARG_RE = re.compile(r"(?:^|[\s/])voxtype\s+record\s+(toggle|start|stop)\b")
+_SHORTCUT_DESC_RE = re.compile(r"^\s*(toggle|start|stop)\s+dictation\b", re.IGNORECASE)
+SHORTCUTS_MAX_BYTES = 1_000_000
+
+
+def _key_label(key: str) -> str:
+    k = str(key or "")
+    named = {"space": "Space", "return": "Enter", "escape": "Esc", "print": "Print", "scroll_lock": "ScrollLock"}
+    if k.lower() in named:
+        return named[k.lower()]
+    return k.upper() if len(k) == 1 else k[:1].upper() + k[1:]
+
+
+def _hypr_bindings(out: str) -> list[dict[str, Any]]:
+    try:
+        binds = json.loads(out)
+    except ValueError:
+        return []
+    if not isinstance(binds, list):
+        return []
+    found: list[dict[str, Any]] = []
+    for b in binds:
+        if not isinstance(b, dict):
+            continue
+        # Hyprland's Lua config (Omarchy 4) registers binds as `__lua`
+        # callbacks, so the command is not visible; Omarchy's own binds
+        # carry the descriptions "Toggle dictation" / "Start dictation
+        # (push-to-talk)" / "Stop dictation (push-to-talk)". Classic
+        # `exec, voxtype record …` binds still match on their argument.
+        m = _SHORTCUT_ARG_RE.search(str(b.get("arg") or "")) if b.get("dispatcher") == "exec" else None
+        if m is None:
+            m = _SHORTCUT_DESC_RE.search(str(b.get("description") or ""))
+        if not m or b.get("submap"):
+            continue
+        try:
+            mask = int(b.get("modmask") or 0)
+        except (TypeError, ValueError):
+            mask = 0
+        key = str(b.get("key") or "")
+        if not key:
+            continue
+        parts = [name for bit, name in _HYPR_MODS if mask & bit] + [_key_label(key)]
+        entry = {"keys": "+".join(parts), "action": m.group(1).lower(), "source": "hyprland"}
+        if b.get("release"):
+            entry["release"] = True
+        if entry not in found:
+            found.append(entry)
+    return found[:12]
+
+
+def op_shortcuts_list(args: dict, paths: Paths) -> dict[str, Any]:
+    """Dictation shortcuts: Hyprland binds that run `voxtype record …`,
+    falling back to voxtype's own hotkey when it is enabled."""
+    bindings: list[dict[str, Any]] = []
+    if shutil.which("hyprctl") is not None:
+        code, out, _err = _run(["hyprctl", "binds", "-j"], timeout=2)
+        if code == 0 and len(out) <= SHORTCUTS_MAX_BYTES:
+            bindings = _hypr_bindings(out)
+    cfg = _config_dict(paths)
+    hk = cfg.get("hotkey") or {}
+    if isinstance(hk.get("key"), str) and hk["key"] and hk.get("enabled", True) is not False:
+        mods = [m for m in (hk.get("modifiers") or []) if isinstance(m, str)]
+        key = hk["key"].removeprefix("KEY_")
+        labels = [_EVDEV_MODS.get(m) or m.title() for m in mods]
+        labels.append(_EVDEV_KEYS.get(key) or (key if len(key) <= 3 else key.title()))
+        keys = "+".join(labels)
+        # push_to_talk is "hold"; the panel words it from `action`.
+        action = "toggle" if str(hk.get("mode") or "push_to_talk") == "toggle" else "start"
+        bindings.append({"keys": keys, "action": action, "source": "voxtype"})
+    return {"ok": True, "bindings": bindings}
+
+
+_EVDEV_MODS = {"LEFTCTRL": "Ctrl", "RIGHTCTRL": "Ctrl", "LEFTALT": "Alt", "RIGHTALT": "AltGr",
+               "LEFTSHIFT": "Shift", "RIGHTSHIFT": "Shift", "LEFTMETA": "Super", "RIGHTMETA": "Super"}
+_EVDEV_KEYS = {"SCROLLLOCK": "ScrollLock", "CAPSLOCK": "CapsLock", "NUMLOCK": "NumLock", "SPACE": "Space",
+               "RIGHTALT": "AltGr", "PAUSE": "Pause", "INSERT": "Insert", "MENU": "Menu", "COMPOSE": "Compose"}
+
+
+ARCHIVE_PICK_ARGV = ("zenity", "--file-selection", "--directory", "--title=Choose a folder for your Voxtype archive")
+
+
+def op_archive_pick_dir(args: dict, paths: Paths) -> dict[str, Any]:
+    """Headless form of the panel's folder chooser (the panel runs the same
+    argv itself after hiding, see Service.pick). Cancel → ``dir: null``."""
+    if shutil.which(ARCHIVE_PICK_ARGV[0]) is None:
+        raise BridgeError("zenity is not installed — install it to choose a folder")
+    code, out, _err = _run(list(ARCHIVE_PICK_ARGV), timeout=300)
+    path = out.strip().splitlines()[0] if code == 0 and out.strip() else ""
+    if not path:
+        return {"ok": True, "dir": None}
+    if not path.startswith("/") or not Path(path).is_dir():
+        raise BridgeError("that is not a folder")
+    return {"ok": True, "dir": path}
+
+
+# ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
@@ -2092,6 +2689,25 @@ OPS: dict[str, Callable[[dict, Paths], dict[str, Any]]] = {
     "daemon.start": op_daemon_start,
     "daemon.stop": op_daemon_stop,
     "record.toggle": op_record_toggle,
+    "daemon.set_login": op_daemon_set_login,
+    # insights (voxtype-tui 0.2+; refused with `unavailable` on older ones)
+    "features.get": op_features_get,
+    "features.set": op_features_set,
+    "usage.summary": op_usage_summary,
+    "history.list": op_history_list,
+    "history.delete": op_history_delete,
+    "history.clear": op_history_clear,
+    "learn.list": op_learn_list,
+    "learn.submit": op_learn_submit,
+    "learn.accept": _learn_decision("accept"),
+    "learn.reject": _learn_decision("reject"),
+    "learn.promote": op_learn_promote,
+    "learn.forget": op_learn_forget,
+    "learn.reset": op_learn_reset,
+    "learn.everywhere.preview": op_learn_everywhere_preview,
+    "learn.everywhere.set": op_learn_everywhere_set,
+    "shortcuts.list": op_shortcuts_list,
+    "archive.pick_dir": op_archive_pick_dir,
 }
 
 

@@ -31,7 +31,9 @@ test('hotkey labels read like the hero line', () => {
 
 test('hero meta and primary action follow the design table', () => {
   const base = {voxtype_installed: true, daemon: {active: true, state: 'idle', stale: false}, model: {name: 'large-v3'}, hotkey: {key: 'X', modifiers: ['LEFTCTRL']}};
-  assert.equal(Model.heroMeta(base, ''), 'Listening · large-v3 · Ctrl+X');
+  // Idle is "Ready"; "Listening" is the Home hero's word for recording.
+  assert.equal(Model.heroMeta(base, ''), 'Ready · large-v3 · Ctrl+X');
+  assert.equal(Model.heroMeta(base, '', 'Super+Ctrl+X'), 'Ready · large-v3 · Super+Ctrl+X', 'a Hyprland shortcut wins over the disabled built-in hotkey');
   assert.equal(Model.primaryAction(base), 'record');
   const stale = Object.assign({}, base, {daemon: {active: true, state: 'idle', stale: true}});
   assert.equal(Model.heroMeta(stale, ''), 'Restart to apply changes');
@@ -199,11 +201,15 @@ test('settings helpers', () => {
 });
 
 test('section navigation and footer', () => {
-  assert.equal(Model.nextSection('dictate', 1), 'vocabulary');
-  assert.equal(Model.nextSection('dictate', -1), 'models');
-  assert.equal(Model.nextSection('bogus', 1), 'vocabulary');
-  assert.equal(Model.sectionForKey('3'), 'dictionary');
+  assert.equal(Model.nextSection('home', 1), 'words');
+  assert.equal(Model.nextSection('home', -1), 'settings');
+  assert.equal(Model.nextSection('bogus', 1), 'words');
+  assert.equal(Model.sectionForKey('3'), 'history');
+  assert.equal(Model.sectionForKey('5'), '', 'four sections: 5 is no longer a key');
   assert.equal(Model.sectionForKey('9'), '');
+  assert.equal(Model.drillSection('models'), 'settings');
+  assert.equal(Model.drillSection('usage'), 'home');
+  assert.equal(Model.drillSection('bogus'), '');
   assert.equal(Model.sectionForKey('a'), '');
   for (const s of Model.SECTIONS) assert.ok(Model.sectionHints(s).length > 0);
   same(Model.footerNotice({error: 'boom', notice: 'x'}), {text: 'boom', urgent: true});
@@ -491,7 +497,7 @@ test('a down Qwen3-ASR server is a warning only while voxtype runs', () => {
   const up = {daemon: {active: true, state: 'idle', stale: false}, engine: 'qwen3-asr', model: {name: '0.6b-q4_k'}, hotkey: {key: 'X'},
               asr: {active: true, healthy: true, detail: 'ok'}};
   assert.equal(Model.asrDown(up), false);
-  assert.equal(Model.heroMeta(up, ''), 'Listening · 0.6b-q4_k · X');
+  assert.equal(Model.heroMeta(up, ''), 'Ready · 0.6b-q4_k · X');
   const down = Object.assign({}, up, {asr: {active: true, healthy: false, detail: 'not running'}});
   assert.equal(Model.asrDown(down), true);
   assert.equal(Model.heroMeta(down, ''), 'Qwen3-ASR server down');
@@ -504,4 +510,118 @@ test('a down Qwen3-ASR server is a warning only while voxtype runs', () => {
   assert.equal(Model.asrDown(off), false, 'turned off: the server is off too, by design');
   assert.equal(Model.notices(off, {}).length, 0);
   assert.equal(Model.asrDown({daemon: {active: true}}), false, 'older bridge: no asr block');
+});
+
+test('learnNotice: learned, suggested, or voxtype-tui\'s reason for learning nothing', () => {
+  assert.equal(Model.learnNotice({applied: [{heard: ['Super Whisper'], written: 'Superwhisper'}]}), 'Learned Super Whisper → Superwhisper');
+  assert.equal(Model.learnNotice({applied: [], candidates: [{heard: 'omashi', written: 'Omarchy'}]}), 'Suggested omashi → Omarchy · review it in Words');
+  assert.equal(Model.learnNotice({applied: [], candidates: [], skipped: [{heard: 'Tictation', written: 'dictation', reason: 'an ordinary word (grammar or wording, not vocabulary)'}]}),
+    'Not learned: an ordinary word (grammar or wording, not vocabulary)');
+  assert.equal(Model.learnNotice({applied: [], reason: 'learning is off'}), 'Not learned: learning is off');
+  assert.equal(Model.learnNotice({applied: [], skipped: [{reason: 'x\u202e\u0007y'}]}), 'Not learned: xy', 'reasons are sanitized');
+  assert.equal(Model.learnNotice({}), 'Nothing new to learn from that');
+});
+
+test('healthLine says Voxtype is not connected instead of listing each pending hook', () => {
+  const un = f => ({feature: f, reason: 'not connected to Voxtype yet'});
+  assert.equal(Model.healthLine({pending_wiring: ['capture', 'duration'], unavailable: [un('capture'), un('duration')]}),
+    "Not counting yet: Voxtype isn't connected");
+  assert.equal(Model.healthLine({pending_wiring: ['duration'], unavailable: [un('duration')]}),
+    'Durations start once Voxtype is connected');
+  assert.equal(Model.healthLine({pending_wiring: ['learning'], unavailable: [un('learning')]}),
+    'Learning in apps starts once Voxtype is connected');
+  // Other reasons still show; junk in pending_wiring is ignored.
+  assert.equal(Model.healthLine({pending_wiring: [7, null], unavailable: [{feature: 'archive', reason: 'pw-record missing'}]}),
+    'archive: pw-record missing');
+  same(Model.pendingWiring({pending_wiring: 'capture'}), []);
+  assert.equal(Model.healthLine({unavailable: [], failures: []}), '');
+});
+
+// A Qt sequence read back from a QML `var` property: indexable, has a
+// length, but Array.isArray() is false and Array methods may be missing.
+const qtList = (...items) => Object.assign({length: items.length}, items);
+
+test('bridge lists that arrive as Qt sequences (not JS Arrays) are still read', () => {
+  assert.equal(Array.isArray(qtList('a')), false);
+  same(Model.pendingWiring({pending_wiring: qtList('capture', 'duration', 7)}), ['capture', 'duration']);
+  assert.equal(Model.healthLine({pending_wiring: qtList('capture', 'duration'),
+                                 unavailable: qtList({feature: 'capture', reason: 'x'}, {feature: 'archive', reason: 'pw-record missing'}),
+                                 failures: qtList({msg: 'old'}, {msg: 'last'})}),
+               "Not counting yet: Voxtype isn't connected · archive: pw-record missing · Last problem: last");
+  const rows = Model.learnedRows(qtList({id: 'l1', kind: 'sounds_like', written: 'Omarchy', heard: qtList('oh marchy', 'omashi'), state: 'active'}));
+  assert.equal(rows[0].heard, 'oh marchy, omashi');
+  assert.equal(Model.learnSummary(qtList({heard: qtList('omashi'), written: 'Omarchy'})), 'omashi → Omarchy');
+  assert.equal(Model.isList('abc'), false, 'a string is not a list');
+  same(Model.appendHistory(qtList({id: 'a'}), qtList({id: 'a'}, {id: 'b'})).map(r => r.id), ['a', 'b']);
+  assert.equal(Model.fixWindow(qtList({index: 0}, {index: 1}), 0, 0, 200).tokens.length, 2);
+});
+
+test('fixTokens keeps offsets; fixedText replaces only the picked span of the original text', () => {
+  const text = '  «Omashi.»  menu\n\nopen   it';
+  const t = Model.fixTokens(text);
+  same(t.map(x => x.word), ['Omashi', 'menu', 'open', 'it']);
+  assert.equal(text.slice(t[0].start, t[0].end), '«Omashi.»');
+  assert.equal(Model.fixedText(text, t, 0, 0, 'Omarchy'), '  «Omarchy.»  menu\n\nopen   it');
+  assert.equal(Model.fixedText(text, t, 1, 2, 'menu, open'), '  «Omashi.»  menu, open   it');
+  assert.equal(Model.fixedText(text, t, 0, 0, '  '), null, 'blank replacement');
+  assert.equal(Model.fixedText('other text', t, 0, 0, 'x'), null, 'tokens from another text are refused');
+  const long = Array.from({length: 450}, (_, i) => 'w' + i).join(' ');
+  const lt = Model.fixTokens(long);
+  assert.equal(lt.length, 450, 'no 200-word cap');
+  assert.equal(Model.fixedText(long, lt, 400, 400, 'X'), long.replace('w400', 'X'));
+  const w = Model.fixWindow(lt, 400, 401, 200);
+  assert.ok(w.to - w.from === 200 && w.from <= 400 && w.to > 401 && w.tokens[0].index === w.from);
+  same(Model.fixWindow(lt, 0, 0, 200).from, 0);
+  same(Model.fixWindow(lt, 449, 449, 200).to, 450);
+});
+
+test('learnedTotal counts tombstones too; appendHistory drops repeated ids', () => {
+  assert.equal(Model.learnedTotal(null), 0);
+  assert.equal(Model.learnedTotal({entries: [], counts: {active: 0, rejected: 2, promoted: 1, junk: true}}), 3);
+  assert.equal(Model.learnedTotal({entries: [{id: 'a'}], counts: {}}), 1);
+  same(Model.appendHistory([{id: 'a'}, {id: 'b'}], [{id: 'b'}, {id: 'c'}, {id: 'c'}, null, {id: 3}]).map(r => r.id), ['a', 'b', 'c']);
+});
+
+test('a failure is one short human line: plain place, message only when short, never cut mid-sentence', () => {
+  assert.equal(Model.failureLine({where: 'archive', msg: 'pw-record exited 1'}), 'Last problem saving the archive: pw-record exited 1');
+  const long = "module 'voxtype_tui.learn_watch' has no attribute 'on_post_output' while handling the record";
+  assert.equal(Model.failureLine({where: 'learn_watch', msg: long}), 'Last problem while learning');
+  assert.equal(Model.failureLine({where: 'post-output', msg: 'Traceback\nline 2'}), 'Last problem after a dictation');
+  assert.equal(Model.failureLine({where: 'something-new', msg: ''}), 'Last problem');
+  assert.ok(!/…/.test(Model.healthLine({failures: [{where: 'archive', msg: long}]})), 'nothing is cut with an ellipsis');
+  assert.equal(Model.shortDetail('a\u202eb', 10), 'ab');
+});
+
+test('learnNotice: a pair voxtype-tui skipped (rejected before) is not reported as a suggestion', () => {
+  const pair = {heard: 'omashi', written: 'Omarchy'};
+  assert.equal(Model.learnNotice({applied: [], candidates: [Object.assign({kind: 'sounds_like'}, pair)], skipped: [Object.assign({reason: 'you rejected this before'}, pair)]}),
+    'Not learned: you rejected this before');
+  assert.equal(Model.learnNotice({applied: [], candidates: [Object.assign({kind: 'spelling'}, pair)], skipped: [Object.assign({reason: 'already one of your own words'}, pair)]}),
+    'Not learned: already one of your own words');
+  // A candidate the reply neither applied nor skipped is still a suggestion.
+  assert.equal(Model.learnNotice({applied: [], candidates: [pair, {heard: 'x', written: 'Y'}], skipped: [Object.assign({reason: 'you rejected this before'}, pair)]}),
+    'Suggested x → Y · review it in Words');
+  assert.equal(Model.learnNotice({applied: [], candidates: qtList(pair), skipped: qtList(Object.assign({reason: 'you rejected this before'}, pair))}),
+    'Not learned: you rejected this before', 'QML lists are not Arrays');
+});
+
+test('historyDetailText: the whole transcript, sanitized, up to anything the bridge can send', () => {
+  const long = 'word '.repeat(600) + 'END';
+  assert.equal(long.length, 3003);
+  const shown = Model.historyDetailText({final: long});
+  assert.ok(shown.endsWith('END'), 'a 3,000-character dictation is shown in full');
+  assert.equal(shown, Model.sanitize(long, 1e9));
+  assert.equal(Model.historyDetailText({raw: 'a\u202eb\u0007c'}), 'abc', 'still sanitized');
+  const bridge = fs.readFileSync(path.join(__dirname, '..', 'bridge.py'), 'utf8');
+  const cap = Number(bridge.match(/^HISTORY_RECORD_MAX_BYTES = ([\d_]+)/m)[1].replace(/_/g, ''));
+  assert.ok(Model.HISTORY_DETAIL_MAX_CHARS >= cap, 'no record the bridge returns whole is cut in the panel');
+});
+
+test('everywhereFiles: every planned file, sanitized, from a QML list too', () => {
+  const files = Array.from({length: 12}, (_, i) => ({action: 'add', path: '/etc/x' + i + '\u202e.json'}));
+  const rows = Model.everywhereFiles({files});
+  assert.equal(rows.length, 12, 'not just the first eight');
+  assert.equal(rows[11].text, '· add  /etc/x11.json');
+  assert.equal(Model.everywhereFiles({files: qtList(...files)}).length, 12);
+  same(Model.everywhereFiles(null), []);
 });

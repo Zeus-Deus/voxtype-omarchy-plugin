@@ -11,6 +11,7 @@ Run:  /usr/bin/python3 -m pytest -q tests/test_bridge.py
 from __future__ import annotations
 
 import contextlib
+import importlib.util
 import json
 import os
 import re
@@ -405,6 +406,10 @@ def _install(path: Path, body: str) -> None:
     path.chmod(0o755)
 
 
+FEATURES_ALL_OFF = {"version": 1, "usage": {"enabled": False}, "history": {"enabled": False},
+                    "archive": {"enabled": False}, "learning": {"enabled": False}}
+
+
 @pytest.fixture
 def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Env:
     e = Env(tmp_path, monkeypatch)
@@ -420,6 +425,13 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Env:
     # engine builds) from these when set, which the host shell usually does.
     monkeypatch.setenv("XDG_CONFIG_HOME", str(e.home / ".config"))
     monkeypatch.setenv("XDG_DATA_HOME", str(e.home / ".local" / "share"))
+    # voxtype-tui 0.2 wires its capture hook into config.toml on the first
+    # save when usage/history are on (their default). Tests start with every
+    # capture feature off so the older contract holds; the wired case has its
+    # own test (test_first_save_wires_capture_hook_on_tui_02).
+    e.features_json = e.home / ".config" / "voxtype-tui" / "features.json"
+    e.features_json.parent.mkdir(parents=True, exist_ok=True)
+    e.features_json.write_text(json.dumps(FEATURES_ALL_OFF))
     monkeypatch.delenv("FAKE_VOXTYPE_VARIANT", raising=False)
     monkeypatch.delenv("FAKE_ASR_STATE", raising=False)
     monkeypatch.delenv("VOXTYPE_TUI_SYSTEMCTL", raising=False)
@@ -1166,7 +1178,11 @@ def test_dict_upsert_wires_post_process(env: Env):
     assert "text.replacements" in res["restart_needed"]
     cfg = env.config_dict()
     assert cfg["text"]["replacements"] == {"vox type": "Voxtype"}
-    assert cfg["output"]["post_process"]["command"] == "voxtype-tui-postprocess"
+    from voxtype_tui import config
+
+    # 0.2 wires an uninstall-safe form (it falls back to `cat`); 0.1.x the bare name.
+    wired = getattr(config, "POSTPROCESS_COMMAND", "voxtype-tui-postprocess")
+    assert cfg["output"]["post_process"]["command"] == wired
     res = env.ok("dict.upsert", **{"from": "vox type", "to": "Voxtype!", "category": "Capitalization"})
     assert res["snapshot"]["replacements"][0]["category"] == "Capitalization"
     assert res["snapshot"]["replacements"][0]["to"] == "Voxtype!"
@@ -1210,7 +1226,66 @@ def test_settings_allow_list_matches_tui():
     used = set(re.findall(r"set_setting\(\s*\"([a-z_.]+)\"", src))
     used |= set(re.findall(r"unset_setting\(\s*\"([a-z_.]+)\"", src))
     used |= set(settings.MODEL_PATH_PER_ENGINE.values())
-    assert used == set(bridge.SETTING_TYPES), used ^ set(bridge.SETTING_TYPES)
+    # Everything the TUI can write, the panel can write; the panel's extra
+    # stock-voxtype keys (EXTRA_SETTING_TYPES) are the only difference, and
+    # voxtype-tui 0.2 lists them itself.
+    assert used <= set(bridge.SETTING_TYPES), used - set(bridge.SETTING_TYPES)
+    assert set(bridge.SETTING_TYPES) - used <= set(bridge.EXTRA_SETTING_TYPES), set(bridge.SETTING_TYPES) - used
+    tui_only = set(bridge.SETTING_TYPES) - set(bridge.EXTRA_SETTING_TYPES)
+    assert tui_only <= used, tui_only - used
+
+
+# `voxtype config schema` (voxtype 1.1.1) for the extra keys: type, and the
+# enumerations / ranges the bridge enforces before voxtype sees them.
+EXTRA_SCHEMA = {
+    "audio.pause_media": ("bool", None), "audio.duck_media": ("bool", None),
+    "audio.duck_media_volume_percent": ("int", (0, 150)), "audio.duck_media_fade_ms": ("int", (0, 5000)),
+    "osd.enabled": ("bool", None), "osd.frontend": ("str", ("gtk4", "native", "quickshell")),
+    "osd.layout": ("str", ("compact", "wide", "minimal", "tile", "orb", "custom")),
+    "osd.position": ("str", ("bottom-center", "top-center", "bottom-left", "bottom-right", "top-left", "top-right")),
+    "osd.palette": ("str", ("omarchy", "fallback", "package", "custom")), "osd.opacity": ("float", (0.0, 1.0)),
+    "text.filter_filler_words": ("bool", None), "output.restore_clipboard": ("bool", None),
+    "output.shift_enter_newlines": ("bool", None),
+    "output.notification.on_recording_start": ("bool", None), "output.notification.on_recording_stop": ("bool", None),
+    "output.notification.on_transcription": ("bool", None), "output.notification.on_no_speech": ("bool", None),
+    "output.notification.urgency": ("str", ("low", "normal", "critical")),
+}
+
+
+def test_extra_settings_match_voxtype_schema():
+    assert set(bridge.EXTRA_SETTING_TYPES) == set(EXTRA_SCHEMA)
+    for path, (kind, rule) in EXTRA_SCHEMA.items():
+        assert bridge.EXTRA_SETTING_TYPES[path] == kind == bridge.SETTING_TYPES[path], path
+        if isinstance(rule, tuple) and rule and isinstance(rule[0], str):
+            assert bridge.SETTING_ENUMS[path] == rule, path
+        elif rule is not None:
+            assert bridge.SETTING_RANGES[path] == rule, path
+
+
+@pytest.mark.parametrize("path,value,error", [
+    ("osd.layout", "huge", "must be one of"),
+    ("osd.position", "middle", "must be one of"),
+    ("audio.duck_media_volume_percent", 151, "between 0 and 150"),
+    ("audio.duck_media_volume_percent", True, "expects an integer"),
+    ("osd.opacity", 1.5, "between 0 and 1"),
+    ("output.notification.urgency", "loud", "must be one of"),
+])
+def test_extra_settings_are_validated(env: Env, path, value, error):
+    res = env.fail("settings.set", path=path, value=value)
+    assert error in res["error"], res
+
+
+def test_extra_settings_write_with_any_tui(env: Env):
+    """AppState.set_setting writes any dotted path: the extras work with
+    voxtype-tui 0.1.9 too, and land as real TOML keys."""
+    env.ok("settings.set", path="audio.duck_media", value=True)
+    env.ok("settings.set", path="audio.duck_media_volume_percent", value=40)
+    env.ok("settings.set", path="osd.layout", value="wide")
+    cfg = env.config_dict()
+    assert cfg["audio"]["duck_media"] is True and cfg["audio"]["duck_media_volume_percent"] == 40
+    assert cfg["osd"]["layout"] == "wide"
+    snap = env.ok("load")["snapshot"]["settings"]
+    assert snap["audio.duck_media_volume_percent"] == 40 and snap["osd.layout"] == "wide"
 
 
 @pytest.mark.parametrize("path,value,expected", [
@@ -2007,7 +2082,11 @@ def test_import_include_settings_defaults_to_false(env: Env):
 def test_redacted_import_paths_match_tui():
     from voxtype_tui import sync
 
-    assert bridge.REDACTED_IMPORT_PATHS == {".".join(p) for p in sync.SECRET_PATHS}
+    tui = {".".join(p) for p in sync.SECRET_PATHS}
+    # Never narrower than voxtype-tui; the only extra is the pre-recording
+    # hook, which voxtype-tui 0.2 lists itself.
+    assert tui <= bridge.REDACTED_IMPORT_PATHS
+    assert bridge.REDACTED_IMPORT_PATHS - tui <= {"output.pre_recording_command"}
 
 
 def test_bridge_dangerous_paths_superset_of_tui():
@@ -2196,7 +2275,7 @@ def test_import_reads_the_chosen_file_once(env: Env, monkeypatch):
 
 
 def test_import_apply_refusal_shape(env: Env):
-    """C3: the refusal payload the QML lane renders."""
+    """The refusal payload the panel renders."""
     p = _bundle(env, settings={"output": {"pre_recording_command": "evil"}})
     res = env.apply("fail", path=str(p), include_settings=True)
     assert set(res) == {"ok", "error", "dangerous", "diff", "warnings"}
@@ -2779,6 +2858,8 @@ def test_write_ops_set_matches_dispatch_table():
     import bridge
 
     mutating = {op for op in bridge.OPS if op.split(".")[0] in {"vocab", "dict", "settings", "models", "gpu"} or op == "import.apply"}
+    # features.set can rewire [output] hooks; learn.promote writes the user's lists.
+    mutating |= {"features.set", "learn.promote"}
     assert bridge.WRITE_OPS == mutating - {"models.list", "gpu.status"}
 
 
@@ -3416,3 +3497,393 @@ def test_without_extra_models_the_bridge_behaves_as_before(env: Env, monkeypatch
     env.fail("settings.set", path="engine", value="qwen3-asr")
     r = env.run_cli(None, "--download", "whisper", "tiny")
     assert r.returncode == 0 and r.stdout.splitlines()[0] == "LOG $ voxtype setup --download --model tiny"
+
+
+# ---------------------------------------------------------------------------
+# Insights ops (usage, history, learning): voxtype-tui 0.2 modules, faked
+# with the documented insights facade and learned APIs.
+# ---------------------------------------------------------------------------
+
+INSIGHT_OPS = [
+    ("features.get", {}), ("features.set", {"patch": {"history": {"keep_days": 90}}}),
+    ("usage.summary", {}), ("history.list", {}), ("history.delete", {"id": "r1"}), ("history.clear", {}),
+    ("learn.list", {}), ("learn.submit", {"id": "r1", "edited": "x"}), ("learn.accept", {"id": "l1"}),
+    ("learn.reject", {"id": "l1"}), ("learn.promote", {"id": "l1"}), ("learn.forget", {"id": "l1"}),
+    ("learn.reset", {}), ("learn.everywhere.preview", {}), ("learn.everywhere.set", {"enabled": True}),
+]
+
+
+class Unavailable(Exception):
+    pass
+
+
+def _fake_module(monkeypatch: pytest.MonkeyPatch, name: str, **attrs):
+    import importlib.machinery
+    import types
+
+    mod = types.ModuleType(name)
+    mod.__spec__ = importlib.machinery.ModuleSpec(name, None)
+    for k, v in attrs.items():
+        setattr(mod, k, v)
+    monkeypatch.setitem(sys.modules, name, mod)
+    return mod
+
+
+@pytest.fixture
+def insights(monkeypatch: pytest.MonkeyPatch):
+    calls: list = []
+    feats = {"usage": {"enabled": True, "typing_wpm": 40}, "history": {"enabled": True, "keep_days": 30},
+             "archive": {"enabled": False, "dir": None}, "learning": {"enabled": True, "everywhere": False}}
+    avail = {"available": {"usage": True, "history": True, "archive": True, "learning": True, "everywhere": True}, "reasons": {}}
+
+    def get_features(config_path=None):
+        calls.append(("get_features", config_path))
+        return {"features": feats, **avail}
+
+    def set_features(patch, config_path=None):
+        calls.append(("set_features", patch))
+        for g, leaves in patch.items():
+            feats.setdefault(g, {}).update(leaves)
+        return {"features": feats, **avail, "restart_needed": False, "config_changed": False}
+
+    record = {"id": "20261106T203553Z-1a2b", "raw": "open the omashi menu", "final": "open the omashi menu", "words": 4}
+
+    def history_list(before=None, limit=20):
+        calls.append(("history_list", before, limit))
+        return {"enabled": True, "keep_days": 30, "items": [record] * 60, "next": "../../etc"}
+
+    def usage_summary(days=365, config_path=None):
+        calls.append(("usage_summary", days))
+        if days == 2:
+            raise Unavailable("your own post-process command is set")
+        if days == 3:
+            raise ValueError("days out of range")
+        return {"enabled": True, "days": [{"date": "2026-11-06", "dictations": 3, "words": 40, "seconds": 12.5}],
+                "totals": {"dictations": 3, "words": 40, "seconds": 12.5, "wpm": None, "saved_seconds": None},
+                "hours": [0] * 24, "models": [], "since": "2026-11-06", "health": {}}
+
+    mod = _fake_module(monkeypatch, "voxtype_tui.insights", get_features=get_features, set_features=set_features,
+                       history_list=history_list, usage_summary=usage_summary, Unavailable=Unavailable,
+                       history_delete=lambda i: {"removed": 1 if i == record["id"] else 0},
+                       history_clear=lambda: {"removed": 7})
+    mod.calls = calls
+    mod.feats = feats
+    return mod
+
+
+@pytest.fixture
+def learned(monkeypatch: pytest.MonkeyPatch):
+    entry = {"id": "l_7f3a0c12de", "kind": "spelling", "written": "Omarchy", "heard": ["omashi"], "state": "suggested"}
+    rule = {"id": "l_aaaa", "kind": "sounds_like", "written": "Omarchy", "heard": ["oh marchy", "omashi"], "state": "active"}
+    store = {entry["id"]: entry, rule["id"]: rule}
+    calls: list = []
+
+    def submit_correction(rid, edited, source, kind=None):
+        calls.append(("submit", rid, edited, source, kind))
+        if rid == "missing":
+            return {"ok": False, "reason": "dictation not found"}
+        return {"ok": True, "candidates": [{"heard": "omashi", "written": "Omarchy", "kind": kind or "spelling"}],
+                "applied": [entry], "skipped": []}
+
+    def promote(eid, *, add_to_user=None):
+        e = store.get(eid)
+        if e is None:
+            return {"ok": False, "error": "no such learned entry"}
+        added = add_to_user(e)
+        e["state"] = "promoted"
+        return {"ok": True, "entry": e, "added": added}
+
+    def user_additions(e):
+        if e["kind"] == "spelling":
+            return {"vocab": [e["written"]], "rules": []}
+        return {"vocab": [], "rules": [[h, e["written"]] for h in e["heard"]]}
+
+    mod = _fake_module(
+        monkeypatch, "voxtype_tui.learned",
+        list_entries=lambda: {"enabled": True, "everywhere": False, "entries": list(store.values()) + ["junk"],
+                              "counts": {"active": 1, "suggested": 1, "dormant": 0, "rejected": 0, "promoted": True}},
+        submit_correction=submit_correction, promote=promote, user_additions=user_additions,
+        accept=lambda eid: store.get(eid), reject=lambda eid: store.get(eid),
+        forget=lambda eid: store.pop(eid, None) is not None, reset=lambda: 2)
+    _fake_module(
+        monkeypatch, "voxtype_tui.learn_everywhere",
+        preview=lambda: {"files": [{"path": "~/.config/environment.d/voxtype-a11y.conf", "action": "create", "diff": "+GTK_A11Y=atspi\n" * 1000}],
+                         "needs_relogin": True, "enabled": False},
+        set_enabled=lambda on: {"ok": True, "enabled": on, "files": [{"path": "~/.config/environment.d/voxtype-a11y.conf", "action": "create"}], "needs_relogin": True})
+    mod.calls = calls
+    mod.store = store
+    return mod
+
+
+def test_insight_ops_refuse_on_old_tui(env: Env, monkeypatch: pytest.MonkeyPatch):
+    """voxtype-tui 0.1.9 has none of the modules: every new op says so,
+    with `unavailable`, and touches nothing."""
+    monkeypatch.setattr(bridge, "INSIGHT_MODULES", {k: f"voxtype_tui.no_such_{k}" for k in bridge.INSIGHT_MODULES})
+    before = env.read_config()
+    for op, args in INSIGHT_OPS:
+        res = env.fail(op, **args)
+        assert res["error"] == bridge.NEEDS_TUI_02 and res["unavailable"] == bridge.NEEDS_TUI_02, (op, res)
+    assert env.read_config() == before
+    caps = env.ok("status")["capabilities"]
+    assert caps == {"features": False, "history": False, "learned": False, "everywhere": False}
+
+
+def test_status_detects_insight_modules_without_importing(env: Env, insights, learned):
+    caps = env.ok("status")["capabilities"]
+    assert caps == {"features": True, "history": True, "learned": True, "everywhere": True}
+    assert insights.calls == [], "status only runs find_spec"
+
+
+def test_features_get_and_set(env: Env, insights):
+    res = env.ok("features.get")
+    assert set(res) == {"ok", "features", "available", "reasons"}
+    assert set(res["available"]) == {"usage", "history", "archive", "learning", "everywhere"}
+    assert insights.calls[0] == ("get_features", env.config), "the bridge's own config path is passed"
+    res = env.ok("features.set", patch={"history": {"keep_days": 90}})
+    assert res["features"]["history"]["keep_days"] == 90
+    assert res["restart_needed"] == [] and res["daemon_stale"] is False
+
+
+@pytest.mark.parametrize("patch,error", [
+    ({}, "non-empty"),
+    ({"history": {"keep_days": True}}, "wrong type"),
+    ({"history": {"keep_days": 12}}, "keep_days"),
+    ({"usage": {"typing_wpm": 500}}, "typing_wpm"),
+    ({"version": 2}, "cannot change"),
+    ({"managed_hooks": {"x": 1}}, "cannot change"),
+    ({"learning": {"keep_context": True}}, "cannot change"),
+    ({"archive": {"dir": "relative/dir"}}, "absolute"),
+    ({"archive": {"dir": "/no/such/folder/here"}}, "does not exist"),
+])
+def test_features_set_refuses_bad_patches(env: Env, insights, patch, error):
+    res = env.fail("features.set", patch=patch)
+    assert error in res["error"], res
+    assert not [c for c in insights.calls if c[0] == "set_features"], "voxtype-tui never saw it"
+
+
+def test_features_set_resolves_archive_dir(env: Env, insights):
+    target = env.home / "Documents" / "Voxtype"
+    target.mkdir(parents=True)
+    env.ok("features.set", patch={"archive": {"enabled": True, "dir": str(env.home / "Documents" / ".." / "Documents" / "Voxtype")}})
+    assert insights.feats["archive"]["dir"] == str(target.resolve())
+
+
+def test_features_set_is_a_write_op_refused_while_tui_open(env: Env, insights, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(bridge, "tui_lock_holder", lambda paths: 4242)
+    res = env.fail("features.set", patch={"history": {"keep_days": 90}})
+    assert res["tui_open_pid"] == 4242
+    assert not [c for c in insights.calls if c[0] == "set_features"]
+
+
+def test_usage_summary_and_error_mapping(env: Env, insights):
+    res = env.ok("usage.summary")
+    assert res["totals"]["words"] == 40 and len(res["hours"]) == 24 and res["since"] == "2026-11-06"
+    assert insights.calls[-1] == ("usage_summary", 365)
+    res = env.fail("usage.summary", days=2)
+    assert res["unavailable"] == res["error"] == "your own post-process command is set"
+    res = env.fail("usage.summary", days=3)
+    assert res["error"] == "days out of range" and "unavailable" not in res
+    for bad in (0, True, "365", 99999):
+        env.fail("usage.summary", days=bad)
+
+
+def test_history_list_bounds_and_ids(env: Env, insights):
+    res = env.ok("history.list", limit=50)
+    assert len(res["items"]) == 50, "never more than asked for"
+    assert res["next"] is None, "an id that fails the id pattern is dropped"
+    assert set(res) == {"ok", "enabled", "keep_days", "items", "next"}
+    assert insights.calls[-1] == ("history_list", None, 50)
+    env.ok("history.list", before="20261106T203553Z-1a2b")
+    assert insights.calls[-1] == ("history_list", "20261106T203553Z-1a2b", 30)
+    for bad in ({"limit": 51}, {"limit": 0}, {"before": "../x"}, {"before": ""}):
+        env.fail("history.list", **bad)
+    assert env.ok("history.delete", id="20261106T203553Z-1a2b")["removed"] == 1
+    assert env.ok("history.delete", id="20261106T000000Z-ffff")["removed"] == 0
+    env.fail("history.delete", id="a/b")
+    assert env.ok("history.clear")["removed"] == 7
+
+
+def test_history_list_page_fits_the_response_cap_and_pages_on(env: Env, insights, monkeypatch: pytest.MonkeyPatch):
+    """Thirty 40,000-character dictations exceed the 2 MB cap: the bridge
+    sends the largest prefix that fits and `next` continues after it, so
+    the panel always gets past a page of long dictations."""
+    big = [{"id": f"20261106T2035{i:02d}Z-1a2b", "raw": "w" * 40_000, "final": "W" * 40_000} for i in range(30, 0, -1)]
+    store = {"items": big}
+
+    def history_list(before=None, limit=20):
+        items = [i for i in store["items"] if before is None or i["id"] < before]
+        page = items[:limit]
+        return {"enabled": True, "keep_days": 30, "items": page, "next": page[-1]["id"] if len(items) > limit else None}
+
+    monkeypatch.setattr(insights, "history_list", history_list)
+    seen: list[str] = []
+    before = None
+    for _ in range(10):
+        args = {"limit": 30} if before is None else {"limit": 30, "before": before}
+        text = bridge.encode_response(bridge.handle({"op": "history.list", **args}))
+        assert len(text.encode("utf-8")) <= bridge.MAX_RESPONSE_BYTES
+        res = json.loads(text)
+        assert res["ok"] is True, res
+        assert res["items"], "every page carries at least one record"
+        assert all(len(i["raw"]) == 40_000 and "truncated" not in i for i in res["items"])
+        seen += [i["id"] for i in res["items"]]
+        before = res["next"]
+        if before is None:
+            break
+    assert seen == [i["id"] for i in big], "every record once, in order"
+
+
+def test_history_list_cuts_an_oversized_record_instead_of_failing(env: Env, insights, monkeypatch: pytest.MonkeyPatch):
+    huge = {"id": "20261106T203553Z-aaaa", "ts": "2026-11-06T20:35:53Z", "raw": "é" * 1_000_000, "final": "x" * 1_000_000}
+    odd = {"id": "20261106T203552Z-bbbb", "raw": "ok", "final": "ok", "app": {"class": "y" * 1_000_000}}
+    small = {"id": "20261106T203551Z-cccc", "raw": "short", "final": "short"}
+    monkeypatch.setattr(insights, "history_list", lambda before=None, limit=20: {
+        "enabled": True, "keep_days": 30, "items": [huge, odd, small], "next": None})
+    text = bridge.encode_response(bridge.handle({"op": "history.list"}))
+    res = json.loads(text)
+    assert res["ok"] is True and len(text.encode("utf-8")) <= bridge.MAX_RESPONSE_BYTES
+    first, second, third = res["items"]
+    assert first["truncated"] is True and first["id"] == huge["id"] and first["ts"] == huge["ts"]
+    assert first["raw"] == "é" * bridge.HISTORY_TEXT_MAX_CHARS and first["final"] == "x" * bridge.HISTORY_TEXT_MAX_CHARS
+    assert second == {"id": odd["id"], "raw": "", "final": "", "truncated": True, "oversized": True}, "a marker, never an error page"
+    assert third == small and res["next"] is None
+
+
+def test_features_set_keeps_voxtype_tui_wiring_error(env: Env, insights, monkeypatch: pytest.MonkeyPatch):
+    """voxtype-tui saves the switches but reports that the hooks could not
+    be rewired: the reply carries that warning instead of a plain success."""
+    plain = insights.set_features
+
+    def failing(patch, config_path=None):
+        out = plain(patch, config_path=config_path)
+        out["wiring_error"] = "could not update voxtype's config: " + "boom " * 200
+        return out
+
+    monkeypatch.setattr(insights, "set_features", failing)
+    res = env.ok("features.set", patch={"usage": {"enabled": True}})
+    assert res["wiring_error"].startswith("could not update voxtype's config: boom")
+    assert len(res["wiring_error"]) <= bridge.WIRING_ERROR_MAX_CHARS
+    assert res["features"]["usage"]["enabled"] is True
+    monkeypatch.setattr(insights, "set_features", plain)
+    assert "wiring_error" not in env.ok("features.set", patch={"usage": {"enabled": True}})
+
+
+def test_learn_list_counts_and_entries(env: Env, learned):
+    res = env.ok("learn.list")
+    assert [e["id"] for e in res["entries"]] == ["l_7f3a0c12de", "l_aaaa"], "non-dict entries are dropped"
+    assert res["counts"] == {"active": 1, "suggested": 1, "dormant": 0, "rejected": 0, "promoted": 0}
+
+
+def test_learn_submit(env: Env, learned):
+    res = env.ok("learn.submit", id="20261106T203553Z-1a2b", edited="open the Omarchy menu", kind="spelling")
+    assert learned.calls[-1] == ("submit", "20261106T203553Z-1a2b", "open the Omarchy menu", "fix", "spelling")
+    assert res["applied"][0]["written"] == "Omarchy" and res["candidates"]
+    assert env.fail("learn.submit", id="missing", edited="x")["error"] == "dictation not found"
+    env.fail("learn.submit", id="r1", edited="x", kind="rewrite")
+    env.fail("learn.submit", id="r1", edited="x" * (bridge.LEARN_EDIT_MAX_CHARS + 1))
+    env.fail("learn.submit", id="../r1", edited="x")
+
+
+def test_learn_decisions(env: Env, learned):
+    assert env.ok("learn.accept", id="l_7f3a0c12de")["entry"]["written"] == "Omarchy"
+    assert env.ok("learn.reject", id="l_7f3a0c12de")["entry"]["id"] == "l_7f3a0c12de"
+    assert env.fail("learn.accept", id="l_nope")["error"] == "no such learned entry"
+    assert env.ok("learn.forget", id="l_7f3a0c12de")["removed"] == 1
+    assert env.fail("learn.forget", id="l_7f3a0c12de")["error"] == "no such learned entry"
+    assert env.ok("learn.reset")["removed"] == 2
+
+
+def test_learn_promote_writes_through_the_bridge_state(env: Env, learned):
+    res = env.ok("learn.promote", id="l_7f3a0c12de")
+    assert res["added"] == {"vocab": ["Omarchy"], "rules": []}
+    assert res["daemon_stale"] is True and "snapshot" in res, "same save reply as vocab.add"
+    assert "Omarchy" in [v["phrase"] for v in res["snapshot"]["vocabulary"]]
+    # A rule the user already has for those words is never rewritten.
+    env.ok("dict.upsert", **{"from": "omashi", "to": "Oh Marshy"})
+    res = env.ok("learn.promote", id="l_aaaa")
+    assert res["added"]["rules"] == [["oh marchy", "Omarchy"]]
+    rules = {r["from"]: r["to"] for r in env.ok("load")["snapshot"]["replacements"]}
+    assert rules["omashi"] == "Oh Marshy" and rules["oh marchy"] == "Omarchy"
+    assert env.fail("learn.promote", id="l_nope")["error"] == "no such learned entry"
+
+
+def test_learn_promote_refused_while_tui_open(env: Env, learned, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(bridge, "tui_lock_holder", lambda paths: 77)
+    before = env.read_config()
+    env.fail("learn.promote", id="l_7f3a0c12de")
+    assert env.read_config() == before and learned.store["l_7f3a0c12de"]["state"] == "suggested"
+
+
+def test_learn_everywhere(env: Env, learned):
+    res = env.ok("learn.everywhere.preview")
+    assert res["needs_relogin"] is True and res["enabled"] is False
+    assert res["files"][0]["action"] == "create" and len(res["files"][0]["diff"]) == 4000, "diffs are capped"
+    res = env.ok("learn.everywhere.set", enabled=True)
+    assert res == {"ok": True, "enabled": True, "files": [{"path": "~/.config/environment.d/voxtype-a11y.conf", "action": "create"}], "needs_relogin": True}
+    env.fail("learn.everywhere.set", enabled="yes")
+
+
+def test_daemon_set_login(env: Env):
+    env.daemon(active=True)
+    res = env.ok("daemon.set_login", enabled=False)
+    assert "starts_at_login" in res
+    assert "disable voxtype" in env.systemctl_log.read_text()
+    env.ok("daemon.set_login", enabled=True)
+    assert "enable voxtype" in env.systemctl_log.read_text()
+    env.fail("daemon.set_login", enabled="no")
+
+
+@pytest.mark.skipif(importlib.util.find_spec("voxtype_tui.insights") is None, reason="needs voxtype-tui 0.2 (insights)")
+def test_first_save_wires_capture_hook_on_tui_02(env: Env):
+    """Real voxtype-tui 0.2: with usage/history on, the first panel save
+    wires the capture hook, and the reply says the daemon must restart."""
+    env.features_json.unlink()
+    res = env.ok("vocab.add", phrase="Omarchy")
+    # The wiring is reconciled at load time (like a migration), so it is not in
+    # this save's restart_needed diff; the daemon is still marked stale.
+    assert res["daemon_stale"] is True
+    hook = env.config_dict()["output"]["pre_recording_command"]
+    assert "voxtype-tui" in hook
+    feats = env.ok("features.get")
+    assert feats["available"]["history"] is True
+    # Turning capture off again unwires it: a restart is needed once more.
+    res = env.ok("features.set", patch={"usage": {"enabled": False}, "history": {"enabled": False}})
+    assert "output.pre_recording_command" in res["restart_needed"] and res["daemon_stale"] is True
+
+
+@pytest.mark.skipif(importlib.util.find_spec("voxtype_tui.insights") is None, reason="needs voxtype-tui 0.2 (insights)")
+def test_real_insights_ops_round_trip(env: Env):
+    """The bridge against the real facade: empty history, a summary with 24
+    hours, features round-trip."""
+    env.ok("features.set", patch={"history": {"enabled": True, "keep_days": 90}})
+    assert env.ok("features.get")["features"]["history"]["keep_days"] == 90
+    hist = env.ok("history.list")
+    assert hist["items"] == [] and hist["next"] is None and hist["keep_days"] == 90
+    usage = env.ok("usage.summary", days=30)
+    assert len(usage["hours"]) == 24 and usage["totals"]["dictations"] == 0
+    assert env.ok("history.clear")["removed"] == 0
+
+
+@pytest.mark.skipif(importlib.util.find_spec("voxtype_tui.learned") is None, reason="needs voxtype-tui 0.2 (learned)")
+def test_real_learned_ops_round_trip(env: Env):
+    res = env.ok("learn.list")
+    assert res["entries"] == [] and set(res["counts"]) >= {"active", "suggested", "dormant", "rejected"}
+    assert env.fail("learn.accept", id="l_nope")["error"] == "no such learned entry"
+    assert env.ok("learn.reset")["removed"] == 0
+    prev = env.ok("learn.everywhere.preview")
+    assert prev["files"] and all(f["action"] in bridge.EVERYWHERE_ACTIONS for f in prev["files"])
+
+
+@pytest.mark.skipif(importlib.util.find_spec("voxtype_tui.insights") is None, reason="needs voxtype-tui 0.2 (insights)")
+def test_real_features_set_reports_wiring_error(env: Env, monkeypatch: pytest.MonkeyPatch):
+    """Real voxtype-tui 0.2: the switches save, rewiring voxtype's hooks
+    fails, and the bridge passes voxtype-tui's warning on."""
+    from voxtype_tui import hooks
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("voxtype rejected the config\nsecond line")
+
+    monkeypatch.setattr(hooks, "sync_config", broken)
+    res = env.ok("features.set", patch={"history": {"keep_days": 90}})
+    assert res["features"]["history"]["keep_days"] == 90, "the switch itself was saved"
+    assert "voxtype rejected the config" in res["wiring_error"] and "second line" not in res["wiring_error"]
