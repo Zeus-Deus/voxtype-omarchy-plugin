@@ -532,7 +532,7 @@ function hintPairs(section, context) {
     // a letter), so the jump covers every other capital.
     if (section === "words") return move.concat([["/", "search"], ["a", "add"], ["c", "type"], ["x", "delete"], ["Shift+A–Z", "jump (not X)"]]);
     if (section === "history") return move.concat([["Enter", "open"], ["c", "copy"], ["f", "fix"], ["x", "delete"]]);
-    if (section === "settings") return move.concat([["←→", "change"], ["Enter", "open"], ["u", "reset"], ["1–4", "sections"]]);
+    if (section === "settings") return move.concat([["Enter", "change"], ["u", "reset"], ["1–4", "sections"]]);
     return [];
 }
 
@@ -960,6 +960,19 @@ function parseWordInput(text) {
     return {kind: "vocab", phrase: s};
 }
 
+// Replace's two fields: what you say, what is written instead. An arrow
+// typed into the first field still works. need_written: move to the second.
+function parseRuleFields(heard, written) {
+    var h = String(heard || "").trim(), w = String(written || "").trim();
+    if (h === "" && w === "") return null;
+    if (h === "") return {kind: "invalid", reason: "First type what you say"};
+    if (w === "") {
+        var p = parseWordInput(h);
+        return p && p.kind !== "vocab" ? p : {kind: "need_written"};
+    }
+    return {kind: "rule", from: h, to: w};
+}
+
 // A–Z jump: first row whose written form starts with `letter`, else the
 // next letter that has one; -1 when nothing follows.
 function letterIndex(rows, letter) {
@@ -1068,6 +1081,26 @@ function keepLabel(days) {
 
 // Keep for: a shorter retention deletes history (voxtype-tui prunes on its
 // next read), so the panel confirms it. null = forever.
+// Keep for as dropdown values (strings; "forever" is null days).
+// A saved period that is not offered (hand-edited) is listed first under its
+// own label, so the row shows what is set.
+function keepChoiceOptions(days) {
+    var opts = KEEP_OPTIONS.map(function(o) { return {value: keepChoiceValue(o.value), label: o.label}; });
+    var cur = keepChoiceValue(days === undefined ? 30 : days);
+    for (var i = 0; i < opts.length; i++) if (opts[i].value === cur) return opts;
+    var n = Number(days);
+    return isFinite(n) ? [{value: cur, label: keepLabel(Math.round(n))}].concat(opts) : opts;
+}
+function keepChoiceValue(days) {
+    return days === null || days === undefined ? "forever" : String(days);
+}
+// undefined for anything that is not one of the offered values.
+function keepFromChoice(value) {
+    for (var i = 0; i < KEEP_OPTIONS.length; i++)
+        if (keepChoiceValue(KEEP_OPTIONS[i].value) === String(value)) return KEEP_OPTIONS[i].value;
+    return undefined;
+}
+
 function keepIsShorter(fromDays, toDays) {
     if (toDays === null || toDays === undefined) return false;
     return fromDays === null || fromDays === undefined ? true : toDays < fromDays;
@@ -1453,6 +1486,18 @@ function simpleSettingsTargets(ctx) {
 }
 
 // Downloaded models of the current engine, for the Settings › Model cycler.
+// A dropdown's options plus the current value when it is not one of them
+// (hand-edited config), labelled sanitized, so the trigger never renders a
+// raw config string and the list shows what is actually set.
+function withCurrent(options, current) {
+    var cur = String(current === null || current === undefined ? "" : current);
+    for (var i = 0; i < options.length; i++) {
+        var o = options[i];
+        if (String(o && typeof o === "object" ? o.value : o) === cur) return options;
+    }
+    return cur === "" ? options : [{value: cur, label: sanitize(cur, OPTION_LABEL_MAX)}].concat(options);
+}
+
 function modelCycleOptions(rows, current) {
     var out = [];
     var seen = false;

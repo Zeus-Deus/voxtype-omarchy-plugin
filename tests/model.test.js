@@ -625,3 +625,13 @@ test('everywhereFiles: every planned file, sanitized, from a QML list too', () =
   assert.equal(Model.everywhereFiles({files: qtList(...files)}).length, 12);
   same(Model.everywhereFiles(null), []);
 });
+
+test('parseRuleFields: Replace\'s two fields', () => {
+  const M = Model;
+  assert.equal(M.parseRuleFields('', ''), null);
+  assert.equal(M.parseRuleFields('code mucks', '').kind, 'need_written');
+  assert.equal(M.parseRuleFields('', 'Codemux').kind, 'invalid');
+  assert.deepEqual(JSON.parse(JSON.stringify(M.parseRuleFields('  code mucks ', ' Codemux '))), {kind: 'rule', from: 'code mucks', to: 'Codemux'});
+  assert.equal(M.parseRuleFields('a → b', '').kind, 'rule');
+  assert.equal(M.parseRuleFields('→ b', '').kind, 'invalid');
+});

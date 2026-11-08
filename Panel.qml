@@ -90,6 +90,10 @@ Panel {
     // op -> reason, for ops an older voxtype-tui answered with `unavailable`.
     property var unavailable: ({})
     property string wordFilter: "all"
+    // On Replace the add bar is two fields, what you say → what is written,
+    // and the HEARD column gets the room a spoken phrase needs.
+    readonly property bool replaceMode: wordFilter === "replace"
+    readonly property real heardFraction: replaceMode ? 0.46 : 0.34
     property string expandedId: ""
     // Fix a word: the dictation, the chosen word span and the stage
     // ("pick" = choosing words, "type" = typing the correction).
@@ -104,13 +108,11 @@ Panel {
     property var fixField: null
     property bool historyEnabled: true
     property var historyKeepDays: 30
-    // Keep for: ←/→ only preview a value; keepTimer saves the one the user
-    // settles on (a shorter one after a confirmation), so cycling past
-    // "1 week" on the way to "forever" never prunes anything. The preview is
-    // dropped, never saved, once the cursor leaves the row, the page changes,
-    // the panel hides or any other confirmation opens (dropKeep).
-    property bool keepPending: false
-    property var keepPendingDays: null
+    // Settings rows with a fixed list of values open a dropdown; the row
+    // with this key listens for it (SimpleRow kind "choice").
+    signal openChoice(string key)
+    // The last cursor move came from hovering (see hoverCursor).
+    property bool cursorFromPointer: false
 
     readonly property var vocabulary: snapshot.vocabulary || []
     readonly property var replacements: snapshot.replacements || []
@@ -225,9 +227,24 @@ Panel {
     function cursorIs(key) { return cursorActive && cursorKey === key }
     function rowHasCursor(index) { return cursorActive && cursorKey === "rows" && cursorIndex === index }
     function setCursor(key, index) {
+        cursorFromPointer = false;
         cursorActive = true;
         cursorKey = key;
         cursorIndex = key === "rows" ? index : -1;
+    }
+    // The pointer moved the cursor onto a row. The row is already on screen
+    // under the pointer, so it must not scroll itself into view: near the
+    // list's edge that nudged the list on every hover.
+    function hoverCursor(key, index) {
+        cursorFromPointer = true;
+        cursorActive = true;
+        cursorKey = key;
+        cursorIndex = key === "rows" ? index : -1;
+    }
+    // A row that just got the cursor scrolls into view, unless the pointer
+    // put it there.
+    function followCursor(item) {
+        if (!cursorFromPointer) ensureVisible(item);
     }
     function resetCursor() {
         cursorActive = false;
@@ -235,6 +252,7 @@ Panel {
         cursorIndex = -1;
     }
     function moveCursor(dy) {
+        cursorFromPointer = false;
         if (fixStage === "pick") { moveFix(dy); return; }
         var targets = targetsFor(page);
         if (targets.length === 0) {
@@ -265,9 +283,9 @@ Panel {
         cursorIndex = cursorKey === "rows" ? (dy > 0 ? 0 : rowCount() - 1) : -1;
     }
     function moveCursorH(dx) {
+        cursorFromPointer = false;
         if (fixStage === "pick") { moveFix(dx); return; }
         if (!cursorActive) return;
-        if (page === "settings") { cycleSimple(cursorKey, dx); return; }
         if (page === "words" && cursorKey === "filter") { wordFilter = Model.cycleValue(Model.wordFilters(myWords, learnedWords), wordFilter, dx); cursorIndex = -1; return; }
         if (cursorKey === "audio.feedback.volume") nudgeSlider("audio.feedback.volume", dx * 0.05, 0, 1);
         else if (cursorKey === "vad.threshold") nudgeSlider("vad.threshold", dx * 0.05, 0, 1);
@@ -284,7 +302,6 @@ Panel {
         cursorIndex = Math.max(0, Math.min(count - 1, cursorIndex));
     }
     function leavePage() {
-        dropKeep();
         resetCursor();
         exportOpen = false;
         importPreview = null;
@@ -382,11 +399,10 @@ Panel {
             openPopups = 0;
             pasteTarget = null;
             service.cancelPaste();
-            // An unconfirmed Keep for value is dropped, never saved unseen.
-            dropKeep();
             testField.text = "";
             previewOutput = "";
             wordsField.text = "";
+            writtenField.text = "";
             historySearch.text = "";
             if (fixField) fixField.text = "";
             fixId = "";
@@ -512,14 +528,19 @@ Panel {
         var mods = Model.settingValue(config, "hotkey.modifiers", []);
         setSetting("hotkey.modifiers", Model.toggleInList(mods, mod));
     }
-    // Words: one field. "Codemux" adds a word, "code mucks → Codemux" a rule.
+    // Words: "Codemux" adds a word, "code mucks → Codemux" a rule. On Replace
+    // the two halves have their own fields; Enter in the first moves on.
     function addWord() {
-        var parsed = Model.parseWordInput(wordsField.text);
-        if (!parsed || locked) return;
+        if (locked) return;
+        var parsed = replaceMode ? Model.parseRuleFields(wordsField.text, writtenField.text) : Model.parseWordInput(wordsField.text);
+        if (!parsed) return;
+        if (parsed.kind === "need_written") { writtenField.forceActiveFocus(); return; }
         if (parsed.kind === "invalid") { showNotice(parsed.reason); return; }
         if (parsed.kind === "rule") service.run({op: "dict.upsert", from: parsed.from, to: parsed.to, category: "Replacement"});
         else service.run({op: "vocab.add", phrase: parsed.phrase});
         wordsField.text = "";
+        writtenField.text = "";
+        if (replaceMode) wordsField.forceActiveFocus();
     }
     function cursorWord() { return cursorKey === "rows" && page === "words" ? (wordsView.rows[cursorIndex] || null) : null }
     // `c` on a rule cycles Replacement ↔ Capitalization (the old Dictionary `c`).
@@ -703,47 +724,57 @@ Panel {
     function writeSettings(writes) {
         for (var i = 0; i < writes.length; i++) setSetting(writes[i][0], writes[i][1]);
     }
-    // ←/→ (and Enter, which steps forward) on a simple Settings row.
-    function cycleSimple(key, d) {
+    // Settings rows that pick one value from a list. Each opens a dropdown
+    // of every value, so the choices are visible instead of stepped through.
+    readonly property var choiceKeys: ["model", "language", "mode", "indicator", "other_audio", "output_mode", "keep"]
+    function choiceOptions(key) {
+        return key === "model" || key === "keep" ? choiceList(key) : Model.withCurrent(choiceList(key), choiceValue(key));
+    }
+    function choiceList(key) {
+        if (key === "model") return Model.modelCycleOptions(modelsEngine === engine ? modelRows : [], String(Model.settingValue(config, modelPath, "")));
+        if (key === "language") return Model.LANGUAGES;
+        if (key === "mode") return Model.HOTKEY_MODE_OPTIONS;
+        if (key === "indicator") return Model.INDICATOR_OPTIONS;
+        if (key === "other_audio") return Model.OTHER_AUDIO_OPTIONS;
+        if (key === "output_mode") return Model.OUTPUT_MODE_OPTIONS;
+        if (key === "keep") return Model.keepChoiceOptions(featureValue("history", "keep_days", 30));
+        return [];
+    }
+    function choiceValue(key) {
+        if (key === "model") return String(Model.settingValue(config, modelPath, status && status.model ? status.model.name || "" : ""));
+        if (key === "language") return String(Model.settingOr(config, "whisper.language"));
+        if (key === "mode") return String(Model.settingOr(config, "hotkey.mode"));
+        if (key === "indicator") return Model.indicatorValue(config);
+        if (key === "other_audio") return Model.otherAudioValue(config);
+        if (key === "output_mode") return String(Model.settingOr(config, "output.mode"));
+        if (key === "keep") return Model.keepChoiceValue(featureValue("history", "keep_days", 30));
+        return "";
+    }
+    function openSimpleChoice(key) {
         if (locked) return;
-        if (key === "model") {
-            var opts = Model.modelCycleOptions(modelsEngine === engine ? modelRows : [], String(Model.settingValue(config, modelPath, "")));
-            if (opts.length < 2) { showNotice(opts.length ? "Only one model downloaded · Manage models to add more" : "No model downloaded · open Manage models"); return; }
-            setSetting(modelPath, Model.cycleValue(opts, String(Model.settingValue(config, modelPath, "")), d));
-        }
-        else if (key === "language") setSetting("whisper.language", Model.cycleValue(Model.LANGUAGES, String(Model.settingOr(config, "whisper.language")), d));
-        else if (key === "mode") setSetting("hotkey.mode", Model.cycleValue(Model.HOTKEY_MODE_OPTIONS, String(Model.settingOr(config, "hotkey.mode")), d));
-        else if (key === "output_mode") setSetting("output.mode", Model.cycleValue(Model.OUTPUT_MODE_OPTIONS, String(Model.settingOr(config, "output.mode")), d));
-        else if (key === "indicator") writeSettings(Model.indicatorWrites(Model.cycleValue(Model.INDICATOR_OPTIONS, Model.indicatorValue(config), d)));
-        else if (key === "other_audio") writeSettings(Model.otherAudioWrites(Model.cycleValue(Model.OTHER_AUDIO_OPTIONS, Model.otherAudioValue(config), d)));
-        else if (key === "keep") stepKeep(d);
-        else activateSimple(key);
+        if (key === "model" && choiceOptions("model").length === 0) { showNotice("No model downloaded · open Manage models"); return; }
+        openChoice(key);
     }
-    function keepShown() { return keepPending ? keepPendingDays : featureValue("history", "keep_days", 30) }
-    function stepKeep(d) {
-        if (locked || !caps.features || confirmation.opened) return;
-        var next = Model.cycleValue(Model.KEEP_OPTIONS, keepShown(), d);
-        keepPendingDays = next;
-        keepPending = next !== featureValue("history", "keep_days", 30);
-        if (keepPending) keepTimer.restart(); else keepTimer.stop();
+    // A value picked in a row's dropdown. Picking the current value does nothing.
+    function chooseSimple(key, value) {
+        if (locked || value === choiceValue(key)) return;
+        if (key === "model") setSetting(modelPath, value);
+        else if (key === "language") setSetting("whisper.language", value);
+        else if (key === "mode") setSetting("hotkey.mode", value);
+        else if (key === "output_mode") setSetting("output.mode", value);
+        else if (key === "indicator") writeSettings(Model.indicatorWrites(value));
+        else if (key === "other_audio") writeSettings(Model.otherAudioWrites(value));
+        else if (key === "keep") chooseKeep(Model.keepFromChoice(value));
     }
-    function dropKeep() {
-        keepTimer.stop();
-        keepPending = false;
-    }
-    // The timer fires on its own, so it only acts while the user is still
-    // looking at the row and nothing else is being confirmed: it must never
-    // replace (or reuse) another dialog's action.
-    function commitKeep() {
-        keepTimer.stop();
-        if (!keepPending || locked || confirmation.opened || page !== "settings" || !cursorIs("keep")) { keepPending = false; return; }
-        var days = keepPendingDays;
+    // A longer period saves at once; a shorter one deletes older dictations,
+    // so it asks first (Cancel selected) and saves only on confirm.
+    function chooseKeep(days) {
+        if (locked || !caps.features || confirmation.opened || days === undefined) return;
         var saved = featureValue("history", "keep_days", 30);
-        if (days === saved) { keepPending = false; return; }
-        if (!Model.keepIsShorter(saved, days)) { keepPending = false; setFeature("history", "keep_days", days); return; }
-        // Stays pending (the row keeps showing it) until Cancel or confirm.
+        if (days === saved) return;
+        if (!Model.keepIsShorter(saved, days)) { setFeature("history", "keep_days", days); return; }
         ask("features.set", {patch: {history: {keep_days: days}}},
-            Model.keepConfirmMessage(days, historyList, historyLoaded && !historyNext, Date.now()), "Delete older", true);
+            Model.keepConfirmMessage(days, historyList, historyLoaded && !historyNext, Date.now()), "Delete older");
     }
     function activateSimple(key) {
         if (locked) return;
@@ -762,7 +793,7 @@ Panel {
         else if (key === "archive.text") setFeature("archive", "save_text", !featureValue("archive", "save_text", true));
         else if (key === "learning") setFeature("learning", "enabled", !learningOn);
         else if (key === "everywhere") toggleEverywhereCard();
-        else cycleSimple(key, 1);
+        else if (choiceKeys.indexOf(key) >= 0) openSimpleChoice(key);
     }
     function toggleEverywhereCard() {
         everywhereOpen = !everywhereOpen;
@@ -778,13 +809,11 @@ Panel {
         service.cancelQueued("dictionary.preview");
         service.run({op: "dictionary.preview", text: text});
     }
-    // keepRetention: only commitKeep's own confirmation keeps the Keep for
-    // preview; any other one drops it. An open confirmation is never
-    // replaced: its action is what the user is reading.
+    // An open confirmation is never replaced: its action is what the user
+    // is reading.
     function confirming() { return confirmation.opened }
-    function ask(action, payload, message, confirmLabel, keepRetention) {
+    function ask(action, payload, message, confirmLabel) {
         if (locked || confirmation.opened) return;
-        if (!keepRetention) dropKeep();
         confirmAction = action;
         confirmPayload = payload;
         // The untrusted fragments were sanitized by the caller; this only
@@ -817,7 +846,6 @@ Panel {
         var payload = confirmPayload;
         confirmAction = "";
         confirmPayload = null;
-        keepPending = false;
         if (action === "import.apply") {
             // accept_dangerous mirrors the confirmation the user just read.
             // With no dangerous rows it is false, so the bridge's own gate
@@ -863,6 +891,7 @@ Panel {
         noticeTimer.restart();
     }
     function activateCursor() {
+        cursorFromPointer = false;
         if (locked) { if (canInstallLocked) launchLockedInstall(); else copyLockedCommand(); return; }
         if (fixStage === "pick") { confirmFixSpan(); return; }
         if (!cursorActive) { moveCursor(1); return; }
@@ -1043,6 +1072,7 @@ Panel {
         loaded = true;
     }
     function handleKey(event) {
+        cursorFromPointer = false;
         if (confirmation.opened) {
             confirmation.handleKey(event);
             event.accepted = true;
@@ -1059,6 +1089,7 @@ Panel {
         else if (page === "home") testField.forceActiveFocus();
     }
     function handleTextKey(t) {
+        cursorFromPointer = false;
         if (locked) { if (t === "y" && canInstallLocked) copyLockedCommand(); return; }
         if (fixStage === "pick") {
             if (t === "]") growFix(1);
@@ -1085,8 +1116,6 @@ Panel {
         else if (t === "r" || t === "R") toggleRecord();
     }
     onWordsViewChanged: clampCursor()
-    onPageChanged: dropKeep()
-    onCursorKeyChanged: if (keepPending && cursorKey !== "keep") dropKeep()
     onHistoryItemsChanged: { clampCursor(); dropStaleFix() }
     onExpandedIdChanged: dropStaleFix()
     onModelRowsChanged: clampCursor()
@@ -1331,7 +1360,6 @@ Panel {
     }
     Timer { id: noticeTimer; interval: 2600; onTriggered: root.notice = "" }
     Timer { id: previewDebounce; interval: 350; onTriggered: root.previewPhrase() }
-    Timer { id: keepTimer; interval: 1200; onTriggered: root.commitKeep() }
 
     KeyboardPanel {
         id: panel
@@ -1349,6 +1377,14 @@ Panel {
             id: keys
             anchors.fill: parent
             Keys.onPressed: function(event) { root.handleKey(event) }
+
+            // The mouse's back button steps out one level, like Esc. It takes
+            // only that button, so clicks, hover and scrolling are unaffected.
+            TapHandler {
+                acceptedButtons: Qt.BackButton
+                enabled: !root.keysBlocked
+                onTapped: root.goBack()
+            }
 
             PanelKeyCatcher {
                 id: keyCatcher
@@ -1569,7 +1605,7 @@ Panel {
                                         foreground: root.foreground
                                         fontFamily: root.fontFamily
                                         enabled: root.daemonState !== "stopped" && root.daemonState !== "unknown" && !service.recording
-                                        onHovered: function(h) { if (h) root.setCursor("record", -1) }
+                                        onHovered: function(h) { if (h) root.hoverCursor("record", -1) }
                                         onClicked: root.toggleRecord()
                                     }
                                     // On/off: stop frees the model's VRAM/RAM; the unit stays
@@ -1584,7 +1620,7 @@ Panel {
                                         fontFamily: root.fontFamily
                                         enabled: action !== "" && !service.powering && !service.restarting
                                         tooltipText: action === "on" ? "o · load the model and start listening" : "o · stop Voxtype and free its GPU/RAM until you turn it on (it still starts at login)"
-                                        onHovered: function(h) { if (h) root.setCursor("power", -1) }
+                                        onHovered: function(h) { if (h) root.hoverCursor("power", -1) }
                                         onClicked: root.togglePower()
                                     }
                                     Button {
@@ -1596,7 +1632,7 @@ Panel {
                                         fontFamily: root.fontFamily
                                         enabled: !service.restarting && !service.powering && root.daemonState !== "stopped"
                                         tooltipText: "Ctrl+R · restart the daemon"
-                                        onHovered: function(h) { if (h) root.setCursor("restart", -1) }
+                                        onHovered: function(h) { if (h) root.hoverCursor("restart", -1) }
                                         onClicked: root.restartDaemon()
                                     }
                                 }
@@ -1635,7 +1671,7 @@ Panel {
                                     foreground: root.urgent
                                     accent: root.urgent
                                     implicitHeight: bannerRow.implicitHeight + Style.space(20)
-                                    MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onEntered: root.setCursor("download", -1); onClicked: root.openDrill("models") }
+                                    MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onEntered: root.hoverCursor("download", -1); onClicked: root.openDrill("models") }
                                     Row {
                                         id: bannerRow
                                         anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
@@ -1662,8 +1698,8 @@ Panel {
                                     hasCursor: root.cursorIs("usage")
                                     foreground: root.foreground
                                     implicitHeight: usageColumn.implicitHeight + Style.space(24)
-                                    onHasCursorChanged: if (hasCursor) root.ensureVisible(usageCard)
-                                    MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onEntered: root.setCursor("usage", -1); onClicked: if (root.wiringPending) root.connectVoxtype(); else root.openDrill("usage") }
+                                    onHasCursorChanged: if (hasCursor) root.followCursor(usageCard)
+                                    MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onEntered: root.hoverCursor("usage", -1); onClicked: if (root.wiringPending) root.connectVoxtype(); else root.openDrill("usage") }
                                     Column {
                                         id: usageColumn
                                         anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
@@ -1725,8 +1761,8 @@ Panel {
                                     placeholderText: "Type what you would say…"
                                     foreground: root.foreground
                                     hasCursor: root.cursorIs("test")
-                                    onHoveredChanged: if (hovered) root.setCursor("test", -1)
-                                    onHasCursorChanged: if (hasCursor) root.ensureVisible(testField)
+                                    onHoveredChanged: if (hovered) root.hoverCursor("test", -1)
+                                    onHasCursorChanged: if (hasCursor) root.followCursor(testField)
                                     onActiveFocusChanged: root.noteEditor(testField, activeFocus)
                                     onTextChanged: previewDebounce.restart()
                                     Keys.onEscapePressed: function(event) { keyCatcher.forceActiveFocus(); event.accepted = true }
@@ -1870,16 +1906,33 @@ Panel {
                                     EditField {
                                         id: wordsField
                                         onPasteRequested: root.requestPaste(wordsField)
-                                        width: parent.width
-                                        placeholderText: "Add a word, or heard → written · type to search"
+                                        width: root.replaceMode ? Style.space(12) + parent.width * root.heardFraction : parent.width
+                                        placeholderText: root.replaceMode ? "When you say…" : (root.wordFilter === "spelling" ? "A word to spell right · type to search" : "Add a word, or heard → written · type to search")
                                         foreground: root.foreground
                                         hasCursor: root.cursorIs("search")
-                                        onHoveredChanged: if (hovered) root.setCursor("search", -1)
+                                        onHoveredChanged: if (hovered) root.hoverCursor("search", -1)
                                         onActiveFocusChanged: root.noteEditor(wordsField, activeFocus)
                                         onTextChanged: { root.cursorIndex = 0; body.contentY = 0 }
                                         Keys.onReturnPressed: root.addWord()
                                         Keys.onEscapePressed: function(event) { if (text !== "") text = ""; else keyCatcher.forceActiveFocus(); event.accepted = true }
                                         Keys.onDownPressed: function(event) { keyCatcher.forceActiveFocus(); root.setCursor("rows", 0); event.accepted = true }
+                                    }
+                                    Text {
+                                        visible: root.replaceMode
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        textFormat: Text.PlainText; text: "→"
+                                        color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body
+                                    }
+                                    EditField {
+                                        id: writtenField
+                                        onPasteRequested: root.requestPaste(writtenField)
+                                        visible: root.replaceMode
+                                        width: parent.width - wordsField.width - Style.space(30)
+                                        placeholderText: "Write instead…"
+                                        foreground: root.foreground
+                                        onActiveFocusChanged: root.noteEditor(writtenField, activeFocus)
+                                        Keys.onReturnPressed: root.addWord()
+                                        Keys.onEscapePressed: function(event) { if (text !== "") text = ""; else wordsField.forceActiveFocus(); event.accepted = true }
                                     }
                                 }
                                 ButtonGroup {
@@ -1893,7 +1946,7 @@ Panel {
                                     foreground: root.foreground
                                     fontFamily: root.fontFamily
                                     fontSize: Style.font.bodySmall
-                                    onHovered: function(i, h) { if (h) root.setCursor("filter", -1) }
+                                    onHovered: function(i, h) { if (h) root.hoverCursor("filter", -1) }
                                     onChanged: function(v) { root.wordFilter = v }
                                 }
                                 // Column heads, with the vocabulary's share of the
@@ -1903,12 +1956,12 @@ Panel {
                                     width: parent.width
                                     height: tokenMeter.implicitHeight
                                     Text {
-                                        x: Style.space(12) + parent.width * 0.32 - width
+                                        x: Style.space(12) + parent.width * root.heardFraction - width
                                         textFormat: Text.PlainText; text: "HEARD"
                                         color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true
                                     }
                                     Text {
-                                        x: Style.space(12) + parent.width * 0.32 + Style.space(30)
+                                        x: Style.space(12) + parent.width * root.heardFraction + Style.space(30)
                                         textFormat: Text.PlainText; text: "WRITTEN"
                                         color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true
                                     }
@@ -1969,8 +2022,8 @@ Panel {
                                         text: "Reset all"; bordered: true
                                         hasCursor: root.cursorIs("learn.reset")
                                         foreground: root.foreground; fontFamily: root.fontFamily; fontSize: Style.font.caption
-                                        onHovered: function(h) { if (h) root.setCursor("learn.reset", -1) }
-                                        onHasCursorChanged: if (hasCursor) root.ensureVisible(this)
+                                        onHovered: function(h) { if (h) root.hoverCursor("learn.reset", -1) }
+                                        onHasCursorChanged: if (hasCursor) root.followCursor(this)
                                         onClicked: root.resetLearned()
                                     }
                                 }
@@ -1991,7 +2044,7 @@ Panel {
                                     visible: root.wordsView.rows.length === 0
                                     glyph: "󰗊"
                                     title: !root.loaded ? (service.busy ? "Loading your words…" : "Words unavailable") : (wordsField.text !== "" ? "Not in your words yet" : (root.wordFilter === "learned" ? "Nothing learned yet" : "No words yet"))
-                                    hint: wordsField.text !== "" ? "Press Enter to add “" + Model.sanitize(wordsField.text.trim(), 60) + "”" : (root.wordFilter === "learned" ? "Fix a word in History and it shows up here." : "Names and jargon to spell right, or “heard → written” rules:\n“slash release → /release”.")
+                                    hint: root.replaceMode ? (wordsField.text !== "" ? "Now type what to write instead, then press Enter" : "Type what you say, then what Voxtype should write:\n“slash release” → “/release”.") : wordsField.text !== "" ? "Press Enter to add “" + Model.sanitize(wordsField.text.trim(), 60) + "”" : (root.wordFilter === "learned" ? "Fix a word in History and it shows up here." : "Names and jargon to spell right, or “heard → written” rules:\n“slash release → /release”.")
                                 }
                                 Text {
                                     width: parent.width; wrapMode: Text.WordWrap
@@ -2014,7 +2067,7 @@ Panel {
                                     placeholderText: "Search history · /"
                                     foreground: root.foreground
                                     hasCursor: root.cursorIs("search")
-                                    onHoveredChanged: if (hovered) root.setCursor("search", -1)
+                                    onHoveredChanged: if (hovered) root.hoverCursor("search", -1)
                                     onActiveFocusChanged: root.noteEditor(historySearch, activeFocus)
                                     onTextChanged: { root.cursorIndex = 0; body.contentY = 0 }
                                     Keys.onReturnPressed: { keyCatcher.forceActiveFocus(); root.setCursor("rows", 0) }
@@ -2054,8 +2107,8 @@ Panel {
                                     text: "Load older"; bordered: true
                                     hasCursor: root.cursorIs("more")
                                     foreground: root.foreground; fontFamily: root.fontFamily; fontSize: Style.font.bodySmall
-                                    onHovered: function(h) { if (h) root.setCursor("more", -1) }
-                                    onHasCursorChanged: if (hasCursor) root.ensureVisible(this)
+                                    onHovered: function(h) { if (h) root.hoverCursor("more", -1) }
+                                    onHasCursorChanged: if (hasCursor) root.followCursor(this)
                                     onClicked: root.loadMoreHistory()
                                 }
                                 EmptyState {
@@ -2083,8 +2136,8 @@ Panel {
                                         text: "Clear all"; bordered: true
                                         hasCursor: root.cursorIs("clear")
                                         foreground: root.foreground; fontFamily: root.fontFamily; fontSize: Style.font.bodySmall
-                                        onHovered: function(h) { if (h) root.setCursor("clear", -1) }
-                                        onHasCursorChanged: if (hasCursor) root.ensureVisible(clearAll)
+                                        onHovered: function(h) { if (h) root.hoverCursor("clear", -1) }
+                                        onHasCursorChanged: if (hasCursor) root.followCursor(clearAll)
                                         onClicked: root.clearHistory()
                                     }
                                 }
@@ -2095,17 +2148,17 @@ Panel {
                                 visible: root.page === "settings"
                                 width: parent.width
                                 spacing: Style.space(2)
-                                SimpleRow { key: "model"; label: "Model"; kind: "cycle"; value: Model.sanitize(String(Model.settingValue(root.config, root.modelPath, root.status && root.status.model ? root.status.model.name || "" : "")), 40) }
+                                SimpleRow { key: "model"; label: "Model"; kind: "choice" }
                                 SimpleRow { key: "drill.models"; label: "Manage models"; kind: "drill"; value: Model.modelsSummary(root.modelsEngine === root.engine ? root.modelRows : []) }
-                                SimpleRow { key: "language"; label: "Language"; kind: "cycle"; visible: root.engine === "whisper"; value: Model.optionLabel(Model.LANGUAGES, String(Model.settingOr(root.config, "whisper.language"))) }
+                                SimpleRow { key: "language"; label: "Language"; kind: "choice"; visible: root.engine === "whisper" }
                                 SimpleRow { key: "shortcut"; label: "Shortcut"; kind: "keycap"; value: root.shortcutInfo.primary !== "" ? root.shortcutInfo.primary : "none"; hint: root.shortcutInfo.hold !== "" ? "hold " + root.shortcutInfo.hold : "" }
-                                SimpleRow { key: "mode"; label: "Hotkey mode"; hint: "Voxtype's own hotkey"; kind: "cycle"; value: Model.optionLabel(Model.HOTKEY_MODE_OPTIONS, String(Model.settingOr(root.config, "hotkey.mode"))) }
+                                SimpleRow { key: "mode"; label: "Hotkey mode"; hint: "Voxtype's own hotkey"; kind: "choice" }
                                 SettingsGroup { title: "WHILE DICTATING" }
-                                SimpleRow { key: "indicator"; label: "Indicator"; kind: "cycle"; value: Model.optionLabel(Model.INDICATOR_OPTIONS, Model.indicatorValue(root.config)) }
+                                SimpleRow { key: "indicator"; label: "Indicator"; kind: "choice" }
                                 SimpleRow { key: "sounds"; label: "Sounds"; kind: "toggle"; checked: Model.settingOr(root.config, "audio.feedback.enabled") === true }
-                                SimpleRow { key: "other_audio"; label: "Other audio"; kind: "cycle"; value: Model.optionLabel(Model.OTHER_AUDIO_OPTIONS, Model.otherAudioValue(root.config)) }
+                                SimpleRow { key: "other_audio"; label: "Other audio"; kind: "choice" }
                                 SettingsGroup { title: "TEXT" }
-                                SimpleRow { key: "output_mode"; label: "Insert text by"; kind: "cycle"; value: Model.optionLabel(Model.OUTPUT_MODE_OPTIONS, String(Model.settingOr(root.config, "output.mode"))) }
+                                SimpleRow { key: "output_mode"; label: "Insert text by"; kind: "choice" }
                                 SimpleRow { key: "spoken_punctuation"; label: "Spoken punctuation"; kind: "toggle"; checked: Model.settingOr(root.config, "text.spoken_punctuation") === true }
                                 SimpleRow { key: "filler_words"; label: "Remove filler words"; kind: "toggle"; checked: Model.settingOr(root.config, "text.filter_filler_words") === true }
                                 SettingsGroup { title: "SYSTEM" }
@@ -2118,7 +2171,7 @@ Panel {
                                 SettingsGroup { title: "HISTORY & USAGE" }
                                 SimpleRow { key: "usage"; label: "Count usage"; kind: "toggle"; checked: root.featureValue("usage", "enabled", true) === true; available: root.featureOk("usage"); reason: root.featureReason("usage") }
                                 SimpleRow { key: "history"; label: "Save history"; kind: "toggle"; checked: root.featureValue("history", "enabled", true) === true; available: root.featureOk("history"); reason: root.featureReason("history") }
-                                SimpleRow { key: "keep"; label: "Keep for"; kind: "cycle"; value: Model.keepLabel(root.keepShown()); available: root.featureOk("history"); reason: root.featureReason("history") }
+                                SimpleRow { key: "keep"; label: "Keep for"; kind: "choice"; available: root.featureOk("history"); reason: root.featureReason("history") }
                                 SimpleRow { key: "archive"; label: "Archive (your dataset)"; kind: "toggle"; checked: root.archiveOn; available: root.featureOk("archive"); reason: root.featureReason("archive") }
                                 SimpleRow { key: "archive.dir"; visible: root.archiveOn; label: "   Folder"; kind: "drill"; value: Model.sanitize(root.featureValue("archive", "dir", null) || "~/Documents/Voxtype", 48) }
                                 SimpleRow { key: "archive.audio"; visible: root.archiveOn; label: "   Save audio"; kind: "toggle"; hint: "separate recording of your mic"; checked: root.featureValue("archive", "save_audio", true) === true }
@@ -2195,8 +2248,8 @@ Panel {
                                             foreground: root.foreground
                                             fontFamily: root.fontFamily
                                             fontSize: Style.font.bodySmall
-                                            onHovered: function(h) { if (h) root.setCursor(settingKey, -1) }
-                                            onHasCursorChanged: if (hasCursor) root.ensureVisible(this)
+                                            onHovered: function(h) { if (h) root.hoverCursor(settingKey, -1) }
+                                            onHasCursorChanged: if (hasCursor) root.followCursor(this)
                                             onClicked: root.toggleModifier(modelData)
                                         }
                                     }
@@ -2299,8 +2352,8 @@ Panel {
                                         visible: Model.settingValue(root.config, "whisper.remote_api_key_set", false) === true
                                         hasCursor: root.cursorIs("remote.clear")
                                         foreground: root.foreground; fontFamily: root.fontFamily; fontSize: Style.font.bodySmall
-                                        onHovered: function(h) { if (h) root.setCursor("remote.clear", -1) }
-                                        onHasCursorChanged: if (hasCursor) root.ensureVisible(clearKey)
+                                        onHovered: function(h) { if (h) root.hoverCursor("remote.clear", -1) }
+                                        onHasCursorChanged: if (hasCursor) root.followCursor(clearKey)
                                         onClicked: root.unsetSetting("whisper.remote_api_key")
                                     }
                                 }
@@ -2343,8 +2396,9 @@ Panel {
                                 Row {
                                     width: parent.width
                                     spacing: Style.space(10)
-                                    Dropdown {
+                                    ChoiceDropdown {
                                         id: gpuDevice
+                                        muted: root.muted
                                         readonly property string settingKey: "gpu.device"
                                         function activate() { open() }
                                         width: parent.width - gpuButtons.width - parent.spacing
@@ -2353,8 +2407,8 @@ Panel {
                                         options: Model.labelled(root.options ? root.options.gpu_vendors : [{label: "Auto (first available)", value: "auto"}])
                                         foreground: root.foreground; fontFamily: root.fontFamily
                                         hasCursor: root.cursorIs("gpu.device")
-                                        onHovered: function(h) { if (h) root.setCursor("gpu.device", -1) }
-                                        onHasCursorChanged: if (hasCursor) root.ensureVisible(gpuDevice)
+                                        onHovered: function(h) { if (h) root.hoverCursor("gpu.device", -1) }
+                                        onHasCursorChanged: if (hasCursor) root.followCursor(gpuDevice)
                                         onPopupOpenChanged: root.notePopup(popupOpen)
                                         onChanged: function(v) { if (!root.locked) service.run({op: "gpu.set_device", vendor: v}) }
                                     }
@@ -2369,8 +2423,8 @@ Panel {
                                             foreground: root.foreground; fontFamily: root.fontFamily; fontSize: Style.font.bodySmall
                                             enabled: root.terminalAvailable
                                             tooltipText: root.terminalAvailable ? "Opens a terminal running sudo voxtype setup gpu --enable" : Model.ERROR_TERMINAL_MISSING
-                                            onHovered: function(h) { if (h) root.setCursor("gpu.enable", -1) }
-                                            onHasCursorChanged: if (hasCursor) root.ensureVisible(gpuButtons)
+                                            onHovered: function(h) { if (h) root.hoverCursor("gpu.enable", -1) }
+                                            onHasCursorChanged: if (hasCursor) root.followCursor(gpuButtons)
                                             onClicked: root.launchGpu(true)
                                         }
                                         Button {
@@ -2380,8 +2434,8 @@ Panel {
                                             foreground: root.foreground; fontFamily: root.fontFamily; fontSize: Style.font.bodySmall
                                             enabled: root.terminalAvailable
                                             tooltipText: root.terminalAvailable ? "Opens a terminal running sudo voxtype setup gpu --disable" : Model.ERROR_TERMINAL_MISSING
-                                            onHovered: function(h) { if (h) root.setCursor("gpu.disable", -1) }
-                                            onHasCursorChanged: if (hasCursor) root.ensureVisible(gpuButtons)
+                                            onHovered: function(h) { if (h) root.hoverCursor("gpu.disable", -1) }
+                                            onHasCursorChanged: if (hasCursor) root.followCursor(gpuButtons)
                                             onClicked: root.launchGpu(false)
                                         }
                                     }
@@ -2397,16 +2451,17 @@ Panel {
                                 Row {
                                     width: parent.width
                                     spacing: Style.space(10)
-                                    Dropdown {
+                                    ChoiceDropdown {
                                         id: engineDropdown
+                                        muted: root.muted
                                         width: Style.spacing.dropdownWidth
                                         label: "Engine"
                                         value: root.modelsView
                                         options: Model.engineOptions(root.options, root.modelsView)
                                         foreground: root.foreground; fontFamily: root.fontFamily
                                         hasCursor: root.cursorIs("engine")
-                                        onHovered: function(h) { if (h) root.setCursor("engine", -1) }
-                                        onHasCursorChanged: if (hasCursor) root.ensureVisible(engineDropdown)
+                                        onHovered: function(h) { if (h) root.hoverCursor("engine", -1) }
+                                        onHasCursorChanged: if (hasCursor) root.followCursor(engineDropdown)
                                         onPopupOpenChanged: root.notePopup(popupOpen)
                                         onChanged: function(v) { root.pickModelsEngine(v) }
                                     }
@@ -2467,8 +2522,8 @@ Panel {
                                         hasCursor: root.rowHasCursor(index)
                                         current: modelData.active === true
                                         foreground: root.foreground
-                                        onHasCursorChanged: if (hasCursor) root.ensureVisible(modelRow)
-                                        MouseArea { anchors.fill: parent; hoverEnabled: true; onEntered: root.setCursor("rows", modelRow.index); onClicked: root.setActiveModel(modelRow.modelData) }
+                                        onHasCursorChanged: if (hasCursor) root.followCursor(modelRow)
+                                        MouseArea { anchors.fill: parent; hoverEnabled: true; onEntered: root.hoverCursor("rows", modelRow.index); onClicked: root.setActiveModel(modelRow.modelData) }
                                         Column {
                                             anchors.left: parent.left; anchors.right: modelActions.left; anchors.verticalCenter: parent.verticalCenter
                                             anchors.leftMargin: Style.space(12); anchors.rightMargin: Style.space(8)
@@ -2518,8 +2573,8 @@ Panel {
                                         text: "Export…"; iconText: "󰈝"; bordered: true; selected: root.exportOpen
                                         hasCursor: root.cursorIs("export")
                                         foreground: root.foreground; fontFamily: root.fontFamily
-                                        onHovered: function(h) { if (h) root.setCursor("export", -1) }
-                                        onHasCursorChanged: if (hasCursor) root.ensureVisible(backupRow)
+                                        onHovered: function(h) { if (h) root.hoverCursor("export", -1) }
+                                        onHasCursorChanged: if (hasCursor) root.followCursor(backupRow)
                                         onClicked: root.toggleExport()
                                     }
                                     Button {
@@ -2528,8 +2583,8 @@ Panel {
                                         enabled: !service.picking && root.pickerAvailable
                                         foreground: root.foreground; fontFamily: root.fontFamily
                                         tooltipText: root.pickerAvailable ? "Choose a voxtype-tui bundle; changes are previewed before anything is written" : Model.ERROR_PICKER_MISSING
-                                        onHovered: function(h) { if (h) root.setCursor("import", -1) }
-                                        onHasCursorChanged: if (hasCursor) root.ensureVisible(backupRow)
+                                        onHovered: function(h) { if (h) root.hoverCursor("import", -1) }
+                                        onHasCursorChanged: if (hasCursor) root.followCursor(backupRow)
                                         onClicked: root.beginImport()
                                     }
                                 }
@@ -2670,7 +2725,7 @@ Panel {
                 selectedIndex: 0
                 foreground: root.foreground
                 fontFamily: root.fontFamily
-                onCanceled: { opened = false; root.confirmAction = ""; root.confirmPayload = null; root.importAcceptDangerous = false; root.importReview = ""; root.keepPending = false; keyCatcher.forceActiveFocus() }
+                onCanceled: { opened = false; root.confirmAction = ""; root.confirmPayload = null; root.importAcceptDangerous = false; root.importReview = ""; keyCatcher.forceActiveFocus() }
                 onConfirmed: { opened = false; root.applyConfirmed(); keyCatcher.forceActiveFocus() }
             }
         }
@@ -2747,8 +2802,8 @@ Panel {
         foreground: root.foreground
         fontFamily: root.fontFamily
         titleSize: Style.font.body
-        onHovered: function(h) { if (h) root.setCursor(settingKey, -1) }
-        onHasCursorChanged: if (hasCursor) root.ensureVisible(toggleRow)
+        onHovered: function(h) { if (h) root.hoverCursor(settingKey, -1) }
+        onHasCursorChanged: if (hasCursor) root.followCursor(toggleRow)
         onClicked: root.setSetting(settingKey, !checked)
         // Toggle draws its own label; the reset sits left of the switch. The
         // hidden probe reports the switch width without hard-coding it.
@@ -2775,8 +2830,9 @@ Panel {
         function activate() { dropdown.open() }
         spacing: Style.spacing.labelGap
         SettingLabel { settingKey: dropdownRow.settingKey; label: dropdownRow.label; hasCursor: root.cursorIs(dropdownRow.settingKey); isSet: dropdownRow.isSet }
-        Dropdown {
+        ChoiceDropdown {
             id: dropdown
+            muted: root.muted
             width: parent.width
             showLabel: false
             value: String(Model.settingValue(root.config, dropdownRow.settingKey, dropdownRow.fallback))
@@ -2784,8 +2840,8 @@ Panel {
             foreground: root.foreground
             fontFamily: root.fontFamily
             hasCursor: root.cursorIs(dropdownRow.settingKey)
-            onHovered: function(h) { if (h) root.setCursor(dropdownRow.settingKey, -1) }
-            onHasCursorChanged: if (hasCursor) root.ensureVisible(dropdownRow)
+            onHovered: function(h) { if (h) root.hoverCursor(dropdownRow.settingKey, -1) }
+            onHasCursorChanged: if (hasCursor) root.followCursor(dropdownRow)
             onPopupOpenChanged: root.notePopup(popupOpen)
             onChanged: function(v) { root.setSetting(dropdownRow.settingKey, v) }
         }
@@ -2828,8 +2884,8 @@ Panel {
             foreground: root.foreground
             placeholderColor: root.muted
             hasCursor: root.cursorIs(numberRow.settingKey)
-            onHoveredChanged: if (hovered) root.setCursor(numberRow.settingKey, -1)
-            onHasCursorChanged: if (hasCursor) root.ensureVisible(numberRow)
+            onHoveredChanged: if (hovered) root.hoverCursor(numberRow.settingKey, -1)
+            onHasCursorChanged: if (hasCursor) root.followCursor(numberRow)
             onActiveFocusChanged: { root.noteEditor(numberRow, activeFocus); if (!activeFocus) numberRow.commit(text) }
             Keys.onReturnPressed: { numberRow.commit(text); keyCatcher.forceActiveFocus() }
             Keys.onEnterPressed: { numberRow.commit(text); keyCatcher.forceActiveFocus() }
@@ -2888,7 +2944,7 @@ Panel {
             placeholderText: textRow.placeholderText
             foreground: root.foreground
             hasCursor: root.cursorIs(textRow.settingKey)
-            onHoveredChanged: if (hovered) root.setCursor(textRow.settingKey, -1)
+            onHoveredChanged: if (hovered) root.hoverCursor(textRow.settingKey, -1)
             onActiveFocusChanged: { root.noteEditor(textRow, activeFocus); if (!activeFocus) textRow.sync() }
             Keys.onReturnPressed: textRow.commit()
             Keys.onEscapePressed: function(event) { textRow.sync(); keyCatcher.forceActiveFocus(); event.accepted = true }
@@ -2913,7 +2969,7 @@ Panel {
             hasCursor: root.cursorIs(sliderRow.settingKey)
             foreground: root.foreground
             outline: true
-            HoverHandler { onHoveredChanged: if (hovered) root.setCursor(sliderRow.settingKey, -1) }
+            HoverHandler { onHoveredChanged: if (hovered) root.hoverCursor(sliderRow.settingKey, -1) }
             PanelSlider {
                 bar: root.bar
                 anchors.fill: parent
@@ -2990,7 +3046,7 @@ Panel {
         id: simple
         required property string key
         property string label: ""
-        property string kind: "cycle"
+        property string kind: "choice"
         property string value: ""
         property string hint: ""
         property string badge: ""
@@ -3002,10 +3058,10 @@ Panel {
         implicitHeight: Math.max(Style.spacing.popupRowHeight + Style.space(6), simpleLabel.implicitHeight + Style.space(12))
         hasCursor: rowHasCursor
         foreground: root.foreground
-        onHasCursorChanged: if (hasCursor) root.ensureVisible(simple)
+        onHasCursorChanged: if (hasCursor) root.followCursor(simple)
         MouseArea {
             anchors.fill: parent; hoverEnabled: true; cursorShape: simple.available ? Qt.PointingHandCursor : Qt.ArrowCursor
-            onEntered: root.setCursor(simple.key, -1)
+            onEntered: root.hoverCursor(simple.key, -1)
             onClicked: if (simple.available) root.activateSimple(simple.key)
         }
         Text {
@@ -3034,23 +3090,42 @@ Panel {
                 color: "transparent"; border.width: Math.max(1, Style.normalBorderWidth); border.color: Commons.Color.accent; radius: Style.cornerRadius
                 Text { id: badgeText; anchors.centerIn: parent; textFormat: Text.PlainText; text: simple.badge; color: Commons.Color.accent; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
             }
-            Text {
-                visible: simple.kind === "cycle" && simple.rowHasCursor
+            // Every value of the row in a list, current one selected. Labels
+            // come from fixed option tables or sanitized model names.
+            ChoiceDropdown {
+                id: choiceDropdown
+                muted: root.muted
+                visible: simple.kind === "choice"
                 anchors.verticalCenter: parent.verticalCenter
-                textFormat: Text.PlainText; text: "‹"; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body
-                MouseArea { anchors.fill: parent; anchors.margins: -Style.space(4); onClicked: root.cycleSimple(simple.key, -1) }
+                width: Math.min(Style.spacing.dropdownWidth, simple.width * 0.45)
+                showLabel: false
+                options: simple.kind === "choice" ? root.choiceOptions(simple.key) : []
+                value: simple.kind === "choice" ? root.choiceValue(simple.key) : ""
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                hasCursor: simple.rowHasCursor
+                onHovered: function(h) { if (h) root.hoverCursor(simple.key, -1) }
+                onPopupOpenChanged: {
+                    root.notePopup(popupOpen);
+                    if (!popupOpen) keyCatcher.forceActiveFocus();
+                }
+                onChanged: function(v) { root.chooseSimple(simple.key, v) }
+            }
+            Connections {
+                target: root
+                function onOpenChoice(key) { if (key === simple.key && simple.kind === "choice" && simple.available) choiceDropdown.open() }
             }
             Text {
-                visible: simple.kind === "cycle" || simple.kind === "drill"
+                visible: simple.kind === "drill"
                 anchors.verticalCenter: parent.verticalCenter
                 textFormat: Text.PlainText; text: Model.sanitize(simple.value, 60)
-                color: simple.kind === "drill" ? root.muted : root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body
+                color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body
             }
             Text {
-                visible: simple.kind === "drill" || (simple.kind === "cycle" && simple.rowHasCursor)
+                visible: simple.kind === "drill"
                 anchors.verticalCenter: parent.verticalCenter
                 textFormat: Text.PlainText; text: "›"; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body
-                MouseArea { anchors.fill: parent; anchors.margins: -Style.space(4); onClicked: simple.kind === "cycle" ? root.cycleSimple(simple.key, 1) : root.activateSimple(simple.key) }
+                MouseArea { anchors.fill: parent; anchors.margins: -Style.space(4); onClicked: root.activateSimple(simple.key) }
             }
             Keycap { visible: simple.kind === "keycap"; anchors.verticalCenter: parent.verticalCenter; text: Model.sanitize(simple.value, 60) }
             ToggleSwitch {
@@ -3074,14 +3149,14 @@ Panel {
         implicitHeight: Style.spacing.popupRowHeight
         hasCursor: root.page === "words" && root.rowHasCursor(rowIndex)
         foreground: root.foreground
-        onHasCursorChanged: if (hasCursor) root.ensureVisible(wordRow)
-        MouseArea { anchors.fill: parent; hoverEnabled: true; onEntered: root.setCursor("rows", wordRow.rowIndex); onClicked: { root.setCursor("rows", wordRow.rowIndex); root.activateCursor() } }
+        onHasCursorChanged: if (hasCursor) root.followCursor(wordRow)
+        MouseArea { anchors.fill: parent; hoverEnabled: true; onEntered: root.hoverCursor("rows", wordRow.rowIndex); onClicked: { root.hoverCursor("rows", wordRow.rowIndex); root.activateCursor() } }
         Text {
             id: heardText
             anchors.left: parent.left; anchors.leftMargin: Style.space(12); anchors.verticalCenter: parent.verticalCenter
-            width: parent.width * 0.32
+            width: parent.width * root.heardFraction
             horizontalAlignment: Text.AlignRight
-            textFormat: Text.PlainText; elide: Text.ElideLeft
+            textFormat: Text.PlainText; elide: Text.ElideRight
             text: wordRow.word.heard ? Model.sanitize(wordRow.word.heard, 80) : "–"
             color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body
         }
@@ -3141,8 +3216,8 @@ Panel {
         hasCursor: root.page === pageName && root.rowHasCursor(rowIndex)
         current: expanded
         foreground: root.foreground
-        onHasCursorChanged: if (hasCursor) root.ensureVisible(line)
-        MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onEntered: root.setCursor("rows", line.rowIndex); onClicked: { root.setCursor("rows", line.rowIndex); line.picked() } }
+        onHasCursorChanged: if (hasCursor) root.followCursor(line)
+        MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onEntered: root.hoverCursor("rows", line.rowIndex); onClicked: { root.hoverCursor("rows", line.rowIndex); line.picked() } }
         Text {
             id: lineTime
             anchors.left: parent.left; anchors.leftMargin: Style.space(12); anchors.verticalCenter: parent.verticalCenter

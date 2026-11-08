@@ -57,7 +57,7 @@ test('EditField is the only TextEdit, plain text, with every Qt paste path close
 test('every panel field is an EditField wired to the bounded paste', () => {
   const panel = read('Panel.qml');
   const fields = [...panel.matchAll(/EditField \{\n\s*id: (\w+)\n\s*onPasteRequested: root\.requestPaste\((\w+)\)/g)];
-  assert.deepEqual(fields.map(m => m[1]).sort(), ['exportPath', 'fixEdit', 'historySearch', 'input', 'number', 'testField', 'wordsField']);
+  assert.deepEqual(fields.map(m => m[1]).sort(), ['exportPath', 'fixEdit', 'historySearch', 'input', 'number', 'testField', 'wordsField', 'writtenField']);
   for (const m of fields) assert.equal(m[1], m[2], 'a paste lands in the field that asked');
   assert.equal((panel.match(/EditField \{/g) || []).length, fields.length);
 });
