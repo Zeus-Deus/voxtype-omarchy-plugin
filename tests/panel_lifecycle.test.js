@@ -274,6 +274,7 @@ test('accept_dangerous is false for a clean diff and true only when the dialog n
   const clean = h.requests.pop();
   assert.equal(clean.op, 'import.apply');
   assert.equal(clean.accept_dangerous, false, 'a clean import never pre-waives the bridge refusal');
+  h.root.confirmation.opened = false;  // onConfirmed closed the dialog
 
   // Dangerous rows the dialog fully enumerates: acknowledged.
   h.root.importPreview = {review: 'r'.repeat(64), format: 'v2', warnings: [], diff: {settings_change: [
@@ -1314,6 +1315,7 @@ function keepHarness(keepDays, history) {
   h.root.status = Object.assign({}, h.root.status, {capabilities: {features: true, history: true}});
   h.root.features = {features: {history: {enabled: true, keep_days: keepDays}}, available: {history: true}, reasons: {}};
   h.root.section = 'settings';
+  h.root.setCursor('keep', -1);
   if (history) { h.root.historyList = history; h.root.historyLoaded = true; h.root.historyNext = null; }
   return h;
 }
@@ -1379,6 +1381,85 @@ test('Keep for: closing the panel drops an unconfirmed pending value', () => {
   h.root.commitKeep();
   assert.equal(keepWrites(h).length, 0);
   assert.equal(h.root.confirmation.opened, false);
+});
+
+// The Keep for timer fires on its own: whatever the user did in the
+// meantime, it must never replace or hijack another confirmation.
+const fireKeepTimer = h => { if (h.root.keepTimer.running) h.root.commitKeep(); };
+const qmlChanged = (h, name) => handler(panel, name, vm.createContext(h.root))();
+
+test('Keep for: switching to History and opening a delete before the timer fires keeps the delete dialog', () => {
+  const day = 86400000, now = Date.now();
+  const h = keepHarness(30, [{id: 'old', ts: new Date(now - 20 * day).toISOString(), final: 'twenty days ago'}]);
+  h.root.cycleSimple('keep', -1);  // 1 month → 1 week, a shorter one
+  assert.equal(h.root.keepTimer.running, true);
+  h.root.selectSection('history');
+  qmlChanged(h, 'onPageChanged');
+  qmlChanged(h, 'onCursorKeyChanged');
+  h.root.deleteHistory({id: 'old', text: 'twenty days ago'});
+  h.root.commitKeep();  // the 1.2 s timer, even if it was already queued
+  fireKeepTimer(h);
+  assert.equal(h.root.confirmation.opened, true);
+  assert.equal(h.root.confirmAction, 'history.delete', 'the delete dialog keeps its action');
+  same(h.root.confirmPayload, {id: 'old'});
+  assert.match(h.root.confirmation.message, /Delete this dictation/);
+  assert.equal(h.root.keepPending, false, 'the unconfirmed retention value is dropped');
+  h.root.applyConfirmed();
+  same(h.requests.filter(r => r.op === 'history.delete'), [{op: 'history.delete', id: 'old'}]);
+  assert.equal(keepWrites(h).length, 0, 'no features.set is sent');
+});
+
+test('Keep for: the cursor leaving the row drops the pending value', () => {
+  const h = keepHarness(30);
+  h.root.cycleSimple('keep', -1);
+  h.root.moveCursor(-1);
+  assert.notEqual(h.root.cursorKey, 'keep');
+  qmlChanged(h, 'onCursorKeyChanged');
+  assert.equal(h.root.keepPending, false);
+  assert.equal(h.root.keepTimer.running, false);
+  assert.equal(keepRowValue(h), '1 month', 'the row shows the saved value again');
+  h.root.commitKeep();
+  assert.equal(keepWrites(h).length, 0);
+  assert.equal(h.root.confirmation.opened, false);
+});
+
+test('Keep for: a timer firing off the row, on another page or in a drill-in saves nothing', () => {
+  for (const leave of [
+    h => h.root.setCursor('history', -1),
+    h => h.root.resetCursor(),
+    h => h.root.openDrill('advanced'),
+    h => h.root.selectSection('home'),
+  ]) {
+    const h = keepHarness(30);
+    h.root.cycleSimple('keep', 1);  // longer: would save without asking
+    leave(h);
+    h.root.commitKeep();  // no change handlers run: commitKeep itself refuses
+    assert.equal(keepWrites(h).length, 0, leave.toString());
+    assert.equal(h.root.confirmation.opened, false, leave.toString());
+    assert.equal(h.root.keepPending, false, leave.toString());
+  }
+});
+
+test('Keep for: any other confirmation drops the pending value, and commitKeep never replaces an open one', () => {
+  const h = keepHarness(30, []);
+  h.root.cycleSimple('keep', -1);
+  h.root.ask('daemon.stop', {}, 'Turn off?', 'Turn off');
+  assert.equal(h.root.keepPending, false);
+  assert.equal(h.root.keepTimer.running, false);
+  // Even with a value still pending (e.g. a timer already queued), an open
+  // dialog is never replaced.
+  h.root.keepPending = true; h.root.keepPendingDays = 7;
+  h.root.commitKeep();
+  assert.equal(h.root.confirmAction, 'daemon.stop');
+  assert.equal(h.root.confirmation.message, 'Turn off?');
+  assert.equal(h.root.keepPending, false);
+  h.root.applyConfirmed();
+  assert.equal(keepWrites(h).length, 0);
+  // ask() itself never replaces an open confirmation either.
+  h.root.ask('history.clear', {}, 'Clear?', 'Delete all');
+  h.root.confirmation.opened = true; h.root.confirmAction = 'history.delete'; h.root.confirmPayload = {id: 'x'};
+  h.root.ask('history.clear', {}, 'Clear?', 'Delete all');
+  assert.equal(h.root.confirmAction, 'history.delete');
 });
 
 test('expanded History renders the whole sanitized transcript, Learn everywhere lists every planned file', () => {

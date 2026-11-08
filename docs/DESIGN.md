@@ -256,7 +256,10 @@ the panel. A click outside the panel still closes it outright.
    (7 / 30 / 90 / 365 days / forever; ‹ › only preview, the value the user
    settles on is saved after a pause, and a shorter one first asks, Cancel
    selected, saying how many dictations it deletes when the whole history is
-   loaded), archive (folder via the zenity
+   loaded; the previewed value is dropped, never saved, if the cursor leaves
+   the row, the page changes, a drill-in opens, the panel hides or another
+   confirmation opens before the pause ends, and the pause never replaces a
+   confirmation already on screen), archive (folder via the zenity
    directory chooser, fixed argv); learning: learn from corrections, Learn
    everywhere (a card that previews exactly which files it writes and that it
    needs a re-login; nothing is written until Turn on). Drill-ins:

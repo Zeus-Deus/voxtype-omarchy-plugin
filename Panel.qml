@@ -106,7 +106,9 @@ Panel {
     property var historyKeepDays: 30
     // Keep for: ←/→ only preview a value; keepTimer saves the one the user
     // settles on (a shorter one after a confirmation), so cycling past
-    // "1 week" on the way to "forever" never prunes anything.
+    // "1 week" on the way to "forever" never prunes anything. The preview is
+    // dropped, never saved, once the cursor leaves the row, the page changes,
+    // the panel hides or any other confirmation opens (dropKeep).
     property bool keepPending: false
     property var keepPendingDays: null
 
@@ -282,6 +284,7 @@ Panel {
         cursorIndex = Math.max(0, Math.min(count - 1, cursorIndex));
     }
     function leavePage() {
+        dropKeep();
         resetCursor();
         exportOpen = false;
         importPreview = null;
@@ -380,8 +383,7 @@ Panel {
             pasteTarget = null;
             service.cancelPaste();
             // An unconfirmed Keep for value is dropped, never saved unseen.
-            keepTimer.stop();
-            keepPending = false;
+            dropKeep();
             testField.text = "";
             previewOutput = "";
             wordsField.text = "";
@@ -725,16 +727,23 @@ Panel {
         keepPending = next !== featureValue("history", "keep_days", 30);
         if (keepPending) keepTimer.restart(); else keepTimer.stop();
     }
+    function dropKeep() {
+        keepTimer.stop();
+        keepPending = false;
+    }
+    // The timer fires on its own, so it only acts while the user is still
+    // looking at the row and nothing else is being confirmed: it must never
+    // replace (or reuse) another dialog's action.
     function commitKeep() {
         keepTimer.stop();
-        if (!keepPending || locked) { keepPending = false; return; }
+        if (!keepPending || locked || confirmation.opened || page !== "settings" || !cursorIs("keep")) { keepPending = false; return; }
         var days = keepPendingDays;
         var saved = featureValue("history", "keep_days", 30);
         if (days === saved) { keepPending = false; return; }
         if (!Model.keepIsShorter(saved, days)) { keepPending = false; setFeature("history", "keep_days", days); return; }
         // Stays pending (the row keeps showing it) until Cancel or confirm.
         ask("features.set", {patch: {history: {keep_days: days}}},
-            Model.keepConfirmMessage(days, historyList, historyLoaded && !historyNext, Date.now()), "Delete older");
+            Model.keepConfirmMessage(days, historyList, historyLoaded && !historyNext, Date.now()), "Delete older", true);
     }
     function activateSimple(key) {
         if (locked) return;
@@ -769,8 +778,13 @@ Panel {
         service.cancelQueued("dictionary.preview");
         service.run({op: "dictionary.preview", text: text});
     }
-    function ask(action, payload, message, confirmLabel) {
-        if (locked) return;
+    // keepRetention: only commitKeep's own confirmation keeps the Keep for
+    // preview; any other one drops it. An open confirmation is never
+    // replaced: its action is what the user is reading.
+    function confirming() { return confirmation.opened }
+    function ask(action, payload, message, confirmLabel, keepRetention) {
+        if (locked || confirmation.opened) return;
+        if (!keepRetention) dropKeep();
         confirmAction = action;
         confirmPayload = payload;
         // The untrusted fragments were sanitized by the caller; this only
@@ -978,7 +992,7 @@ Panel {
         Qt.callLater(function() { keyCatcher.forceActiveFocus() });
     }
     function askImport() {
-        if (!importPreview || typeof importPreview.review !== "string" || importPreview.review === "") return;
+        if (confirming() || !importPreview || typeof importPreview.review !== "string" || importPreview.review === "") return;
         var confirmation = Model.importConfirmation(importPath.split("/").pop(), importPreview.diff);
         // The dialog is the acknowledgement: accept_dangerous is whatever
         // this message could actually show, never a constant, and it only
@@ -1071,6 +1085,8 @@ Panel {
         else if (t === "r" || t === "R") toggleRecord();
     }
     onWordsViewChanged: clampCursor()
+    onPageChanged: dropKeep()
+    onCursorKeyChanged: if (keepPending && cursorKey !== "keep") dropKeep()
     onHistoryItemsChanged: { clampCursor(); dropStaleFix() }
     onExpandedIdChanged: dropStaleFix()
     onModelRowsChanged: clampCursor()
