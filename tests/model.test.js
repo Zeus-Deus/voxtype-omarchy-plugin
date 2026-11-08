@@ -423,7 +423,12 @@ test('wheelContentY steps a wheel notch by stepPx, passes pixelDelta through and
   assert.equal(Model.wheelContentY(0, 1000, 400, 0, -240, 84), 168);
   assert.equal(Model.wheelContentY(590, 1000, 400, 0, -120, 84), 600, 'clamps at contentHeight - viewHeight');
   assert.equal(Model.wheelContentY(0, 1000, 400, 0, 120, 84), 0, 'clamps at 0');
-  assert.equal(Model.wheelContentY(100, 1000, 400, -37, -120, 84), 137, 'pixelDelta wins over angleDelta');
+  // Qt on Wayland: a wheel notch carries angleDelta 120 AND pixelDelta 15, with no scroll phase.
+  assert.equal(Model.wheelContentY(100, 1000, 400, -15, -120, 84, 0), 184, 'a notch moves stepPx, not its 15 px');
+  assert.equal(Model.wheelContentY(100, 1000, 400, -15, -120, 84), 184, 'no phase reported is a notch too');
+  // A touchpad gesture (scroll phase begin/update/end) keeps its pixels.
+  assert.equal(Model.wheelContentY(100, 1000, 400, -37, -120, 84, 2), 137, 'touchpad pixelDelta is passed through');
+  assert.equal(Model.wheelContentY(100, 1000, 400, -37, 0, 84, 1), 137);
   assert.equal(Model.wheelContentY(100, 1000, 400, 0, 0, 84), 100, 'no delta is a no-op');
   assert.equal(Model.wheelContentY(100, 300, 400, 0, -120, 84), 0, 'content shorter than view stays at 0');
 });
@@ -624,4 +629,14 @@ test('everywhereFiles: every planned file, sanitized, from a QML list too', () =
   assert.equal(rows[11].text, '· add  /etc/x11.json');
   assert.equal(Model.everywhereFiles({files: qtList(...files)}).length, 12);
   same(Model.everywhereFiles(null), []);
+});
+
+test('parseRuleFields: Replace\'s two fields', () => {
+  const M = Model;
+  assert.equal(M.parseRuleFields('', ''), null);
+  assert.equal(M.parseRuleFields('code mucks', '').kind, 'need_written');
+  assert.equal(M.parseRuleFields('', 'Codemux').kind, 'invalid');
+  assert.deepEqual(JSON.parse(JSON.stringify(M.parseRuleFields('  code mucks ', ' Codemux '))), {kind: 'rule', from: 'code mucks', to: 'Codemux'});
+  assert.equal(M.parseRuleFields('a → b', '').kind, 'rule');
+  assert.equal(M.parseRuleFields('→ b', '').kind, 'invalid');
 });

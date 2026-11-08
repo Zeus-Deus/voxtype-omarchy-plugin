@@ -66,7 +66,7 @@ function panelHarness(overrides) {
     exportForm: {y: 640, height: 120, visible: false, mapToItem() { return {x: 0, y: this.y}; }},
     importCard: {y: 700, height: 150, visible: false, mapToItem() { return {x: 0, y: this.y}; }},
     settingsForm: {controlFor() { return null; }},
-    noticeTimer: timer(), previewDebounce: timer(), statusPoll: timer(), keepTimer: timer(),
+    noticeTimer: timer(), previewDebounce: timer(), statusPoll: timer(),
     Style: {space: n => n},
     Qt: {callLater: cb => deferred.push(cb)},
     service: {
@@ -792,7 +792,7 @@ test('on/off: a second press while a start/stop is in flight is ignored, and the
   assert.equal(JSON.stringify(h.requests), JSON.stringify([]));
   assert.equal(JSON.stringify(h.root.targetsFor('home').slice(0, 3)), JSON.stringify(['record', 'power', 'restart']));
   assert.match(panel, /else if \(key === "power"\) togglePower\(\)/);
-  assert.match(panel, /setCursor\("power", -1\)/);
+  assert.match(panel, /hoverCursor\("power", -1\)/);
 });
 
 test('the panel forgets options and gpu status when appropriate, and asks the bridge for an 18 s restart wait', () => {
@@ -824,15 +824,15 @@ test('every Settings cursor target is reachable and visible: Clear key is skippe
   h.root.snapshot = {settings: {'whisper.remote_api_key_set': true}};
   assert.ok(h.root.targetsFor('advanced').indexOf('remote.clear') >= 0);
   for (const key of ['gpu.device', 'gpu.enable', 'gpu.disable']) assert.ok(h.root.targetsFor('advanced').indexOf(key) >= 0, key);
-  assert.match(panel, /setCursor\("gpu\.device", -1\) \}\n\s*onHasCursorChanged: if \(hasCursor\) root\.ensureVisible\(gpuDevice\)/);
-  assert.equal((panel.match(/root\.ensureVisible\(gpuButtons\)/g) || []).length, 2);
-  assert.match(panel, /root\.ensureVisible\(clearKey\)/);
+  assert.match(panel, /hoverCursor\("gpu\.device", -1\) \}\n\s*onHasCursorChanged: if \(hasCursor\) root\.followCursor\(gpuDevice\)/);
+  assert.equal((panel.match(/root\.followCursor\(gpuButtons\)/g) || []).length, 2);
+  assert.match(panel, /root\.followCursor\(clearKey\)/);
   assert.match(panel, /onClicked: root\.toggleModifier\(modelData\)/);
-  assert.match(panel, /onHasCursorChanged: if \(hasCursor\) root\.ensureVisible\(this\)\n\s*onClicked: root\.toggleModifier/);
+  assert.match(panel, /onHasCursorChanged: if \(hasCursor\) root\.followCursor\(this\)\n\s*onClicked: root\.toggleModifier/);
   // Models: every non-row cursor target scrolls into view too, so Enter never lands on an off-screen Import button.
-  assert.equal((panel.match(/root\.ensureVisible\(backupRow\)/g) || []).length, 2);
-  assert.match(panel, /root\.ensureVisible\(engineDropdown\)/);
-  const cursorTargets = new Set([...panel.matchAll(/setCursor\("([\w.]+)", -1\)/g)].map(m => m[1]));
+  assert.equal((panel.match(/root\.followCursor\(backupRow\)/g) || []).length, 2);
+  assert.match(panel, /root\.followCursor\(engineDropdown\)/);
+  const cursorTargets = new Set([...panel.matchAll(/(?:set|hover)Cursor\("([\w.]+)", -1\)/g)].map(m => m[1]));
   for (const key of ['export', 'import', 'engine', 'gpu.device', 'gpu.enable', 'gpu.disable', 'remote.clear', 'record', 'restart', 'download', 'test', 'search']) assert.ok(cursorTargets.has(key), key);
 });
 
@@ -1293,11 +1293,16 @@ test('Settings labels: unknown values are sanitized at render, Voxtype hotkey mo
   assert.match(simple, /text: Model\.sanitize\(simple\.value, 60\)/);
   assert.match(simple, /Keycap \{[^\n]*text: Model\.sanitize\(simple\.value, 60\)/);
   assert.match(panel, /SimpleRow \{ key: "mode"; label: "Hotkey mode"; hint: "Voxtype's own hotkey"/);
-  // Writes keep the raw value: cycling from an unknown language goes to the list.
+  // An unknown value is listed (so the dropdown shows what is set), but only
+  // under a sanitized label; picking a real option writes its raw value.
   const h = panelHarness();
   h.root.section = 'settings';
   h.root.snapshot = {settings: {'whisper.language': 'xx\u202e'}};
-  h.root.cycleSimple('language', 1);
+  const opts = h.root.choiceOptions('language');
+  assert.equal(opts[0].value, 'xx\u202e');
+  assert.equal(opts[0].label, 'xx');
+  assert.equal(opts.length, h.root.Model.LANGUAGES.length + 1);
+  h.root.chooseSimple('language', 'auto');
   assert.equal(h.requests.pop().value, 'auto');
 });
 
@@ -1308,55 +1313,94 @@ test('Home says LAST 12 MONTHS and the Usage hour chart has a 00 / 12 / 23 axis'
   for (const t of ['"00"', '"12"', '"23"']) assert.ok(axis.includes('text: ' + t), t);
 });
 
-// ---- Keep for: cycling previews, only the settled value is saved ----------
+// ---- Settings choice rows: a dropdown of every value ---------------------
+
+function choiceHarness() {
+  const h = panelHarness();
+  h.opened = [];
+  h.root.openChoice = key => h.opened.push(key);
+  h.root.section = 'settings';
+  return h;
+}
+const CHOICE_KEYS = ['model', 'language', 'mode', 'indicator', 'other_audio', 'output_mode', 'keep'];
+
+test('every Settings row with a fixed list of values is a dropdown, none is stepped with ←→', () => {
+  const settingsRows = panel.slice(panel.indexOf('// ================= 4 · Settings (simple rows)'), panel.indexOf('component SimpleRow'));
+  for (const key of CHOICE_KEYS) assert.match(settingsRows, new RegExp(`SimpleRow \\{ key: "${key}"; [^\\n]*kind: "choice"`), key);
+  assert.doesNotMatch(panel, /kind: "cycle"|cycleSimple|keepTimer|commitKeep/);
+  const row = panel.slice(panel.indexOf('component SimpleRow'), panel.indexOf('component WordRow'));
+  assert.match(row, /Dropdown \{\s*id: choiceDropdown/);
+  assert.match(row, /onPopupOpenChanged: \{\s*root\.notePopup\(popupOpen\);/, 'an open list blocks the panel keys');
+  assert.doesNotMatch(row, /"‹"/);
+  const h = choiceHarness();
+  h.root.setCursor('mode', -1);
+  h.root.moveCursorH(1);
+  assert.equal(h.requests.length, 0, '→ no longer changes a value');
+  assert.equal(h.root.Model.hintPairs('settings', {cursorActive: true}).some(p => p[0] === '←→'), false);
+});
+
+test('Enter or a click on a choice row opens that row\'s dropdown; picking the shown value writes nothing', () => {
+  const h = choiceHarness();
+  h.root.modelRows = [{name: 'base', downloaded: true}, {name: 'large-v3-turbo', downloaded: true}];
+  h.root.modelsEngine = 'whisper';
+  for (const key of CHOICE_KEYS) {
+    h.root.activateSimple(key);
+    assert.equal(h.opened.pop(), key);
+  }
+  same(h.root.choiceOptions('model').map(o => o.value), ['base', 'large-v3-turbo']);
+  h.root.chooseSimple('model', 'base');
+  assert.equal(h.requests.length, 0);
+  h.root.chooseSimple('model', 'large-v3-turbo');
+  assert.equal(h.requests.pop().value, 'large-v3-turbo');
+  h.root.chooseSimple('indicator', 'off');
+  assert.ok(h.requests.length > 0, 'indicator writes through Model.indicatorWrites');
+});
+
+test('the model dropdown with no downloaded model points to Manage models instead of an empty list', () => {
+  const h = choiceHarness();
+  h.root.status = Object.assign({}, h.root.status, {model: {name: '', present: false}});
+  h.root.modelRows = [];
+  h.root.activateSimple('model');
+  assert.deepEqual(h.opened, []);
+  assert.match(h.root.notice, /Manage models/);
+});
 
 function keepHarness(keepDays, history) {
-  const h = panelHarness();
+  const h = choiceHarness();
   h.root.status = Object.assign({}, h.root.status, {capabilities: {features: true, history: true}});
   h.root.features = {features: {history: {enabled: true, keep_days: keepDays}}, available: {history: true}, reasons: {}};
-  h.root.section = 'settings';
   h.root.setCursor('keep', -1);
   if (history) { h.root.historyList = history; h.root.historyLoaded = true; h.root.historyNext = null; }
   return h;
 }
 const same = (actual, expected, message) => assert.deepEqual(JSON.parse(JSON.stringify(actual)), expected, message);
 const keepWrites = h => h.requests.filter(r => r.op === 'features.set');
-const keepRowValue = h => h.setInside(panel.match(/SimpleRow \{ key: "keep"; label: "Keep for"; kind: "cycle"; value: ([^;]+);/)[1]);
 
-test('Keep for: cycling through 1 week to forever saves only forever, never the values passed on the way', () => {
+test('Keep for: the dropdown lists every period, and a longer one saves without asking', () => {
   const h = keepHarness(30);
-  h.root.cycleSimple('keep', -1);
-  assert.equal(keepRowValue(h), '1 week', 'the row previews the step');
-  h.root.cycleSimple('keep', -1);
-  assert.equal(keepRowValue(h), 'forever');
-  assert.equal(keepWrites(h).length, 0, 'no intermediate value is saved, so 1 week never prunes anything');
-  assert.equal(h.root.keepTimer.running, true, 'the settled value is committed after a pause');
-  h.root.commitKeep();
-  assert.equal(h.root.confirmation.opened, false, 'keeping longer needs no confirmation');
+  same(h.root.choiceOptions('keep').map(o => o.label), ['1 week', '1 month', '3 months', '1 year', 'forever']);
+  assert.equal(h.root.choiceValue('keep'), '30');
+  h.root.chooseSimple('keep', 'forever');
+  assert.equal(h.root.confirmation.opened, false);
   same(keepWrites(h).map(r => r.patch), [{history: {keep_days: null}}]);
 });
 
-test('Keep for: a shorter retention asks first, Cancel selected, and says how many dictations it deletes', () => {
+test('Keep for: a shorter period asks first, Cancel selected, and says how many dictations it deletes', () => {
   const day = 86400000, now = Date.now();
   const h = keepHarness(30, [
     {id: 'new', ts: new Date(now - 2 * day).toISOString(), final: 'recent'},
     {id: 'old', ts: new Date(now - 20 * day).toISOString(), final: 'twenty days ago'},
   ]);
-  h.root.cycleSimple('keep', -1);
-  h.root.commitKeep();
+  h.root.chooseSimple('keep', '7');
   assert.equal(keepWrites(h).length, 0, 'nothing is saved before the user confirms');
   assert.equal(h.root.confirmation.opened, true);
   assert.equal(h.root.confirmation.selectedIndex, 0, 'Cancel is the default');
-  assert.match(h.root.confirmation.message, /1 week/);
   assert.match(h.root.confirmation.message, /1 dictation older than 1 week will be deleted/);
-  // Cancel: nothing written, the row shows the saved value again.
   h.root.confirmation.opened = false;
   handler(panel.slice(panel.indexOf('id: confirmation')), 'onCanceled', vm.createContext(h.root)).call(h.root.confirmation);
-  assert.equal(keepWrites(h).length, 0);
-  assert.equal(keepRowValue(h), '1 month');
-  // Again, and confirm: exactly the settled value is saved.
-  h.root.cycleSimple('keep', -1);
-  h.root.commitKeep();
+  assert.equal(keepWrites(h).length, 0, 'Cancel writes nothing');
+  assert.equal(h.root.choiceValue('keep'), '30', 'the row still shows the saved period');
+  h.root.chooseSimple('keep', '7');
   h.root.applyConfirmed();
   same(keepWrites(h).map(r => r.patch), [{history: {keep_days: 7}}]);
 });
@@ -1364,102 +1408,121 @@ test('Keep for: a shorter retention asks first, Cancel selected, and says how ma
 test('Keep for: with history not fully loaded the confirmation says plainly that older dictations are deleted', () => {
   const h = keepHarness(null);
   h.root.historyLoaded = true; h.root.historyNext = 'more-id';
-  h.root.cycleSimple('keep', 1);  // forever → 1 week
-  h.root.commitKeep();
+  h.root.chooseSimple('keep', '7');
   assert.equal(h.root.confirmation.opened, true);
-  assert.equal(h.root.confirmation.selectedIndex, 0);
   assert.match(h.root.confirmation.message, /Dictations older than 1 week will be deleted/);
   assert.equal(keepWrites(h).length, 0);
 });
 
-test('Keep for: closing the panel drops an unconfirmed pending value', () => {
-  const h = keepHarness(30);
-  h.root.cycleSimple('keep', -1);
-  h.root.controller.open = false;
-  handler(panel, 'onOpenedChanged', vm.createContext(h.root))();
-  assert.equal(h.root.keepTimer.running, false);
-  h.root.commitKeep();
-  assert.equal(keepWrites(h).length, 0);
-  assert.equal(h.root.confirmation.opened, false);
-});
-
-// The Keep for timer fires on its own: whatever the user did in the
-// meantime, it must never replace or hijack another confirmation.
-const fireKeepTimer = h => { if (h.root.keepTimer.running) h.root.commitKeep(); };
-const qmlChanged = (h, name) => handler(panel, name, vm.createContext(h.root))();
-
-test('Keep for: switching to History and opening a delete before the timer fires keeps the delete dialog', () => {
-  const day = 86400000, now = Date.now();
-  const h = keepHarness(30, [{id: 'old', ts: new Date(now - 20 * day).toISOString(), final: 'twenty days ago'}]);
-  h.root.cycleSimple('keep', -1);  // 1 month → 1 week, a shorter one
-  assert.equal(h.root.keepTimer.running, true);
-  h.root.selectSection('history');
-  qmlChanged(h, 'onPageChanged');
-  qmlChanged(h, 'onCursorKeyChanged');
-  h.root.deleteHistory({id: 'old', text: 'twenty days ago'});
-  h.root.commitKeep();  // the 1.2 s timer, even if it was already queued
-  fireKeepTimer(h);
-  assert.equal(h.root.confirmation.opened, true);
-  assert.equal(h.root.confirmAction, 'history.delete', 'the delete dialog keeps its action');
-  same(h.root.confirmPayload, {id: 'old'});
-  assert.match(h.root.confirmation.message, /Delete this dictation/);
-  assert.equal(h.root.keepPending, false, 'the unconfirmed retention value is dropped');
-  h.root.applyConfirmed();
-  same(h.requests.filter(r => r.op === 'history.delete'), [{op: 'history.delete', id: 'old'}]);
-  assert.equal(keepWrites(h).length, 0, 'no features.set is sent');
-});
-
-test('Keep for: the cursor leaving the row drops the pending value', () => {
-  const h = keepHarness(30);
-  h.root.cycleSimple('keep', -1);
-  h.root.moveCursor(-1);
-  assert.notEqual(h.root.cursorKey, 'keep');
-  qmlChanged(h, 'onCursorKeyChanged');
-  assert.equal(h.root.keepPending, false);
-  assert.equal(h.root.keepTimer.running, false);
-  assert.equal(keepRowValue(h), '1 month', 'the row shows the saved value again');
-  h.root.commitKeep();
-  assert.equal(keepWrites(h).length, 0);
-  assert.equal(h.root.confirmation.opened, false);
-});
-
-test('Keep for: a timer firing off the row, on another page or in a drill-in saves nothing', () => {
-  for (const leave of [
-    h => h.root.setCursor('history', -1),
-    h => h.root.resetCursor(),
-    h => h.root.openDrill('advanced'),
-    h => h.root.selectSection('home'),
-  ]) {
-    const h = keepHarness(30);
-    h.root.cycleSimple('keep', 1);  // longer: would save without asking
-    leave(h);
-    h.root.commitKeep();  // no change handlers run: commitKeep itself refuses
-    assert.equal(keepWrites(h).length, 0, leave.toString());
-    assert.equal(h.root.confirmation.opened, false, leave.toString());
-    assert.equal(h.root.keepPending, false, leave.toString());
-  }
-});
-
-test('Keep for: any other confirmation drops the pending value, and commitKeep never replaces an open one', () => {
+test('Keep for: a pick never replaces an open confirmation, and values outside the list are refused', () => {
   const h = keepHarness(30, []);
-  h.root.cycleSimple('keep', -1);
   h.root.ask('daemon.stop', {}, 'Turn off?', 'Turn off');
-  assert.equal(h.root.keepPending, false);
-  assert.equal(h.root.keepTimer.running, false);
-  // Even with a value still pending (e.g. a timer already queued), an open
-  // dialog is never replaced.
-  h.root.keepPending = true; h.root.keepPendingDays = 7;
-  h.root.commitKeep();
+  h.root.chooseSimple('keep', '7');
   assert.equal(h.root.confirmAction, 'daemon.stop');
   assert.equal(h.root.confirmation.message, 'Turn off?');
-  assert.equal(h.root.keepPending, false);
-  h.root.applyConfirmed();
+  h.root.confirmation.opened = false; h.root.confirmAction = '';
+  for (const bad of ['14', '0', '-1', 'null', '7; rm', '']) h.root.chooseSimple('keep', bad);
   assert.equal(keepWrites(h).length, 0);
-  // ask() itself never replaces an open confirmation either.
-  h.root.ask('history.clear', {}, 'Clear?', 'Delete all');
-  h.root.confirmation.opened = true; h.root.confirmAction = 'history.delete'; h.root.confirmPayload = {id: 'x'};
-  h.root.ask('history.clear', {}, 'Clear?', 'Delete all');
-  assert.equal(h.root.confirmAction, 'history.delete');
+  assert.equal(h.root.confirmation.opened, false);
+});
+
+test('Keep for: a hand-edited period is listed under its own label so the row shows what is set', () => {
+  const h = keepHarness(14);
+  const opts = h.root.choiceOptions('keep');
+  same(opts[0], {value: '14', label: '14 days'});
+  assert.equal(h.root.choiceValue('keep'), '14');
+  h.root.chooseSimple('keep', '14');
+  assert.equal(keepWrites(h).length, 0);
+});
+
+test('the mouse back button steps out one level like Esc, and only while no dialog or list is open', () => {
+  const tap = panel.match(/TapHandler \{[^}]*\}/);
+  assert.ok(tap, 'a TapHandler on the panel');
+  assert.match(tap[0], /acceptedButtons: Qt\.BackButton/);
+  assert.match(tap[0], /enabled: !root\.keysBlocked/);
+  assert.match(tap[0], /onTapped: root\.goBack\(\)/);
+});
+
+test('hovering a row never scrolls the list; moving the cursor with keys still does', () => {
+  const h = panelHarness();
+  let scrolled = 0;
+  h.root.ensureVisible = () => { scrolled++; };
+  h.root.section = 'settings';
+  h.root.hoverCursor('mode', -1);
+  h.root.followCursor({});
+  assert.equal(scrolled, 0, 'the pointer put the cursor there');
+  h.root.moveCursor(1);
+  h.root.followCursor({});
+  assert.equal(scrolled, 1, 'a key moved it');
+  // Every hover handler goes through hoverCursor, every row through followCursor.
+  for (const line of panel.split('\n'))
+    if (/onEntered|onHovered|hovered\)/.test(line)) assert.doesNotMatch(line, /root\.setCursor\(/, line.trim());
+  assert.doesNotMatch(panel, /onHasCursorChanged: if \(hasCursor\) root\.ensureVisible\(/);
+});
+
+test('every panel dropdown is ChoiceDropdown: hover highlights without scrolling, a wheel notch moves three rows', () => {
+  assert.doesNotMatch(panel, /^\s*Dropdown \{/m, 'no kit Dropdown, whose hover scrolls its list');
+  const dd = read('ChoiceDropdown.qml');
+  assert.match(dd, /onEntered: optionList\.active = parent\.index/);
+  assert.doesNotMatch(dd, /currentIndex = /, 'the ListView currentIndex (which scrolls) is never driven');
+  assert.match(dd, /positionViewAtIndex\(active, ListView\.Contain\)/, 'only key steps scroll');
+  assert.match(dd, /WheelHandler \{[\s\S]*Model\.wheelContentY\([\s\S]*\* 3, event\.phase\)/);
+  assert.match(panel, /Style\.spacing\.popupRowHeight \* 3, event\.phase\);/, 'the panel body passes the scroll phase too');
+  assert.match(dd, /return Model\.sanitize\(value, Model\.OPTION_LABEL_MAX\)/, 'an unlisted value is shown sanitized');
+});
+
+test('Replace has two fields: what you say, then what is written; Enter in the first moves on', () => {
+  const h = panelHarness();
+  const written = field();
+  h.root.writtenField = written;
+  h.root.wordFilter = 'replace';
+  h.root.wordsField.text = 'code mucks';
+  h.root.addWord();
+  assert.equal(written.focused, 1, 'focus moves to the second field');
+  assert.equal(h.requests.length, 0);
+  written.text = 'Codemux';
+  h.root.addWord();
+  same(h.requests.pop(), {op: 'dict.upsert', from: 'code mucks', to: 'Codemux', category: 'Replacement'});
+  assert.equal(h.root.wordsField.text, '');
+  assert.equal(written.text, '');
+  // The arrow form still works from the first field.
+  h.root.wordsField.text = 'slash release -> /release';
+  h.root.addWord();
+  same(h.requests.pop(), {op: 'dict.upsert', from: 'slash release', to: '/release', category: 'Replacement'});
+  assert.match(panel, /placeholderText: root\.replaceMode \? "When you say…"/);
+  assert.match(panel, /placeholderText: "Write instead…"/);
+});
+
+test('a confirmation opening under the pointer keeps Cancel selected; a later hover can select', () => {
+  const h = panelHarness();
+  h.root.ask('history.clear', {}, 'Delete all?', 'Delete all');
+  const t0 = h.root.confirmOpenedAt;
+  assert.equal(h.root.confirmation.selectedIndex, 0);
+  assert.equal(h.root.hoverHijack(t0 + 104), true, 'the dialog appeared under the pointer (measured 104 ms): not a choice');
+  assert.equal(h.root.hoverHijack(t0 + 2000), false, 'a later hover is a real choice');
+  const c = panel.slice(panel.indexOf('target: confirmation'));
+  assert.match(c, /function onSelectedIndexChanged\(\) \{[\s\S]*!root\.confirmKeyChoice && root\.hoverHijack\(Date\.now\(\)\)\)\s*confirmation\.selectedIndex = 0;/);
+});
+
+test('a fast Right then Enter in a confirmation still confirms: key choices are never reverted', () => {
+  const h = panelHarness();
+  const seen = [];
+  const src = panel.slice(panel.indexOf('function onSelectedIndexChanged()'));
+  const revert = vm.runInContext('(' + functionSource(src, 0) + ')', vm.createContext(h.root));
+  // The kit dialog's handleKey, as shipped: Right toggles the selection, Enter acts on it.
+  h.root.confirmation.handleKey = function(event) {
+    if (event.key === 'Right') { this.selectedIndex = this.selectedIndex === 0 ? 1 : 0; revert(); }
+    else if (event.key === 'Enter') seen.push(this.selectedIndex === 0 ? 'canceled' : 'confirmed');
+  };
+  h.root.ask('history.clear', {}, 'Delete all?', 'Delete all');
+  h.root.handleKey({key: 'Right', modifiers: 0, accepted: false});
+  assert.equal(h.root.confirmation.selectedIndex, 1, 'not reverted, right after opening');
+  h.root.handleKey({key: 'Enter', modifiers: 0, accepted: false});
+  assert.deepEqual(seen, ['confirmed']);
+  assert.equal(h.root.confirmKeyChoice, false);
+  // A hover selection at the same moment is still reverted.
+  h.root.confirmation.selectedIndex = 1; revert();
+  assert.equal(h.root.confirmation.selectedIndex, 0);
 });
 
 test('expanded History renders the whole sanitized transcript, Learn everywhere lists every planned file', () => {

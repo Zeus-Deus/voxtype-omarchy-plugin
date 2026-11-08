@@ -450,7 +450,7 @@ test('the remote API key is never rendered or requested; only its presence and a
 });
 
 test('the panel is built from the shipped kit with no hard-coded colours, fonts or pixel sizes', () => {
-  const code = stripComments(panel + widget + editField + read('VoxtypeIcon.qml'));
+  const code = stripComments(panel + widget + editField + read('VoxtypeIcon.qml') + read('ChoiceDropdown.qml'));
   assert.doesNotMatch(code, /"#[0-9a-fA-F]{3,8}"/);
   assert.doesNotMatch(code, /font\.family: "/);
   assert.doesNotMatch(code, /font\.pixelSize: \d/);
@@ -460,7 +460,7 @@ test('the panel is built from the shipped kit with no hard-coded colours, fonts 
   // Use Commons.Color.muted / bar.muted instead.
   assert.doesNotMatch(code, /Qt\.(darker|lighter|tint)\s*\(/, 'derive muted from the theme token, not arithmetic');
   assert.match(panel, /readonly property color muted: bar && bar\.muted \? bar\.muted : Commons\.Color\.muted/);
-  for (const kit of ['KeyboardPanel', 'PanelKeyCatcher', 'PanelHero', 'ButtonGroup', 'PanelSectionHeader', 'PanelSeparator', 'Toggle', 'Dropdown', 'PanelSlider', 'Button', 'PanelActionButton', 'CursorSurface', 'ConfirmDialog', 'Flickable'])
+  for (const kit of ['KeyboardPanel', 'PanelKeyCatcher', 'PanelHero', 'ButtonGroup', 'PanelSectionHeader', 'PanelSeparator', 'Toggle', 'ChoiceDropdown', 'PanelSlider', 'Button', 'PanelActionButton', 'CursorSurface', 'ConfirmDialog', 'Flickable'])
     assert.match(panel, new RegExp('\\b' + kit + ' \\{'), kit);
   assert.match(panel, /bar \? bar\.foreground : Commons\.Color\.foreground/);
 });
@@ -469,7 +469,7 @@ test('theme colours are module-qualified (Qt 6.12 QtQuick Color shadows qs.Commo
   // Qt 6.12 added a built-in QtQuick `Color` singleton. In a file importing
   // QtQuick a bare `Color.accent` resolves to it, every theme colour is
   // undefined and text renders black. Same fix as omarchy #14553.
-  for (const name of ['BarWidget.qml', 'Panel.qml', 'Service.qml', 'VoxtypeIcon.qml', 'EditField.qml']) {
+  for (const name of ['BarWidget.qml', 'Panel.qml', 'Service.qml', 'VoxtypeIcon.qml', 'EditField.qml', 'ChoiceDropdown.qml']) {
     const code = read(name).split('\n').filter(l => !/^\s*\/\//.test(l)).join('\n');
     assert.doesNotMatch(code, /(^|[^.A-Za-z0-9_"'])Color\./m, `${name} uses an unqualified Color.`);
     if (/Commons\.Color\./.test(code))
