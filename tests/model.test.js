@@ -591,3 +591,37 @@ test('a failure is one short human line: plain place, message only when short, n
   assert.ok(!/…/.test(Model.healthLine({failures: [{where: 'archive', msg: long}]})), 'nothing is cut with an ellipsis');
   assert.equal(Model.shortDetail('a\u202eb', 10), 'ab');
 });
+
+test('learnNotice: a pair voxtype-tui skipped (rejected before) is not reported as a suggestion', () => {
+  const pair = {heard: 'omashi', written: 'Omarchy'};
+  assert.equal(Model.learnNotice({applied: [], candidates: [Object.assign({kind: 'sounds_like'}, pair)], skipped: [Object.assign({reason: 'you rejected this before'}, pair)]}),
+    'Not learned: you rejected this before');
+  assert.equal(Model.learnNotice({applied: [], candidates: [Object.assign({kind: 'spelling'}, pair)], skipped: [Object.assign({reason: 'already one of your own words'}, pair)]}),
+    'Not learned: already one of your own words');
+  // A candidate the reply neither applied nor skipped is still a suggestion.
+  assert.equal(Model.learnNotice({applied: [], candidates: [pair, {heard: 'x', written: 'Y'}], skipped: [Object.assign({reason: 'you rejected this before'}, pair)]}),
+    'Suggested x → Y · review it in Words');
+  assert.equal(Model.learnNotice({applied: [], candidates: qtList(pair), skipped: qtList(Object.assign({reason: 'you rejected this before'}, pair))}),
+    'Not learned: you rejected this before', 'QML lists are not Arrays');
+});
+
+test('historyDetailText: the whole transcript, sanitized, up to anything the bridge can send', () => {
+  const long = 'word '.repeat(600) + 'END';
+  assert.equal(long.length, 3003);
+  const shown = Model.historyDetailText({final: long});
+  assert.ok(shown.endsWith('END'), 'a 3,000-character dictation is shown in full');
+  assert.equal(shown, Model.sanitize(long, 1e9));
+  assert.equal(Model.historyDetailText({raw: 'a\u202eb\u0007c'}), 'abc', 'still sanitized');
+  const bridge = fs.readFileSync(path.join(__dirname, '..', 'bridge.py'), 'utf8');
+  const cap = Number(bridge.match(/^HISTORY_RECORD_MAX_BYTES = ([\d_]+)/m)[1].replace(/_/g, ''));
+  assert.ok(Model.HISTORY_DETAIL_MAX_CHARS >= cap, 'no record the bridge returns whole is cut in the panel');
+});
+
+test('everywhereFiles: every planned file, sanitized, from a QML list too', () => {
+  const files = Array.from({length: 12}, (_, i) => ({action: 'add', path: '/etc/x' + i + '\u202e.json'}));
+  const rows = Model.everywhereFiles({files});
+  assert.equal(rows.length, 12, 'not just the first eight');
+  assert.equal(rows[11].text, '· add  /etc/x11.json');
+  assert.equal(Model.everywhereFiles({files: qtList(...files)}).length, 12);
+  same(Model.everywhereFiles(null), []);
+});

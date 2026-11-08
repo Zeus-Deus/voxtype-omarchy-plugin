@@ -253,7 +253,10 @@ the panel. A click outside the panel still closes it outright.
    hotkey mode (Voxtype's own hotkey); while dictating: indicator, sounds, other audio (pause / lower);
    text: insert by, spoken punctuation, filler words; system: start at login
    (`daemon.set_login`); history & usage: count usage, save history, keep for
-   (7 / 30 / 90 / 365 days / forever), archive (folder via the zenity
+   (7 / 30 / 90 / 365 days / forever; ‹ › only preview, the value the user
+   settles on is saved after a pause, and a shorter one first asks, Cancel
+   selected, saying how many dictations it deletes when the whole history is
+   loaded), archive (folder via the zenity
    directory chooser, fixed argv); learning: learn from corrections, Learn
    everywhere (a card that previews exactly which files it writes and that it
    needs a re-login; nothing is written until Turn on). Drill-ins:

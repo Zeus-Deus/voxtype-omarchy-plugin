@@ -104,6 +104,11 @@ Panel {
     property var fixField: null
     property bool historyEnabled: true
     property var historyKeepDays: 30
+    // Keep for: ←/→ only preview a value; keepTimer saves the one the user
+    // settles on (a shorter one after a confirmation), so cycling past
+    // "1 week" on the way to "forever" never prunes anything.
+    property bool keepPending: false
+    property var keepPendingDays: null
 
     readonly property var vocabulary: snapshot.vocabulary || []
     readonly property var replacements: snapshot.replacements || []
@@ -374,6 +379,9 @@ Panel {
             openPopups = 0;
             pasteTarget = null;
             service.cancelPaste();
+            // An unconfirmed Keep for value is dropped, never saved unseen.
+            keepTimer.stop();
+            keepPending = false;
             testField.text = "";
             previewOutput = "";
             wordsField.text = "";
@@ -706,8 +714,27 @@ Panel {
         else if (key === "output_mode") setSetting("output.mode", Model.cycleValue(Model.OUTPUT_MODE_OPTIONS, String(Model.settingOr(config, "output.mode")), d));
         else if (key === "indicator") writeSettings(Model.indicatorWrites(Model.cycleValue(Model.INDICATOR_OPTIONS, Model.indicatorValue(config), d)));
         else if (key === "other_audio") writeSettings(Model.otherAudioWrites(Model.cycleValue(Model.OTHER_AUDIO_OPTIONS, Model.otherAudioValue(config), d)));
-        else if (key === "keep") setFeature("history", "keep_days", Model.cycleValue(Model.KEEP_OPTIONS, featureValue("history", "keep_days", 30), d));
+        else if (key === "keep") stepKeep(d);
         else activateSimple(key);
+    }
+    function keepShown() { return keepPending ? keepPendingDays : featureValue("history", "keep_days", 30) }
+    function stepKeep(d) {
+        if (locked || !caps.features || confirmation.opened) return;
+        var next = Model.cycleValue(Model.KEEP_OPTIONS, keepShown(), d);
+        keepPendingDays = next;
+        keepPending = next !== featureValue("history", "keep_days", 30);
+        if (keepPending) keepTimer.restart(); else keepTimer.stop();
+    }
+    function commitKeep() {
+        keepTimer.stop();
+        if (!keepPending || locked) { keepPending = false; return; }
+        var days = keepPendingDays;
+        var saved = featureValue("history", "keep_days", 30);
+        if (days === saved) { keepPending = false; return; }
+        if (!Model.keepIsShorter(saved, days)) { keepPending = false; setFeature("history", "keep_days", days); return; }
+        // Stays pending (the row keeps showing it) until Cancel or confirm.
+        ask("features.set", {patch: {history: {keep_days: days}}},
+            Model.keepConfirmMessage(days, historyList, historyLoaded && !historyNext, Date.now()), "Delete older");
     }
     function activateSimple(key) {
         if (locked) return;
@@ -776,6 +803,7 @@ Panel {
         var payload = confirmPayload;
         confirmAction = "";
         confirmPayload = null;
+        keepPending = false;
         if (action === "import.apply") {
             // accept_dangerous mirrors the confirmation the user just read.
             // With no dangerous rows it is false, so the bridge's own gate
@@ -1287,6 +1315,7 @@ Panel {
     }
     Timer { id: noticeTimer; interval: 2600; onTriggered: root.notice = "" }
     Timer { id: previewDebounce; interval: 350; onTriggered: root.previewPhrase() }
+    Timer { id: keepTimer; interval: 1200; onTriggered: root.commitKeep() }
 
     KeyboardPanel {
         id: panel
@@ -2073,7 +2102,7 @@ Panel {
                                 SettingsGroup { title: "HISTORY & USAGE" }
                                 SimpleRow { key: "usage"; label: "Count usage"; kind: "toggle"; checked: root.featureValue("usage", "enabled", true) === true; available: root.featureOk("usage"); reason: root.featureReason("usage") }
                                 SimpleRow { key: "history"; label: "Save history"; kind: "toggle"; checked: root.featureValue("history", "enabled", true) === true; available: root.featureOk("history"); reason: root.featureReason("history") }
-                                SimpleRow { key: "keep"; label: "Keep for"; kind: "cycle"; value: Model.keepLabel(root.featureValue("history", "keep_days", 30)); available: root.featureOk("history"); reason: root.featureReason("history") }
+                                SimpleRow { key: "keep"; label: "Keep for"; kind: "cycle"; value: Model.keepLabel(root.keepShown()); available: root.featureOk("history"); reason: root.featureReason("history") }
                                 SimpleRow { key: "archive"; label: "Archive (your dataset)"; kind: "toggle"; checked: root.archiveOn; available: root.featureOk("archive"); reason: root.featureReason("archive") }
                                 SimpleRow { key: "archive.dir"; visible: root.archiveOn; label: "   Folder"; kind: "drill"; value: Model.sanitize(root.featureValue("archive", "dir", null) || "~/Documents/Voxtype", 48) }
                                 SimpleRow { key: "archive.audio"; visible: root.archiveOn; label: "   Save audio"; kind: "toggle"; hint: "separate recording of your mic"; checked: root.featureValue("archive", "save_audio", true) === true }
@@ -2625,7 +2654,7 @@ Panel {
                 selectedIndex: 0
                 foreground: root.foreground
                 fontFamily: root.fontFamily
-                onCanceled: { opened = false; root.confirmAction = ""; root.confirmPayload = null; root.importAcceptDangerous = false; root.importReview = ""; keyCatcher.forceActiveFocus() }
+                onCanceled: { opened = false; root.confirmAction = ""; root.confirmPayload = null; root.importAcceptDangerous = false; root.importReview = ""; root.keepPending = false; keyCatcher.forceActiveFocus() }
                 onConfirmed: { opened = false; root.applyConfirmed(); keyCatcher.forceActiveFocus() }
             }
         }
@@ -3136,7 +3165,7 @@ Panel {
             Text {
                 width: parent.width; wrapMode: Text.WordWrap
                 textFormat: Text.PlainText
-                text: Model.sanitize(Model.recordText(detail.record), 2000)
+                text: Model.historyDetailText(detail.record)
                 color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.subtitle
             }
             // The bridge shortened a dictation too large for one response.
@@ -3286,11 +3315,11 @@ Panel {
                 color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body
             }
             Repeater {
-                model: everywhere.preview && everywhere.preview.files ? everywhere.preview.files.slice(0, 8) : []
+                model: Model.everywhereFiles(everywhere.preview)
                 delegate: Text {
                     required property var modelData
                     width: everyColumn.width; wrapMode: Text.WrapAnywhere; textFormat: Text.PlainText
-                    text: "· " + Model.sanitize(modelData.action, 20) + "  " + Model.sanitize(modelData.path, 120)
+                    text: modelData.text
                     color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.caption
                 }
             }

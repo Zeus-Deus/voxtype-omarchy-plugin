@@ -66,7 +66,7 @@ function panelHarness(overrides) {
     exportForm: {y: 640, height: 120, visible: false, mapToItem() { return {x: 0, y: this.y}; }},
     importCard: {y: 700, height: 150, visible: false, mapToItem() { return {x: 0, y: this.y}; }},
     settingsForm: {controlFor() { return null; }},
-    noticeTimer: timer(), previewDebounce: timer(), statusPoll: timer(),
+    noticeTimer: timer(), previewDebounce: timer(), statusPoll: timer(), keepTimer: timer(),
     Style: {space: n => n},
     Qt: {callLater: cb => deferred.push(cb)},
     service: {
@@ -77,6 +77,7 @@ function panelHarness(overrides) {
       cancelPick() { this.cancelled = (this.cancelled || 0) + 1; this.picking = false; },
       toggleRecord() { return true; }, download() { return true; }, launchGpuSetup() {}, cancelDownload() {},
       copy(text) { copies.push(text); return true; },
+      cancelPaste() {},
     },
   }, overrides || {});
   // Plain `property <type> name: <literal>` declarations start at their QML
@@ -200,7 +201,7 @@ test('every row text binding for bridge strings goes through Model.sanitize', ()
   assert.match(panel, /text: Model\.sanitize\(modelRow\.modelData\.name, 120\)/);
   // History rows, the expanded text, the raw-vs-final words and Fix tokens.
   assert.match(panel, /text: Model\.sanitize\(line\.item\.text, 200\)/);
-  assert.match(panel, /text: Model\.sanitize\(Model\.recordText\(detail\.record\), 2000\)/);
+  assert.match(panel, /text: Model\.historyDetailText\(detail\.record\)/);
   assert.match(panel, /text: Model\.sanitize\(modelData\.raw, 40\)/);
   assert.doesNotMatch(panel, /text: (wordRow\.word\.written|line\.item\.text|modelRow\.modelData\.name|modelData\.raw)[;\s]/);
   assert.doesNotMatch(panel, /text: wordRow\.word\.heard[;\n]/);
@@ -1304,4 +1305,86 @@ test('Home says LAST 12 MONTHS and the Usage hour chart has a 00 / 12 / 23 axis'
   assert.doesNotMatch(panel, /"THIS YEAR"/);
   const axis = panel.slice(panel.indexOf('id: hourAxis'), panel.indexOf('text: hourRow.bars.busiest'));
   for (const t of ['"00"', '"12"', '"23"']) assert.ok(axis.includes('text: ' + t), t);
+});
+
+// ---- Keep for: cycling previews, only the settled value is saved ----------
+
+function keepHarness(keepDays, history) {
+  const h = panelHarness();
+  h.root.status = Object.assign({}, h.root.status, {capabilities: {features: true, history: true}});
+  h.root.features = {features: {history: {enabled: true, keep_days: keepDays}}, available: {history: true}, reasons: {}};
+  h.root.section = 'settings';
+  if (history) { h.root.historyList = history; h.root.historyLoaded = true; h.root.historyNext = null; }
+  return h;
+}
+const same = (actual, expected, message) => assert.deepEqual(JSON.parse(JSON.stringify(actual)), expected, message);
+const keepWrites = h => h.requests.filter(r => r.op === 'features.set');
+const keepRowValue = h => h.setInside(panel.match(/SimpleRow \{ key: "keep"; label: "Keep for"; kind: "cycle"; value: ([^;]+);/)[1]);
+
+test('Keep for: cycling through 1 week to forever saves only forever, never the values passed on the way', () => {
+  const h = keepHarness(30);
+  h.root.cycleSimple('keep', -1);
+  assert.equal(keepRowValue(h), '1 week', 'the row previews the step');
+  h.root.cycleSimple('keep', -1);
+  assert.equal(keepRowValue(h), 'forever');
+  assert.equal(keepWrites(h).length, 0, 'no intermediate value is saved, so 1 week never prunes anything');
+  assert.equal(h.root.keepTimer.running, true, 'the settled value is committed after a pause');
+  h.root.commitKeep();
+  assert.equal(h.root.confirmation.opened, false, 'keeping longer needs no confirmation');
+  same(keepWrites(h).map(r => r.patch), [{history: {keep_days: null}}]);
+});
+
+test('Keep for: a shorter retention asks first, Cancel selected, and says how many dictations it deletes', () => {
+  const day = 86400000, now = Date.now();
+  const h = keepHarness(30, [
+    {id: 'new', ts: new Date(now - 2 * day).toISOString(), final: 'recent'},
+    {id: 'old', ts: new Date(now - 20 * day).toISOString(), final: 'twenty days ago'},
+  ]);
+  h.root.cycleSimple('keep', -1);
+  h.root.commitKeep();
+  assert.equal(keepWrites(h).length, 0, 'nothing is saved before the user confirms');
+  assert.equal(h.root.confirmation.opened, true);
+  assert.equal(h.root.confirmation.selectedIndex, 0, 'Cancel is the default');
+  assert.match(h.root.confirmation.message, /1 week/);
+  assert.match(h.root.confirmation.message, /1 dictation older than 1 week will be deleted/);
+  // Cancel: nothing written, the row shows the saved value again.
+  h.root.confirmation.opened = false;
+  handler(panel.slice(panel.indexOf('id: confirmation')), 'onCanceled', vm.createContext(h.root)).call(h.root.confirmation);
+  assert.equal(keepWrites(h).length, 0);
+  assert.equal(keepRowValue(h), '1 month');
+  // Again, and confirm: exactly the settled value is saved.
+  h.root.cycleSimple('keep', -1);
+  h.root.commitKeep();
+  h.root.applyConfirmed();
+  same(keepWrites(h).map(r => r.patch), [{history: {keep_days: 7}}]);
+});
+
+test('Keep for: with history not fully loaded the confirmation says plainly that older dictations are deleted', () => {
+  const h = keepHarness(null);
+  h.root.historyLoaded = true; h.root.historyNext = 'more-id';
+  h.root.cycleSimple('keep', 1);  // forever → 1 week
+  h.root.commitKeep();
+  assert.equal(h.root.confirmation.opened, true);
+  assert.equal(h.root.confirmation.selectedIndex, 0);
+  assert.match(h.root.confirmation.message, /Dictations older than 1 week will be deleted/);
+  assert.equal(keepWrites(h).length, 0);
+});
+
+test('Keep for: closing the panel drops an unconfirmed pending value', () => {
+  const h = keepHarness(30);
+  h.root.cycleSimple('keep', -1);
+  h.root.controller.open = false;
+  handler(panel, 'onOpenedChanged', vm.createContext(h.root))();
+  assert.equal(h.root.keepTimer.running, false);
+  h.root.commitKeep();
+  assert.equal(keepWrites(h).length, 0);
+  assert.equal(h.root.confirmation.opened, false);
+});
+
+test('expanded History renders the whole sanitized transcript, Learn everywhere lists every planned file', () => {
+  assert.match(panel, /text: Model\.historyDetailText\(detail\.record\)/);
+  assert.doesNotMatch(panel, /Model\.recordText\(detail\.record\), 2000\)/);
+  const card = panel.slice(panel.indexOf('component EverywhereCard'));
+  assert.match(card, /model: Model\.everywhereFiles\(everywhere\.preview\)/);
+  assert.doesNotMatch(card, /slice\(0, 8\)/);
 });

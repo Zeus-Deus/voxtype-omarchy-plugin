@@ -998,6 +998,11 @@ function dayLabel(d, now) {
     return d.getDate() + " " + months[d.getMonth()] + (d.getFullYear() !== now.getFullYear() ? " " + d.getFullYear() : "");
 }
 
+// The expanded History text: the whole transcript, sanitized. The bridge
+// already caps a record at HISTORY_RECORD_MAX_BYTES, so this ceiling never
+// cuts a record it sent whole; it only bounds a misbehaving reply.
+var HISTORY_DETAIL_MAX_CHARS = 160000;
+function historyDetailText(rec) { return sanitize(recordText(rec), HISTORY_DETAIL_MAX_CHARS); }
 function recordText(rec) { return String(rec && (rec.final !== undefined && rec.final !== null ? rec.final : rec.raw) || ""); }
 function wordCount(text) { var t = String(text || "").trim(); return t === "" ? 0 : t.split(/\s+/).length; }
 
@@ -1059,6 +1064,28 @@ var KEEP_OPTIONS = [{value: 7, label: "1 week"}, {value: 30, label: "1 month"}, 
 function keepLabel(days) {
     for (var i = 0; i < KEEP_OPTIONS.length; i++) if (KEEP_OPTIONS[i].value === (days === undefined ? 30 : days)) return KEEP_OPTIONS[i].label;
     return days + " days";
+}
+
+// Keep for: a shorter retention deletes history (voxtype-tui prunes on its
+// next read), so the panel confirms it. null = forever.
+function keepIsShorter(fromDays, toDays) {
+    if (toDays === null || toDays === undefined) return false;
+    return fromDays === null || fromDays === undefined ? true : toDays < fromDays;
+}
+
+// The confirmation for a shorter retention. With the whole history loaded the
+// number of dictations it deletes is known; otherwise it says so plainly.
+function keepConfirmMessage(toDays, records, complete, nowMs) {
+    var label = keepLabel(toDays);
+    var head = "Keep history for " + label + "?\n";
+    if (!complete) return head + "Dictations older than " + label + " will be deleted. This cannot be undone.";
+    var cutoff = nowMs - toDays * 86400000, n = 0, list = toList(records);
+    for (var i = 0; i < list.length; i++) {
+        var d = recordDate(list[i]);
+        if (d && d.getTime() < cutoff) n++;
+    }
+    if (n === 0) return head + "Nothing is older than " + label + " yet; older dictations will be deleted from now on.";
+    return head + n + (n === 1 ? " dictation" : " dictations") + " older than " + label + " will be deleted. This cannot be undone.";
 }
 
 function retentionLine(enabled, keepDays, archive) {
@@ -1463,9 +1490,15 @@ function findRecord(items, id) {
 // word …"), so the user knows to pick "replace" or leave it.
 function learnNotice(result) {
     var r = result || {};
-    if ((r.applied || []).length) return "Learned " + learnSummary(r.applied);
-    if ((r.candidates || []).length) return "Suggested " + learnSummary(r.candidates) + " · review it in Words";
-    var skipped = (r.skipped || [])[0];
+    var applied = toList(r.applied), skippedList = toList(r.skipped);
+    if (applied.length) return "Learned " + learnSummary(applied);
+    // voxtype-tui lists a pair it then skipped (rejected before, already one
+    // of your words) among the candidates too; only the rest are suggestions.
+    var skippedKeys = {};
+    for (var s = 0; s < skippedList.length; s++) if (skippedList[s]) skippedKeys[String(skippedList[s].heard) + "\u0000" + String(skippedList[s].written)] = true;
+    var suggested = toList(r.candidates).filter(function(c) { return c && !skippedKeys[String(c.heard) + "\u0000" + String(c.written)]; });
+    if (suggested.length) return "Suggested " + learnSummary(suggested) + " · review it in Words";
+    var skipped = skippedList[0];
     var why = skipped && skipped.reason ? skipped.reason : r.reason;
     if (why) return "Not learned: " + sanitize(why, 70);
     return "Nothing new to learn from that";
@@ -1485,4 +1518,16 @@ var SIMPLE_PATHS = {language: "whisper.language", mode: "hotkey.mode", sounds: "
 function simpleSettingPath(key, modelPath) {
     if (key === "model") return String(modelPath || "");
     return Object.prototype.hasOwnProperty.call(SIMPLE_PATHS, key) ? SIMPLE_PATHS[key] : "";
+}
+
+// Learn everywhere: one row per planned file, every one of them (the card
+// sits in the scrolling panel body), sanitized for display.
+function everywhereFiles(preview) {
+    var files = toList(preview && preview.files);
+    var out = [];
+    for (var i = 0; i < files.length; i++) {
+        var f = files[i] || {};
+        out.push({text: "· " + sanitize(f.action, 20) + "  " + sanitize(f.path, 240)});
+    }
+    return out;
 }
