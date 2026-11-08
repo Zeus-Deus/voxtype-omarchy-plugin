@@ -802,14 +802,21 @@ function sanitizeMessage(text, max) {
     return s.length > lim ? s.slice(0, lim - 1) + "…" : s;
 }
 
-// Wheel scrolling for the panel body. Qt's Flickable turns each notch into a
-// decelerating flick, which reads as sluggish next to GTK and browsers; this
-// steps contentY directly. Touchpads report pixelDelta and are passed
-// through 1:1; a mouse wheel notch (angleDelta 120) moves `stepPx`.
-function wheelContentY(contentY, contentHeight, viewHeight, pixelDeltaY, angleDeltaY, stepPx) {
+// Wheel scrolling for the panel body and dropdown lists. Qt's Flickable
+// turns each notch into a decelerating flick, which reads as sluggish next
+// to GTK and browsers; this steps contentY directly.
+//
+// Qt on Wayland reports a mouse wheel notch with BOTH angleDelta 120 and a
+// small pixelDelta (15 px), from a device it labels "touchpad"; trusting
+// pixelDelta made one notch move 15 px. A notch arrives outside any scroll
+// phase (`phase` NoScrollPhase = 0) and moves `stepPx` per 120 of angle.
+// A touchpad gesture has a phase (begin/update/end) and keeps its pixels.
+function wheelContentY(contentY, contentHeight, viewHeight, pixelDeltaY, angleDeltaY, stepPx, phase) {
     var maxY = Math.max(0, (contentHeight || 0) - (viewHeight || 0));
+    var notch = !phase && !!angleDeltaY;
     var delta;
-    if (pixelDeltaY) delta = -pixelDeltaY;
+    if (notch) delta = -(angleDeltaY / 120) * (stepPx || 0);
+    else if (pixelDeltaY) delta = -pixelDeltaY;
     else if (angleDeltaY) delta = -(angleDeltaY / 120) * (stepPx || 0);
     else return contentY || 0;
     return Math.max(0, Math.min(maxY, (contentY || 0) + delta));

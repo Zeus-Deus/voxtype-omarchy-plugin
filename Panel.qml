@@ -1470,7 +1470,7 @@ Panel {
                                 if (!body.interactive) return;
                                 body.contentY = Model.wheelContentY(body.contentY, body.contentHeight, body.height,
                                                                     event.pixelDelta.y, event.angleDelta.y,
-                                                                    Style.spacing.popupRowHeight * 3);
+                                                                    Style.spacing.popupRowHeight * 3, event.phase);
                                 event.accepted = true;
                             }
                         }

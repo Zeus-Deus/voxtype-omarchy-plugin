@@ -1466,7 +1466,8 @@ test('every panel dropdown is ChoiceDropdown: hover highlights without scrolling
   assert.match(dd, /onEntered: optionList\.active = parent\.index/);
   assert.doesNotMatch(dd, /currentIndex = /, 'the ListView currentIndex (which scrolls) is never driven');
   assert.match(dd, /positionViewAtIndex\(active, ListView\.Contain\)/, 'only key steps scroll');
-  assert.match(dd, /WheelHandler \{[\s\S]*Model\.wheelContentY\([\s\S]*\* 3\)/);
+  assert.match(dd, /WheelHandler \{[\s\S]*Model\.wheelContentY\([\s\S]*\* 3, event\.phase\)/);
+  assert.match(panel, /Style\.spacing\.popupRowHeight \* 3, event\.phase\);/, 'the panel body passes the scroll phase too');
   assert.match(dd, /return Model\.sanitize\(value, Model\.OPTION_LABEL_MAX\)/, 'an unlisted value is shown sanitized');
 });
 

@@ -200,7 +200,7 @@ Item {
             onWheel: function(event) {
               optionList.contentY = Model.wheelContentY(optionList.contentY, optionList.contentHeight, optionList.height,
                                                         event.pixelDelta.y, event.angleDelta.y,
-                                                        (root.popupRowHeight + Style.spacing.labelGap) * 3)
+                                                        (root.popupRowHeight + Style.spacing.labelGap) * 3, event.phase)
               event.accepted = true
             }
           }
