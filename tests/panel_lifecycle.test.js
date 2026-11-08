@@ -1493,6 +1493,17 @@ test('Replace has two fields: what you say, then what is written; Enter in the f
   assert.match(panel, /placeholderText: "Write instead…"/);
 });
 
+test('a confirmation opening under the pointer keeps Cancel selected; a later hover can select', () => {
+  const h = panelHarness();
+  h.root.ask('history.clear', {}, 'Delete all?', 'Delete all');
+  const t0 = h.root.confirmOpenedAt;
+  assert.equal(h.root.confirmation.selectedIndex, 0);
+  assert.equal(h.root.hoverHijack(t0 + 104), true, 'the dialog appeared under the pointer (measured 104 ms): not a choice');
+  assert.equal(h.root.hoverHijack(t0 + 2000), false, 'a later hover is a real choice');
+  const c = panel.slice(panel.indexOf('target: confirmation'));
+  assert.match(c, /function onSelectedIndexChanged\(\) \{[\s\S]*root\.hoverHijack\(Date\.now\(\)\)\)\s*confirmation\.selectedIndex = 0;/);
+});
+
 test('expanded History renders the whole sanitized transcript, Learn everywhere lists every planned file', () => {
   assert.match(panel, /text: Model\.historyDetailText\(detail\.record\)/);
   assert.doesNotMatch(panel, /Model\.recordText\(detail\.record\), 2000\)/);

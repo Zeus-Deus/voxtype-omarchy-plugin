@@ -113,6 +113,8 @@ Panel {
     signal openChoice(string key)
     // The last cursor move came from hovering (see hoverCursor).
     property bool cursorFromPointer: false
+    // When the last confirmation opened (see hoverHijack).
+    property real confirmOpenedAt: 0
 
     readonly property var vocabulary: snapshot.vocabulary || []
     readonly property var replacements: snapshot.replacements || []
@@ -820,9 +822,20 @@ Panel {
         // caps the assembled copy and keeps the panel's own literal "\n".
         confirmation.message = Model.sanitizeMessage(message, 600);
         confirmation.confirmText = confirmLabel;
+        confirmOpenedAt = Date.now();
         confirmation.selectedIndex = 0;
         confirmation.opened = true;
         keyCatcher.forceActiveFocus();
+    }
+    // The kit dialog selects a button on hover, and that fires when the dialog
+    // appears under a pointer that has not moved, e.g. right after clicking an
+    // option in a dropdown (measured: ~100 ms after opening). Enter would then
+    // confirm a destructive action the user never chose. A selection that
+    // soon after opening goes back to Cancel. The pointer position cannot
+    // tell the cases apart: while a dropdown list had the pointer, the panel
+    // saw no motion. Clicking a button still acts on that button.
+    function hoverHijack(nowMs) {
+        return nowMs - confirmOpenedAt < 600;
     }
     function deleteSelected() {
         if (page === "history") { deleteHistory(cursorHistoryItem()); return; }
@@ -1380,6 +1393,13 @@ Panel {
 
             // The mouse's back button steps out one level, like Esc. It takes
             // only that button, so clicks, hover and scrolling are unaffected.
+            Connections {
+                target: confirmation
+                function onSelectedIndexChanged() {
+                    if (confirmation.opened && confirmation.selectedIndex !== 0 && root.hoverHijack(Date.now()))
+                        confirmation.selectedIndex = 0;
+                }
+            }
             TapHandler {
                 acceptedButtons: Qt.BackButton
                 enabled: !root.keysBlocked
@@ -2043,7 +2063,7 @@ Panel {
                                 EmptyState {
                                     visible: root.wordsView.rows.length === 0
                                     glyph: "󰗊"
-                                    title: !root.loaded ? (service.busy ? "Loading your words…" : "Words unavailable") : (wordsField.text !== "" ? "Not in your words yet" : (root.wordFilter === "learned" ? "Nothing learned yet" : "No words yet"))
+                                    title: !root.loaded ? (service.busy ? "Loading your words…" : "Words unavailable") : (wordsField.text !== "" ? (root.replaceMode ? "No rule for this yet" : "Not in your words yet") : (root.wordFilter === "learned" ? "Nothing learned yet" : "No words yet"))
                                     hint: root.replaceMode ? (wordsField.text !== "" ? "Now type what to write instead, then press Enter" : "Type what you say, then what Voxtype should write:\n“slash release” → “/release”.") : wordsField.text !== "" ? "Press Enter to add “" + Model.sanitize(wordsField.text.trim(), 60) + "”" : (root.wordFilter === "learned" ? "Fix a word in History and it shows up here." : "Names and jargon to spell right, or “heard → written” rules:\n“slash release → /release”.")
                                 }
                                 Text {
