@@ -113,8 +113,10 @@ Panel {
     signal openChoice(string key)
     // The last cursor move came from hovering (see hoverCursor).
     property bool cursorFromPointer: false
-    // When the last confirmation opened (see hoverHijack).
+    // When the last confirmation opened (see hoverHijack), and whether the
+    // dialog's selection is being changed by a key right now.
     property real confirmOpenedAt: 0
+    property bool confirmKeyChoice: false
 
     readonly property var vocabulary: snapshot.vocabulary || []
     readonly property var replacements: snapshot.replacements || []
@@ -1087,7 +1089,10 @@ Panel {
     function handleKey(event) {
         cursorFromPointer = false;
         if (confirmation.opened) {
+            // A key choice is deliberate, however fast: hoverHijack leaves it.
+            confirmKeyChoice = true;
             confirmation.handleKey(event);
+            confirmKeyChoice = false;
             event.accepted = true;
             return;
         }
@@ -1396,7 +1401,7 @@ Panel {
             Connections {
                 target: confirmation
                 function onSelectedIndexChanged() {
-                    if (confirmation.opened && confirmation.selectedIndex !== 0 && root.hoverHijack(Date.now()))
+                    if (confirmation.opened && confirmation.selectedIndex !== 0 && !root.confirmKeyChoice && root.hoverHijack(Date.now()))
                         confirmation.selectedIndex = 0;
                 }
             }

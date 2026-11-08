@@ -1501,7 +1501,28 @@ test('a confirmation opening under the pointer keeps Cancel selected; a later ho
   assert.equal(h.root.hoverHijack(t0 + 104), true, 'the dialog appeared under the pointer (measured 104 ms): not a choice');
   assert.equal(h.root.hoverHijack(t0 + 2000), false, 'a later hover is a real choice');
   const c = panel.slice(panel.indexOf('target: confirmation'));
-  assert.match(c, /function onSelectedIndexChanged\(\) \{[\s\S]*root\.hoverHijack\(Date\.now\(\)\)\)\s*confirmation\.selectedIndex = 0;/);
+  assert.match(c, /function onSelectedIndexChanged\(\) \{[\s\S]*!root\.confirmKeyChoice && root\.hoverHijack\(Date\.now\(\)\)\)\s*confirmation\.selectedIndex = 0;/);
+});
+
+test('a fast Right then Enter in a confirmation still confirms: key choices are never reverted', () => {
+  const h = panelHarness();
+  const seen = [];
+  const src = panel.slice(panel.indexOf('function onSelectedIndexChanged()'));
+  const revert = vm.runInContext('(' + functionSource(src, 0) + ')', vm.createContext(h.root));
+  // The kit dialog's handleKey, as shipped: Right toggles the selection, Enter acts on it.
+  h.root.confirmation.handleKey = function(event) {
+    if (event.key === 'Right') { this.selectedIndex = this.selectedIndex === 0 ? 1 : 0; revert(); }
+    else if (event.key === 'Enter') seen.push(this.selectedIndex === 0 ? 'canceled' : 'confirmed');
+  };
+  h.root.ask('history.clear', {}, 'Delete all?', 'Delete all');
+  h.root.handleKey({key: 'Right', modifiers: 0, accepted: false});
+  assert.equal(h.root.confirmation.selectedIndex, 1, 'not reverted, right after opening');
+  h.root.handleKey({key: 'Enter', modifiers: 0, accepted: false});
+  assert.deepEqual(seen, ['confirmed']);
+  assert.equal(h.root.confirmKeyChoice, false);
+  // A hover selection at the same moment is still reverted.
+  h.root.confirmation.selectedIndex = 1; revert();
+  assert.equal(h.root.confirmation.selectedIndex, 0);
 });
 
 test('expanded History renders the whole sanitized transcript, Learn everywhere lists every planned file', () => {
