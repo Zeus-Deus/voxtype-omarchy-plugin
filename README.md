@@ -132,15 +132,17 @@ Plugins run unsandboxed inside `omarchy-shell`, so:
 An automated baseline scan will detect two capabilities in this plugin. Both are
 intentional and visible in the source:
 
-- **`privilege`** — one `sudo` reference, at `Service.qml:244`. It is a fixed
+- **`privilege`** — one `sudo` reference, at `Service.qml:248`. It is a fixed
   argv (`omarchy-launch-terminal sudo voxtype setup gpu --enable|--disable`)
   in which no element comes from user input or a config file. It is detached
   into your terminal so the credential is typed by you, to `sudo`, outside
   `omarchy-shell` entirely. There is no sudoers file, no `NOPASSWD` rule, and
   no password field anywhere in the plugin.
-- **`service-management`** — `systemctl --user start|stop|restart voxtype` and
-  a read-only `systemctl --user show voxtype`. The verb is chosen from a fixed
-  set in `bridge.py`; it is never taken from the request JSON. This is how the
+- **`service-management`** — `systemctl --user start|stop|restart voxtype`,
+  `systemctl --user enable|disable voxtype` for the **Start at login** switch
+  in Settings, and a read-only `systemctl --user show voxtype`. The verb is
+  chosen from a fixed set in `bridge.py` (enable or disable from a boolean);
+  it is never taken from the request JSON. This is how the
   panel starts, stops and restarts the voice daemon, which is the plugin's
   purpose. **Turn off / Turn on** is exactly `stop` / `start`; it does not
   enable, disable or mask the Voxtype service, so its start-at-login setting
@@ -150,6 +152,30 @@ intentional and visible in the source:
   Voxtype restart, keeping the old daemon's helper available until then.
   Its lifecycle follows Voxtype.
 
+Other fixed commands: a read-only `hyprctl binds -j` (to show your dictation
+shortcut on Home) and `zenity --file-selection` (the Import file chooser and,
+with `--directory`, the archive folder chooser).
+
+**What voxtype-tui 0.2 does for the Usage, History and learning switches.**
+These run in voxtype-tui, not in the shell, and the panel only flips the
+switches and shows the results:
+
+- It adds its own hook commands to Voxtype's `config.toml`
+  (`pre_recording_command`, `post_output_command` and the post-process
+  command), only for a switch that needs them and never over a hook you set
+  yourself. Each wired command does nothing if voxtype-tui is uninstalled.
+- After a dictation, its watcher reads the focused text field over the
+  accessibility bus (AT-SPI) for up to 30 seconds to see whether you corrected
+  a word. Password fields and password managers are skipped, and the watcher
+  log contains no text.
+- **Learn everywhere** is off by default. Before it changes anything, the
+  panel shows the exact files and lines: a new
+  `~/.config/environment.d/90-voxtype-tui-accessibility.conf` and a
+  `--force-renderer-accessibility` line in installed Chromium-family and
+  Electron flag files. Turning it off removes only those lines.
+- History is local text (`0600`), kept for the period you choose. The audio
+  and text archive is off by default and writes only to a folder you pick.
+
 There are no bundled binaries or installer scripts in this repository.
 Extra-model downloads and the digest-pinned CrispASR server build are managed
 by voxtype-tui 0.1.9 or newer, not by a plugin install hook. The bridge itself
@@ -157,7 +183,7 @@ runs as `/usr/bin/python3` against this repository; ordinary operations call
 binaries already installed on the system.
 
 **Missing-dependency install button.** When Voxtype or `voxtype-tui` is not
-installed, the locked panel offers an Install button (`Service.qml:255`). It
+installed, the locked panel offers an Install button (`Service.qml:256`). It
 opens Omarchy's own floating terminal
 (`omarchy-launch-floating-terminal-with-presentation`, the launcher Omarchy's
 first-run "Install Dictation" notification uses) with one of two fixed scripts
@@ -179,6 +205,13 @@ That removes the plugin and its bar widget. It does not touch Voxtype itself,
 your `config.toml`, your vocabulary or your dictionary rules — the plugin keeps
 no state of its own outside the shell's plugin settings (poll interval,
 right-click-records).
+
+History, usage counts and learned words belong to voxtype-tui and stay after
+the plugin is removed: **Clear all** in History deletes the dictations,
+**Reset all** in Words deletes learned words, and the usage counts live in
+`~/.local/share/voxtype-tui/usage.json`. Turn off Learn everywhere first if
+you turned it on. Uninstalling the `voxtype-tui` package removes the hook
+commands it added to Voxtype's config.
 
 ## Development
 
